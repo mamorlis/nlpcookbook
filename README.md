@@ -10,12 +10,13 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 75 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 90 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. 文字列処理と正規化](#1-文字列処理と正規化) (22)
 - [2. 日本語の形態素解析](#2-日本語の形態素解析) (19)
 - [3. 英語・多言語の前処理](#3-英語多言語の前処理) (20)
 - [4. サブワードとトークナイザ](#4-サブワードとトークナイザ) (14)
+- [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (15)
 
 ### 1. 文字列処理と正規化
 
@@ -119,6 +120,28 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 | 04-12 | [文ペアを 1 つの入力にまとめる](notebooks/04_subword/sentence_pair.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/04_subword/sentence_pair.ipynb) |
 | 04-13 | [トークン長の分布を調べて max_length を決める](notebooks/04_subword/token_length_dist.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/04_subword/token_length_dist.ipynb) |
 | 04-14 | [未知語 ([UNK]) がどれくらい出るか調べる](notebooks/04_subword/unk_rate.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/04_subword/unk_rate.ipynb) |
+
+### 5. コーパスの統計と可視化
+
+単語を数える、特徴語を見つける、分布を図にする。コーパスを手に入れたらまずやること。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 05-01 | [単語の頻度を数える](notebooks/05_corpus_statistics/word_freq.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/word_freq.ipynb) |
+| 05-02 | [Zipf の法則を確かめる (順位-頻度プロット)](notebooks/05_corpus_statistics/zipf.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/zipf.ipynb) |
+| 05-03 | [matplotlib で日本語を文字化けさせずに表示する](notebooks/05_corpus_statistics/matplotlib_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/matplotlib_ja.ipynb) |
+| 05-04 | [日本語のワードクラウドを作る](notebooks/05_corpus_statistics/wordcloud_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/wordcloud_ja.ipynb) |
+| 05-05 | [TF-IDF で文書ごとの特徴語を取り出す](notebooks/05_corpus_statistics/tfidf_keywords.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/tfidf_keywords.ipynb) |
+| 05-06 | [単語の共起を数えて PMI で結びつきの強さを測る](notebooks/05_corpus_statistics/pmi.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pmi.ipynb) |
+| 05-07 | [よく使われる言い回し (コロケーション) を抽出する](notebooks/05_corpus_statistics/collocations.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/collocations.ipynb) |
+| 05-08 | [キーワードの前後の文脈を一覧する (KWIC)](notebooks/05_corpus_statistics/kwic.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/kwic.ipynb) |
+| 05-09 | [語彙の豊富さを測る (TTR とその仲間)](notebooks/05_corpus_statistics/lexical_diversity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/lexical_diversity.ipynb) |
+| 05-10 | [n-gram 言語モデルを作ってパープレキシティを測り、文を生成する](notebooks/05_corpus_statistics/ngram_lm.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/ngram_lm.ipynb) |
+| 05-11 | [共起ネットワークを描く](notebooks/05_corpus_statistics/cooccurrence_network.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/cooccurrence_network.ipynb) |
+| 05-12 | [2 つのコーパスを比べて特徴語を見つける (対数尤度比)](notebooks/05_corpus_statistics/keyness.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/keyness.ipynb) |
+| 05-13 | [文の長さや文字数の基本統計をとる](notebooks/05_corpus_statistics/corpus_stats.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/corpus_stats.ipynb) |
+| 05-14 | [品詞の分布を調べる・比べる](notebooks/05_corpus_statistics/pos_distribution.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) |
+| 05-15 | [文字や単語のエントロピーを計算する](notebooks/05_corpus_statistics/entropy.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->
