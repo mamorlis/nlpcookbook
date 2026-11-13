@@ -228,7 +228,7 @@ SNS やウェブのテキストから URL や @メンションなどのノイズ
 ```python
 import re
 
-text = "新しい論文出ました！ https://example.com/paper?id=1 @komachi さんありがとう #NLP #自然言語処理 RT @foo: すごい"
+text = "新しい論文出ました！ https://example.com/paper?id=1 @hanako さんありがとう #NLP #自然言語処理 RT @foo: すごい"
 
 URL = re.compile(r"https?://[\w/:%#$&?()~.=+\-]+")
 MENTION = re.compile(r"@\w+:?")

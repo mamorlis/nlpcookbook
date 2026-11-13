@@ -173,7 +173,7 @@ def clean_outputs(nb: dict) -> None:
         cell["execution_count"] = count
         cell["metadata"] = {}
         outs = []
-        if "".join(cell["source"]).lstrip().startswith(("!pip", "%pip", "!apt")):
+        if "".join(cell["source"]).lstrip().startswith(("!pip", "%pip", "!apt", "!python -m spacy download")):
             cell["outputs"] = []  # インストールのログは残さない
             continue
         for o in cell.get("outputs", []):
@@ -214,12 +214,26 @@ def execute(r: Recipe, timeout: int) -> tuple[Recipe, dict | None, str]:
         try:
             client.execute()
         except Exception as e:  # noqa: BLE001
-            return r, None, str(e)[-3000:]
+            lines = ANSI_RE.sub("", str(e)).strip().splitlines()
+            return r, None, "\n".join(line[:300] for line in lines[-12:])
     out = json.loads(nbformat.writes(nb))
     clean_outputs(out)
     out["metadata"] = to_notebook(r)["metadata"]
     out["metadata"]["nlpcookbook"]["executed"] = True
     return r, out, ""
+
+
+def preinstall(recipes: list[Recipe]) -> None:
+    """並列実行中に pip が競合しないよう、必要なパッケージを先にまとめて入れておく。"""
+    import shlex
+    import subprocess
+
+    for line in sorted({ln.strip() for r in recipes for kind, src in r.cells if kind == "code"
+                        for ln in src.splitlines() if ln.startswith("!pip install")}):
+        res = subprocess.run([sys.executable, "-m", "pip", *shlex.split(line)[1:]],
+                             capture_output=True, text=True)
+        if res.returncode:
+            print(f"pip failed: {line}\n{res.stderr[-800:]}", flush=True)
 
 
 def dump(nb: dict, path: Path) -> None:
@@ -319,6 +333,7 @@ def main() -> None:
     failed = []
     if todo:
         print(f"running {len(todo)} recipes ...", flush=True)
+        preinstall(todo)
         with cf.ThreadPoolExecutor(args.j) as ex:
             for r, nb, err in ex.map(lambda r: execute(r, args.timeout), todo):
                 if nb is None:
