@@ -180,11 +180,7 @@ def clean_outputs(nb: dict) -> None:
             if o["output_type"] == "stream":
                 if o.get("name") == "stderr":
                     continue
-                text = ANSI_RE.sub("", "".join(o["text"]))
-                lines = text.split("\n")
-                if len(lines) > MAX_LINES:
-                    lines = lines[:MAX_LINES] + ["... (以下省略)"]
-                o["text"] = "\n".join(lines)
+                o["text"] = "".join(o["text"])
                 if outs and outs[-1]["output_type"] == "stream":
                     outs[-1]["text"] += o["text"]
                     continue
@@ -199,6 +195,14 @@ def clean_outputs(nb: dict) -> None:
                 if o["output_type"] == "execute_result":
                     o["execution_count"] = count
             outs.append(o)
+        for o in outs:
+            if o["output_type"] == "stream":
+                text = ANSI_RE.sub("", o["text"])
+                # \r で上書きされる進捗表示は、各行の最後の状態だけ残す
+                lines = [line.rstrip("\r").split("\r")[-1] for line in text.split("\n")]
+                if len(lines) > MAX_LINES:
+                    lines = lines[:MAX_LINES] + ["... (以下省略)"]
+                o["text"] = "\n".join(lines)
         cell["outputs"] = outs
     nb["metadata"].pop("widgets", None)
 
@@ -320,6 +324,9 @@ def main() -> None:
             code_new = [c for c in nb["cells"] if c["cell_type"] == "code"]
             for co, cn in zip(code_old, code_new):
                 cn["outputs"], cn["execution_count"] = co["outputs"], co["execution_count"]
+            meta = nb["metadata"]
+            clean_outputs(nb)
+            nb["metadata"] = meta
             nb["metadata"]["nlpcookbook"]["executed"] = True
         dump(nb, path)
 

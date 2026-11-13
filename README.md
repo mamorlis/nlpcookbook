@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 107 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 159 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. 文字列処理と正規化](#1-文字列処理と正規化) (22)
 - [2. 日本語の形態素解析](#2-日本語の形態素解析) (19)
@@ -18,6 +18,10 @@
 - [4. サブワードとトークナイザ](#4-サブワードとトークナイザ) (14)
 - [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (15)
 - [6. 構文解析と固有表現抽出](#6-構文解析と固有表現抽出) (17)
+- [7. 単語ベクトル](#7-単語ベクトル) (12)
+- [8. 文埋め込み・類似度・検索](#8-文埋め込み類似度検索) (16)
+- [9. テキスト分類](#9-テキスト分類) (16)
+- [10. 系列ラベリング](#10-系列ラベリング) (8)
 
 ### 1. 文字列処理と正規化
 
@@ -167,6 +171,86 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 | 06-15 | [解析結果を CoNLL-U 形式で保存・読み込みする](notebooks/06_parsing_ner/conllu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/conllu.ipynb) |
 | 06-16 | [spaCy で大量の文書を高速に処理する](notebooks/06_parsing_ner/spacy_pipe.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/spacy_pipe.ipynb) |
 | 06-17 | [依存距離と構文木の深さで文の複雑さを測る](notebooks/06_parsing_ner/dep_distance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/dep_distance.ipynb) |
+
+### 7. 単語ベクトル
+
+単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 07-01 | [word2vec を自分のコーパスで学習する](notebooks/07_word_vectors/word2vec_train.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/word2vec_train.ipynb) |
+| 07-02 | [学習済みの英語単語ベクトルを読み込んで類似語を調べる](notebooks/07_word_vectors/pretrained_vectors_en.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/pretrained_vectors_en.ipynb) |
+| 07-03 | [学習済みの日本語単語ベクトルを使う (chiVe)](notebooks/07_word_vectors/pretrained_vectors_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/pretrained_vectors_ja.ipynb) |
+| 07-04 | [単語ベクトルでアナロジー (王 − 男 + 女 = 女王) を解く](notebooks/07_word_vectors/analogy.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/analogy.ipynb) |
+| 07-05 | [fastText で未知語にもベクトルを与える](notebooks/07_word_vectors/fasttext_train.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/fasttext_train.ipynb) |
+| 07-06 | [単語ベクトルを 2 次元に落として可視化する](notebooks/07_word_vectors/word_vectors_viz.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/word_vectors_viz.ipynb) |
+| 07-07 | [単語ベクトルの平均で文ベクトルを作る](notebooks/07_word_vectors/avg_word_vectors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/avg_word_vectors.ipynb) |
+| 07-08 | [PPMI 行列の SVD で単語ベクトルを作る (カウントベース)](notebooks/07_word_vectors/ppmi_svd.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/ppmi_svd.ipynb) |
+| 07-09 | [Doc2Vec で文書ベクトルを学習する](notebooks/07_word_vectors/doc2vec.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/doc2vec.ipynb) |
+| 07-10 | [単語ベクトルに含まれるジェンダーバイアスを測る](notebooks/07_word_vectors/embedding_bias.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/embedding_bias.ipynb) |
+| 07-11 | [BERT から文脈に応じた単語ベクトルを取り出す](notebooks/07_word_vectors/contextual_word_vectors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/contextual_word_vectors.ipynb) |
+| 07-12 | [単語類似度データセットで単語ベクトルを評価する](notebooks/07_word_vectors/wordsim_eval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_word_vectors/wordsim_eval.ipynb) |
+
+### 8. 文埋め込み・類似度・検索
+
+文をベクトルにして類似度を測る、似た文書を探す、検索システムを組み立てる。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 08-01 | [文をベクトルにして意味の近さを測る (Sentence Transformers)](notebooks/08_similarity_search/sentence_embeddings.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/sentence_embeddings.ipynb) |
+| 08-02 | [埋め込みで意味検索 (セマンティックサーチ) をする](notebooks/08_similarity_search/semantic_search.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/semantic_search.ipynb) |
+| 08-03 | [FAISS で大量のベクトルから高速に近傍検索する](notebooks/08_similarity_search/faiss_index.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/faiss_index.ipynb) |
+| 08-04 | [BM25 で日本語のキーワード検索をする](notebooks/08_similarity_search/bm25_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/bm25_ja.ipynb) |
+| 08-05 | [キーワード検索と埋め込み検索を組み合わせる (ハイブリッド検索、RRF)](notebooks/08_similarity_search/hybrid_search.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/hybrid_search.ipynb) |
+| 08-06 | [クロスエンコーダで検索結果を並べ替える (リランキング)](notebooks/08_similarity_search/rerank.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/rerank.ipynb) |
+| 08-07 | [文をクラスタリングして話題ごとにまとめる](notebooks/08_similarity_search/sentence_clustering.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/sentence_clustering.ipynb) |
+| 08-08 | [重複・言い換えの文ペアを見つける](notebooks/08_similarity_search/paraphrase_mining.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/paraphrase_mining.ipynb) |
+| 08-09 | [編集距離とあいまい文字列マッチング (RapidFuzz)](notebooks/08_similarity_search/edit_distance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/edit_distance.ipynb) |
+| 08-10 | [TF-IDF とコサイン類似度で似た文書を探す](notebooks/08_similarity_search/tfidf_similarity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/tfidf_similarity.ipynb) |
+| 08-11 | [MinHash と LSH で大量文書からほぼ重複を見つける](notebooks/08_similarity_search/minhash_lsh.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/minhash_lsh.ipynb) |
+| 08-12 | [言語をまたいで意味の近い文を対応付ける (対訳文の抽出)](notebooks/08_similarity_search/cross_lingual_similarity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/cross_lingual_similarity.ipynb) |
+| 08-13 | [文埋め込みを 2 次元に可視化する (UMAP)](notebooks/08_similarity_search/embedding_umap.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/embedding_umap.ipynb) |
+| 08-14 | [文の意味的類似度 (STS) でモデルを評価する](notebooks/08_similarity_search/sts_eval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/sts_eval.ipynb) |
+| 08-15 | [埋め込みを量子化・次元削減して省メモリ化する](notebooks/08_similarity_search/embedding_quantization.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/embedding_quantization.ipynb) |
+| 08-16 | [巨大な辞書の語をテキストから一括で探す (Aho-Corasick)](notebooks/08_similarity_search/aho_corasick.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_similarity_search/aho_corasick.ipynb) |
+
+### 9. テキスト分類
+
+文書にラベルを付ける。古典的な TF-IDF から BERT のファインチューニング、ゼロショットまで。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 09-01 | [TF-IDF とロジスティック回帰で日本語のニュース記事を分類する](notebooks/09_classification/tfidf_logreg_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/tfidf_logreg_ja.ipynb) |
+| 09-02 | [分類結果を評価する (適合率・再現率・F1・混同行列)](notebooks/09_classification/classification_report.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/classification_report.ipynb) |
+| 09-03 | [分類に効いている単語を調べる (線形モデルの係数)](notebooks/09_classification/feature_importance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/feature_importance.ipynb) |
+| 09-04 | [複数の分類器を交差検証で比較する](notebooks/09_classification/compare_classifiers.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/compare_classifiers.ipynb) |
+| 09-05 | [文埋め込みを特徴量にして少ない学習データで分類する](notebooks/09_classification/embedding_classifier.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/embedding_classifier.ipynb) |
+| 09-06 | [ラベル付きデータなしで分類する (ゼロショット分類、NLI)](notebooks/09_classification/zero_shot_nli.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/zero_shot_nli.ipynb) |
+| 09-07 | [ラベルの説明文との類似度でゼロショット分類する](notebooks/09_classification/zero_shot_embedding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/zero_shot_embedding.ipynb) |
+| 09-08 | [日本語の感情分析 (ポジネガ判定) をする](notebooks/09_classification/sentiment_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/sentiment_ja.ipynb) |
+| 09-09 | [BERT をファインチューニングして文書分類する (Trainer)](notebooks/09_classification/bert_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/bert_finetune.ipynb) |
+| 09-10 | [クラスの偏ったデータを扱う (クラス重み・しきい値調整)](notebooks/09_classification/imbalanced.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/imbalanced.ipynb) |
+| 09-11 | [1 つの文書に複数のラベルを付ける (マルチラベル分類)](notebooks/09_classification/multilabel.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/multilabel.ipynb) |
+| 09-12 | [ハイパーパラメータをグリッドサーチで調整する](notebooks/09_classification/grid_search.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/grid_search.ipynb) |
+| 09-13 | [個々の予測の根拠を可視化する (LIME)](notebooks/09_classification/lime_explain.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/lime_explain.ipynb) |
+| 09-14 | [学習データを増やすと精度がどう変わるか調べる (学習曲線)](notebooks/09_classification/learning_curve.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/learning_curve.ipynb) |
+| 09-15 | [学習した分類器を保存・読み込みする](notebooks/09_classification/save_sklearn_model.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/save_sklearn_model.ipynb) |
+| 09-16 | [モデルが自信満々に間違えた事例を調べる (エラー分析)](notebooks/09_classification/error_analysis.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_classification/error_analysis.ipynb) |
+
+### 10. 系列ラベリング
+
+トークンごとにラベルを付ける。BIO タグの扱い、CRF、BERT による固有表現抽出の学習と評価。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 10-01 | [文字位置のアノテーションを BIO タグ列に変換する](notebooks/10_sequence_labeling/spans_to_bio.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/spans_to_bio.ipynb) |
+| 10-02 | [BIO タグ列から固有表現のスパンを取り出す](notebooks/10_sequence_labeling/bio_to_spans.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/bio_to_spans.ipynb) |
+| 10-03 | [固有表現抽出をエンティティ単位で評価する (seqeval)](notebooks/10_sequence_labeling/seqeval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/seqeval.ipynb) |
+| 10-04 | [CRF で固有表現抽出器を学習する](notebooks/10_sequence_labeling/crf_tagger.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/crf_tagger.ipynb) |
+| 10-05 | [ビタビアルゴリズムを実装して最適なラベル列を求める](notebooks/10_sequence_labeling/viterbi.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/viterbi.ipynb) |
+| 10-06 | [HMM で品詞タガーを作る](notebooks/10_sequence_labeling/hmm_tagger.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/hmm_tagger.ipynb) |
+| 10-07 | [単語分割を文字単位の系列ラベリングとして解く](notebooks/10_sequence_labeling/char_segmentation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/char_segmentation.ipynb) |
+| 10-08 | [BERT をファインチューニングして日本語の固有表現抽出器を作る](notebooks/10_sequence_labeling/bert_ner_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/bert_ner_finetune.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->
