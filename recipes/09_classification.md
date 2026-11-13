@@ -53,7 +53,7 @@ print("正解率:", accuracy_score(test["label"], clf.predict(test["wakati"])))
 ```
 
 ```python
-new = "新型スマートフォンは有機 EL ディスプレイと高性能カメラを搭載し、来月発売される。"
+new = "日本代表は後半に 2 点を奪って逆転し、ワールドカップ予選で勝利を収めた。"
 print(clf.predict([tagger.parse(new)]), clf.predict_proba([tagger.parse(new)]).max().round(2))
 ```
 
@@ -101,11 +101,11 @@ from sklearn.dummy import DummyClassifier
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 
 print(classification_report(test["label"], pred, digits=3))
-print("macro-F1:", f1_score(test["label"], pred, average="macro").round(3),
-      " micro-F1 (= 正解率):", f1_score(test["label"], pred, average="micro").round(3))
+print("macro-F1:", round(f1_score(test["label"], pred, average="macro"), 3),
+      " micro-F1 (= 正解率):", round(f1_score(test["label"], pred, average="micro"), 3))
 
 dummy = DummyClassifier(strategy="most_frequent").fit(train["title"], train["label"])
-print("最頻クラスを答えるだけのベースライン:", accuracy_score(test["label"], dummy.predict(test["title"])).round(3))
+print("最頻クラスを答えるだけのベースライン:", round(accuracy_score(test["label"], dummy.predict(test["title"])), 3))
 ```
 
 ```python
@@ -173,7 +173,7 @@ print(df["label"][i], "|", df["title"][i])
 print([(vocab[j], round(float(contrib[j]), 2)) for j in np.argsort(-contrib)[:10]])
 ```
 
-- カテゴリ名そのもの (「独女」「Peachy」) や媒体固有の定型句が上位に来る。現実のタスクでは、こうした「答えが漏れている」特徴に頼っていないかを確認する。
+- カテゴリ名そのもの (「独女」「peachy」「smax」) や、本文に含まれる関連記事の URL の断片 (`livedoor`、`detail`) が上位に来る。現実のタスクでは、こうした「答えが漏れている」特徴に頼っていないかを確認する。
 
 ## 複数の分類器を交差検証で比較する {compare_classifiers}
 
@@ -271,7 +271,7 @@ clf = pipeline("zero-shot-classification", model="MoritzLaurer/mDeBERTa-v3-base-
 
 labels = ["スポーツ", "経済", "テクノロジー", "料理", "政治"]
 texts = ["大谷翔平が今季 50 本目のホームランを放った。",
-         "日銀は政策金利を据え置くことを決定した。",
+         "トヨタ自動車の純利益は前年比 20% 増加した。",
          "新しい言語モデルは従来より少ない計算量で高い性能を達成した。",
          "玉ねぎを飴色になるまで炒めてから、カレールーを加えます。"]
 for text in texts:
@@ -281,7 +281,7 @@ for text in texts:
 
 ```python
 # 複数ラベルが同時に成り立つ場合 (各ラベルを独立に判定)
-r = clf("円安の影響で、輸入食材を使うレストランの値上げが相次いでいる。", labels,
+r = clf("新型スマートフォンの販売が好調で、アップルの株価が上昇した。", labels,
         hypothesis_template="この文は{}に関するものです。", multi_label=True)
 print([(l, round(s, 2)) for l, s in zip(r["labels"], r["scores"])])
 ```
@@ -327,13 +327,9 @@ for text, row in zip(texts, sims):
 レビューや SNS の投稿がポジティブかネガティブかを、学習済みモデルですぐ判定したい。
 
 ```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
 from transformers import pipeline
 
-clf = pipeline("text-classification", model="koheiduck/bert-japanese-finetuned-sentiment")
+clf = pipeline("text-classification", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student")
 texts = ["この映画は本当に素晴らしかった。もう一度観たい。", "最悪の接客で、二度と行かないと決めた。", "明日は月曜日です。",
          "期待していたほどではなかったが、悪くはない。", "面白くないわけがない。", "すごいね、また遅刻したんだ。"]
 for text, r in zip(texts, clf(texts)):
@@ -347,7 +343,7 @@ for r in clf("値段は高いけれど、品質には満足しています。", 
 ```
 
 - 二重否定、皮肉、対比 (「〜だが…」) は誤りやすい。ドメインが違うと精度が落ちるので、自分のデータで少量でも評価する。
-- 多言語なら `lxyuan/distilbert-base-multilingual-cased-sentiments-student`、英語なら `cardiffnlp/twitter-roberta-base-sentiment-latest` など。
+- ここで使ったのは多言語モデル (英語・日本語・中国語など 12 言語)。日本語専用なら `koheiduck/bert-japanese-finetuned-sentiment`、英語なら `cardiffnlp/twitter-roberta-base-sentiment-latest` など。
 - 喜び・悲しみ・怒りなどの感情の種類まで知りたい場合は、WRIME データセットで学習されたモデルを探す。
 
 ## BERT をファインチューニングして文書分類する (Trainer) {bert_finetune gpu norun}
@@ -508,9 +504,9 @@ X_train, X_test = vec.fit_transform(reuters.raw(i) for i in train_ids), vec.tran
 ```python
 clf = OneVsRestClassifier(LinearSVC(C=1)).fit(X_train, Y_train)   # ラベルごとに 2 値分類器を学習
 pred = clf.predict(X_test)
-print("micro-F1:", f1_score(Y_test, pred, average="micro").round(3),
-      " macro-F1:", f1_score(Y_test, pred, average="macro", zero_division=0).round(3),
-      " 完全一致率:", (pred == Y_test).all(axis=1).mean().round(3))
+print("micro-F1:", round(f1_score(Y_test, pred, average="micro"), 3),
+      " macro-F1:", round(f1_score(Y_test, pred, average="macro", zero_division=0), 3),
+      " 完全一致率:", round((pred == Y_test).all(axis=1).mean(), 3))
 for i in range(3):
     print("正解:", mlb.inverse_transform(Y_test[i:i + 1])[0], " 予測:", mlb.inverse_transform(pred[i:i + 1])[0])
 ```
@@ -588,7 +584,9 @@ for word, weight in exp.as_list():
 ```
 
 ```python
-exp.show_in_notebook(text=False)   # Colab では棒グラフと色付きテキストで表示される
+from IPython.display import HTML
+
+HTML(exp.as_html(text=False))   # 棒グラフで表示 (text=True にすると原文の色付き表示も付く)
 ```
 
 - LIME は、単語をランダムに消した文を多数作って予測の変化を調べ、局所的な線形モデルで近似する。分類器が何であっても (BERT でも) 使える。
@@ -683,7 +681,7 @@ proba = cross_val_predict(pipe, data.data, data.target, cv=5, method="predict_pr
 df = pd.DataFrame({"text": [" ".join(t.split())[:110] for t in data.data], "gold": data.target, "pred": proba.argmax(axis=1),
                    "p_gold": proba[np.arange(len(proba)), data.target], "p_pred": proba.max(axis=1)})
 df["gold"], df["pred"] = df["gold"].map(lambda i: cats[i]), df["pred"].map(lambda i: cats[i])
-print("正解率:", (df.gold == df.pred).mean().round(3))
+print("正解率:", round((df.gold == df.pred).mean(), 3))
 ```
 
 ```python
@@ -693,7 +691,7 @@ errors.head(8)
 ```
 
 ```python
-print("空に近い文書の割合 (誤り / 全体):", (errors.text.str.len() < 20).mean().round(2), "/", (df.text.str.len() < 20).mean().round(2))
+print("空に近い文書の割合 (誤り / 全体):", round((errors.text.str.len() < 20).mean(), 2), "/", round((df.text.str.len() < 20).mean(), 2))
 pd.crosstab(errors.gold, errors.pred)
 ```
 

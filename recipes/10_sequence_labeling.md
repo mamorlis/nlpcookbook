@@ -43,6 +43,12 @@ for tok, tag in zip(tokens, tags):
     print(f"{tok}\t{tag}")
 ```
 
+```python
+# アノテーションの境界がトークンの境界と合わない例
+tokens, tags = spans_to_bio("東京都立大学の教授に会った。", [(0, 3, "LOC")])
+print(list(zip(tokens, tags)))
+```
+
 - 「東京」だけがアノテーションされているのに、トークナイザが「東京都」を 1 語にする、といった境界のずれが必ず起きる。件数を数えて、多ければ文字単位のタグ付けやサブワードの利用を検討する。
 - I- で始まる系列を許す IOB1、末尾と単独を区別する BIOES (BILOU) などの変種がある。データセットがどれかを確認する。
 
@@ -237,7 +243,7 @@ import nltk
 nltk.download("treebank", quiet=True)
 nltk.download("universal_tagset", quiet=True)
 from nltk.corpus import treebank
-from nltk.tag import DefaultTagger, UnigramTagger, hmm
+from nltk.tag import DefaultTagger, UnigramTagger, hmm, tnt
 
 sents = list(treebank.tagged_sents(tagset="universal"))
 train, test = sents[:3500], sents[3500:]
@@ -247,8 +253,12 @@ baseline = UnigramTagger(train, backoff=DefaultTagger("NOUN"))   # 各単語に�
 trainer = hmm.HiddenMarkovModelTrainer()
 tagger = trainer.train_supervised(train, estimator=lambda fd, bins: nltk.LidstoneProbDist(fd, 0.01, bins))
 
-print("ユニグラム (最頻タグ):", round(baseline.accuracy(test), 4))
-print("HMM (bigram):         ", round(tagger.accuracy(test), 4))
+tnt_tagger = tnt.TnT(unk=DefaultTagger("NOUN"), Trained=True)   # trigram HMM + 未知語は名詞とみなす
+tnt_tagger.train(train)
+
+print("ユニグラム (最頻タグ):   ", round(baseline.accuracy(test), 4))
+print("HMM (bigram):            ", round(tagger.accuracy(test), 4))
+print("TnT (trigram + 未知語処理):", round(tnt_tagger.accuracy(test), 4))
 ```
 
 ```python
@@ -270,7 +280,8 @@ print(f"既知語 {known_ok / known:.3f} ({known} 語) / 未知語 {unknown_ok /
 ```
 
 - 「各単語の最頻タグ」だけで 9 割を超える。品詞タグ付けの難しさは、残りの曖昧な語と未知語にある。
-- HMM は単語の綴りを見ないので未知語に弱い。接尾辞や大文字などの特徴を使える CRF やニューラルモデルが有利な理由。
+- 素朴な HMM は未知語の出力確率をうまく見積もれず、未知語でほぼ当たらない。そのせいで全体ではユニグラムのベースラインに負けることすらある。
+- HMM は単語の綴りを見ないのが弱点。接尾辞や大文字などの特徴を使える CRF やニューラルモデルが有利な理由。
 
 ## 単語分割を文字単位の系列ラベリングとして解く {char_segmentation}
 
