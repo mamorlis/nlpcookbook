@@ -160,6 +160,7 @@ def to_notebook(r: Recipe) -> dict:
 
 MAX_LINES = 60
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+WIDGET_RE = re.compile(r"\d+%\|| \[00:00<|^(Text|IntSlider|Output|HBox|VBox)\(")
 
 
 def clean_outputs(nb: dict) -> None:
@@ -186,8 +187,12 @@ def clean_outputs(nb: dict) -> None:
                     continue
             elif o["output_type"] in ("display_data", "execute_result"):
                 data = o.get("data", {})
+                had_widget = any("widget" in k for k in data)
                 for k in [k for k in data if "widget" in k or k == "application/javascript"]:
                     del data[k]
+                plain = "".join(data.get("text/plain", ""))
+                if set(data) <= {"text/plain"} and (had_widget or WIDGET_RE.search(plain)):
+                    continue  # ウィジェットや進捗バーの残骸
                 if not data or set(data) == {"text/plain"} and o["output_type"] == "display_data" \
                         and "".join(data["text/plain"]).startswith(("HBox", "VBox", "<IPython")):
                     continue

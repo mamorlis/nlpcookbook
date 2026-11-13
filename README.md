@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 209 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 246 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. 文字列処理と正規化](#1-文字列処理と正規化) (22)
 - [2. 日本語の形態素解析](#2-日本語の形態素解析) (19)
@@ -25,6 +25,10 @@
 - [11. Transformers の基本操作](#11-transformers-の基本操作) (17)
 - [12. 大規模言語モデル (LLM)](#12-大規模言語モデル-llm) (17)
 - [13. 評価指標と統計的検定](#13-評価指標と統計的検定) (16)
+- [14. 文法誤り訂正と言語教育](#14-文法誤り訂正と言語教育) (10)
+- [15. データの収集と入出力](#15-データの収集と入出力) (11)
+- [16. Google Colab の小技](#16-google-colab-の小技) (11)
+- [17. トピック・キーワード・要約](#17-トピックキーワード要約) (5)
 
 ### 1. 文字列処理と正規化
 
@@ -325,6 +329,71 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 13-14 | [検索・ランキングを評価する (Recall@k、MRR、nDCG)](notebooks/13_evaluation/ranking_metrics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_evaluation/ranking_metrics.ipynb) |
 | 13-15 | [生成テキストの多様性と繰り返しを測る (distinct-n)](notebooks/13_evaluation/distinct_n.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_evaluation/distinct_n.ipynb) |
 | 13-16 | [モデルの確信度が当てになるか調べる (較正、ECE)](notebooks/13_evaluation/calibration_ece.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_evaluation/calibration_ece.ipynb) |
+
+### 14. 文法誤り訂正と言語教育
+
+学習者の作文を訂正する、訂正箇所を取り出して分類・評価する、教材づくりに使う。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 14-01 | [2 つの文の違いを色付きで表示する](notebooks/14_gec_education/diff_highlight.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/diff_highlight.ipynb) |
+| 14-02 | [訂正前後の文から編集 (置換・挿入・削除) を取り出す](notebooks/14_gec_education/edit_extraction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/edit_extraction.ipynb) |
+| 14-03 | [ERRANT で英語の訂正を誤りタイプ付きの編集に変換する](notebooks/14_gec_education/errant.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/errant.ipynb) |
+| 14-04 | [M2 形式のファイルを読み書きする](notebooks/14_gec_education/m2_format.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/m2_format.ipynb) |
+| 14-05 | [文法誤り訂正を編集単位の F0.5 で評価する](notebooks/14_gec_education/gec_f05.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/gec_f05.ipynb) |
+| 14-06 | [学習済みモデルで英語の文法誤りを訂正する](notebooks/14_gec_education/gec_model_en.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/gec_model_en.ipynb) |
+| 14-07 | [規則で誤りを注入して GEC の擬似学習データを作る](notebooks/14_gec_education/synthetic_errors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/synthetic_errors.ipynb) |
+| 14-08 | [日本語の文章の読みやすさを測る](notebooks/14_gec_education/readability_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/readability_ja.ipynb) |
+| 14-09 | [単語の頻度から語彙の難しさを推定する (wordfreq)](notebooks/14_gec_education/word_frequency_level.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/word_frequency_level.ipynb) |
+| 14-10 | [穴埋め問題 (クローズテスト) を自動で作る](notebooks/14_gec_education/cloze_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_gec_education/cloze_generation.ipynb) |
+
+### 15. データの収集と入出力
+
+テキストを集める、ファイルから取り出す、きれいにして保存する。実験の前にやること。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 15-01 | [青空文庫から作品をダウンロードして本文を取り出す](notebooks/15_data_io/aozora_download.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/aozora_download.ipynb) |
+| 15-02 | [Wikipedia の記事本文を API で取得する](notebooks/15_data_io/wikipedia_api.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/wikipedia_api.ipynb) |
+| 15-03 | [Web ページから本文だけを抽出する (trafilatura)](notebooks/15_data_io/web_extract.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/web_extract.ipynb) |
+| 15-04 | [PDF からテキストを抽出する (PyMuPDF)](notebooks/15_data_io/pdf_extract.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/pdf_extract.ipynb) |
+| 15-05 | [Word ファイルからテキストと表を取り出す](notebooks/15_data_io/docx_extract.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/docx_extract.ipynb) |
+| 15-06 | [JSON Lines 形式でデータを読み書きする](notebooks/15_data_io/jsonl_io.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/jsonl_io.ipynb) |
+| 15-07 | [CSV / TSV の文字化けと列ずれを避ける](notebooks/15_data_io/csv_io.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/csv_io.ipynb) |
+| 15-08 | [巨大なテキストファイルをメモリに載せずに処理する](notebooks/15_data_io/large_file_stream.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/large_file_stream.ipynb) |
+| 15-09 | [テキストデータの重複と不良データを取り除く](notebooks/15_data_io/dedup_clean.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/dedup_clean.ipynb) |
+| 15-10 | [データを学習・開発・評価に正しく分割する](notebooks/15_data_io/data_split.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/data_split.ipynb) |
+| 15-11 | [対訳コーパスを取得して中身を確認する](notebooks/15_data_io/parallel_corpus.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/15_data_io/parallel_corpus.ipynb) |
+
+### 16. Google Colab の小技
+
+Colab で NLP の実験をするときに、毎回調べることになる定番の操作。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 16-01 | [Google Drive をマウントしてファイルを読み書きする](notebooks/16_colab_tips/colab_drive.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_drive.ipynb) |
+| 16-02 | [GPU が使えるか確認し、メモリを解放する](notebooks/16_colab_tips/colab_gpu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_gpu.ipynb) |
+| 16-03 | [API キーをシークレット機能で安全に扱う](notebooks/16_colab_tips/colab_secrets.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_secrets.ipynb) |
+| 16-04 | [乱数シードを固定して実験を再現できるようにする](notebooks/16_colab_tips/set_seed.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/set_seed.ipynb) |
+| 16-05 | [ファイルをアップロード・ダウンロードする](notebooks/16_colab_tips/colab_files.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_files.ipynb) |
+| 16-06 | [処理時間を計測する](notebooks/16_colab_tips/timing.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/timing.ipynb) |
+| 16-07 | [長時間の学習を途中から再開できるようにする](notebooks/16_colab_tips/colab_checkpoint.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_checkpoint.ipynb) |
+| 16-08 | [フォームでパラメータを切り替えられるようにする](notebooks/16_colab_tips/colab_forms.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/colab_forms.ipynb) |
+| 16-09 | [ライブラリのバージョンを確認・固定する](notebooks/16_colab_tips/pip_versions.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/pip_versions.ipynb) |
+| 16-10 | [pandas で長いテキストを省略せずに表示する](notebooks/16_colab_tips/pandas_display.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/pandas_display.ipynb) |
+| 16-11 | [進捗バーを表示する (tqdm)](notebooks/16_colab_tips/tqdm_progress.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/16_colab_tips/tqdm_progress.ipynb) |
+
+### 17. トピック・キーワード・要約
+
+文書集合に潜む話題を見つける、文書を代表する語や文を選ぶ。教師なしで全体像をつかむための手法。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 17-01 | [LDA で文書集合のトピックを見つける](notebooks/17_topics_keywords/lda_topics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_topics_keywords/lda_topics.ipynb) |
+| 17-02 | [NMF でトピックを抽出する](notebooks/17_topics_keywords/nmf_topics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_topics_keywords/nmf_topics.ipynb) |
+| 17-03 | [文埋め込みとクラスタリングでトピックを作る (BERTopic 方式)](notebooks/17_topics_keywords/embedding_topics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_topics_keywords/embedding_topics.ipynb) |
+| 17-04 | [文書からキーワードを抽出する (埋め込みによる KeyBERT 方式)](notebooks/17_topics_keywords/keyword_extraction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_topics_keywords/keyword_extraction.ipynb) |
+| 17-05 | [重要な文を選んで抽出型要約を作る (LexRank)](notebooks/17_topics_keywords/extractive_summary.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_topics_keywords/extractive_summary.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->

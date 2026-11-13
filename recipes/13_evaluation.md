@@ -129,7 +129,7 @@ print(round(float(np.mean([scorer.score(r, h)["rougeL"].fmeasure for r, h in zip
 ```python
 from bert_score import score
 
-refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。", "会議は午後 3 時に始まります。"]
+refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。", "この本は非常に面白い。"]
 hyps = ["猫がマットの上に座っている。", "昨日、彼は東京へ出かけた。", "この書籍はとても興味深い。", "この本は非常に面白くない。"]
 
 P, R, F = score(hyps, refs, lang="ja", verbose=False)   # lang="ja" では bert-base-multilingual-cased が使われる
@@ -139,13 +139,13 @@ print("平均 F1:", F.mean().item())
 ```
 
 ```python
-# スコアが 0.6〜1.0 の狭い範囲に固まって読みにくいので、ベースラインで再スケールする
-P, R, F = score(hyps, refs, lang="ja", rescale_with_baseline=True, verbose=False)
-print([round(f, 3) for f in F.tolist()])
+# 無関係な文同士でも 0.6 前後になる (値の範囲が狭い) ことに注意。設定を表すハッシュも取得できる
+(P, R, F), setting = score(["今日は天気が良い。"], ["会議は午後 3 時に始まります。"], lang="ja", verbose=False, return_hash=True)
+print(round(F.item(), 3), setting)
 ```
 
 - 言い換え (「本 / 書籍」「面白い / 興味深い」) にも高いスコアが付く。一方で、否定のような小さいが決定的な違い (4 つ目の例) には鈍感。
-- 値はモデルと層に依存する。報告するときは `bert_score` のハッシュ (`return_hash=True`) を添える。
+- 値はモデルと層に依存する。報告するときはハッシュを添える。英語などでは `rescale_with_baseline=True` で値の範囲を広げて読みやすくできる。
 - 翻訳評価では、人手評価で学習した COMET などのほうが人間の判断との相関が高い。
 
 ## COMET で翻訳の品質を評価する {comet gpu norun}
