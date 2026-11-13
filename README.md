@@ -10,13 +10,14 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 90 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 107 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. 文字列処理と正規化](#1-文字列処理と正規化) (22)
 - [2. 日本語の形態素解析](#2-日本語の形態素解析) (19)
 - [3. 英語・多言語の前処理](#3-英語多言語の前処理) (20)
 - [4. サブワードとトークナイザ](#4-サブワードとトークナイザ) (14)
 - [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (15)
+- [6. 構文解析と固有表現抽出](#6-構文解析と固有表現抽出) (17)
 
 ### 1. 文字列処理と正規化
 
@@ -142,6 +143,30 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 | 05-13 | [文の長さや文字数の基本統計をとる](notebooks/05_corpus_statistics/corpus_stats.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/corpus_stats.ipynb) |
 | 05-14 | [品詞の分布を調べる・比べる](notebooks/05_corpus_statistics/pos_distribution.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) |
 | 05-15 | [文字や単語のエントロピーを計算する](notebooks/05_corpus_statistics/entropy.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) |
+
+### 6. 構文解析と固有表現抽出
+
+係り受け解析で文の構造を取り出し、人名・組織名などの固有表現を見つける。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 06-01 | [GiNZA で日本語の依存構造解析 (係り受け解析) をする](notebooks/06_parsing_ner/ginza_dependency.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/ginza_dependency.ipynb) |
+| 06-02 | [依存構造木を図で表示する (displaCy)](notebooks/06_parsing_ner/displacy_dep.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/displacy_dep.ipynb) |
+| 06-03 | [文節に区切って文節単位の係り受けを得る](notebooks/06_parsing_ner/bunsetsu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/bunsetsu.ipynb) |
+| 06-04 | [「誰が・何を・どうした」の三つ組を抜き出す](notebooks/06_parsing_ner/svo_extract.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/svo_extract.ipynb) |
+| 06-05 | [日本語の固有表現 (人名・地名・組織名など) を抽出する](notebooks/06_parsing_ner/ner_ginza.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/ner_ginza.ipynb) |
+| 06-06 | [英語の固有表現を抽出して色付きで表示する](notebooks/06_parsing_ner/ner_spacy_en.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/ner_spacy_en.ipynb) |
+| 06-07 | [Transformers の pipeline で日本語の固有表現抽出をする](notebooks/06_parsing_ner/ner_transformers_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/ner_transformers_ja.ipynb) |
+| 06-08 | [学習なしで好きなラベルの固有表現を抽出する (GLiNER)](notebooks/06_parsing_ner/gliner.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/gliner.ipynb) |
+| 06-09 | [品詞や原形のパターンで表現を抽出する (spaCy Matcher)](notebooks/06_parsing_ner/spacy_matcher.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/spacy_matcher.ipynb) |
+| 06-10 | [辞書やルールで固有表現を追加する (EntityRuler)](notebooks/06_parsing_ner/entity_ruler.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/entity_ruler.ipynb) |
+| 06-11 | [名詞句を抽出する](notebooks/06_parsing_ner/noun_chunks.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/noun_chunks.ipynb) |
+| 06-12 | [個人情報をマスクする (仮名化)](notebooks/06_parsing_ner/pii_mask.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/pii_mask.ipynb) |
+| 06-13 | [Stanza で多言語の形態素・依存構造解析をする](notebooks/06_parsing_ner/stanza.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/stanza.ipynb) |
+| 06-14 | [文脈自由文法を書いて構文解析する (NLTK)](notebooks/06_parsing_ner/cfg_parse.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/cfg_parse.ipynb) |
+| 06-15 | [解析結果を CoNLL-U 形式で保存・読み込みする](notebooks/06_parsing_ner/conllu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/conllu.ipynb) |
+| 06-16 | [spaCy で大量の文書を高速に処理する](notebooks/06_parsing_ner/spacy_pipe.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/spacy_pipe.ipynb) |
+| 06-17 | [依存距離と構文木の深さで文の複雑さを測る](notebooks/06_parsing_ner/dep_distance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_parsing_ner/dep_distance.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->
