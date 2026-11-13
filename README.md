@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 159 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 176 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. 文字列処理と正規化](#1-文字列処理と正規化) (22)
 - [2. 日本語の形態素解析](#2-日本語の形態素解析) (19)
@@ -22,6 +22,7 @@
 - [8. 文埋め込み・類似度・検索](#8-文埋め込み類似度検索) (16)
 - [9. テキスト分類](#9-テキスト分類) (16)
 - [10. 系列ラベリング](#10-系列ラベリング) (8)
+- [11. Transformers の基本操作](#11-transformers-の基本操作) (17)
 
 ### 1. 文字列処理と正規化
 
@@ -251,6 +252,30 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 | 10-06 | [HMM で品詞タガーを作る](notebooks/10_sequence_labeling/hmm_tagger.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/hmm_tagger.ipynb) |
 | 10-07 | [単語分割を文字単位の系列ラベリングとして解く](notebooks/10_sequence_labeling/char_segmentation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/char_segmentation.ipynb) |
 | 10-08 | [BERT をファインチューニングして日本語の固有表現抽出器を作る](notebooks/10_sequence_labeling/bert_ner_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sequence_labeling/bert_ner_finetune.ipynb) |
+
+### 11. Transformers の基本操作
+
+Hugging Face Transformers と Datasets で、事前学習済みモデルを動かすときの定番の操作。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 11-01 | [マスクされた単語を BERT に予測させる (fill-mask)](notebooks/11_transformers/fill_mask.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/fill_mask.ipynb) |
+| 11-02 | [BERT の出力から文ベクトルを自分で作る (mean pooling)](notebooks/11_transformers/mean_pooling.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/mean_pooling.ipynb) |
+| 11-03 | [テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる](notebooks/11_transformers/generation_decoding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/generation_decoding.ipynb) |
+| 11-04 | [言語モデルで文の自然さ (パープレキシティ) を測る](notebooks/11_transformers/lm_perplexity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/lm_perplexity.ipynb) |
+| 11-05 | [次に来るトークンの確率分布を見る](notebooks/11_transformers/next_token_probs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/next_token_probs.ipynb) |
+| 11-06 | [トークンごとのサプライザルを色で可視化する](notebooks/11_transformers/surprisal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/surprisal.ipynb) |
+| 11-07 | [多言語翻訳モデル NLLB で翻訳する](notebooks/11_transformers/translation_nllb.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/translation_nllb.ipynb) |
+| 11-08 | [文書の中から質問の答えを抜き出す (抽出型 QA)](notebooks/11_transformers/extractive_qa.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/extractive_qa.ipynb) |
+| 11-09 | [アテンションの重みをヒートマップで可視化する](notebooks/11_transformers/attention_viz.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/attention_viz.ipynb) |
+| 11-10 | [バッチ処理と GPU で推論を高速化する](notebooks/11_transformers/batch_inference.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/batch_inference.ipynb) |
+| 11-11 | [モデルのパラメータ数とメモリ使用量を調べる](notebooks/11_transformers/model_size.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/model_size.ipynb) |
+| 11-12 | [Datasets でデータを読み込む・加工する](notebooks/11_transformers/datasets_basics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/datasets_basics.ipynb) |
+| 11-13 | [巨大なデータセットをダウンロードせずにストリーミングで読む](notebooks/11_transformers/datasets_streaming.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/datasets_streaming.ipynb) |
+| 11-14 | [Hub のモデルのキャッシュ場所を確認・変更する](notebooks/11_transformers/hf_cache.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/hf_cache.ipynb) |
+| 11-15 | [モデルを保存・読み込みする、Hub にアップロードする](notebooks/11_transformers/save_load_model.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/save_load_model.ipynb) |
+| 11-16 | [マスク言語モデルで文の自然さを測る (疑似対数尤度)](notebooks/11_transformers/mlm_scoring.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/mlm_scoring.ipynb) |
+| 11-17 | [2 つの文の含意関係を判定する (NLI)](notebooks/11_transformers/nli.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/11_transformers/nli.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->

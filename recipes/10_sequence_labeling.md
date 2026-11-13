@@ -393,7 +393,8 @@ print(len(data), data[0])
 types = sorted({e["type"] for d in data for e in d["entities"]})
 labels = ["O"] + [f"{p}-{t}" for t in types for p in ("B", "I")]
 label2id = {l: i for i, l in enumerate(labels)}
-ds = Dataset.from_list([{"text": d["text"], "spans": [[*e["span"], e["type"]] for e in d["entities"]]} for d in data])
+ds = Dataset.from_list([{"text": d["text"], "starts": [e["span"][0] for e in d["entities"]],
+                         "ends": [e["span"][1] for e in d["entities"]], "types": [e["type"] for e in d["entities"]]} for d in data])
 ds = ds.train_test_split(test_size=0.2, seed=0)
 ```
 
@@ -411,8 +412,7 @@ def encode(example):
             tags.append(-100)
             continue
         tag = "O"
-        for start, end, typ in example["spans"]:
-            start, end = int(start), int(end)
+        for start, end, typ in zip(example["starts"], example["ends"], example["types"]):
             if s < end and e > start:               # トークンがスパンと重なる
                 tag = ("B-" if s <= start else "I-") + typ
                 break
@@ -421,7 +421,7 @@ def encode(example):
     enc.pop("offset_mapping")
     return enc
 
-tokenized = ds.map(encode, remove_columns=["text", "spans"])
+tokenized = ds.map(encode, remove_columns=["text", "starts", "ends", "types"])
 model = AutoModelForTokenClassification.from_pretrained(
     model_name, num_labels=len(labels), id2label=dict(enumerate(labels)), label2id=label2id)
 ```
@@ -442,7 +442,7 @@ def compute_metrics(eval_pred):
     return {"f1": f1_score(y_true, y_pred)}
 
 args = TrainingArguments(
-    output_dir="ner-out", num_train_epochs=5, learning_rate=5e-5, warmup_ratio=0.1, weight_decay=0.01,
+    output_dir="ner-out", num_train_epochs=5, learning_rate=5e-5, warmup_steps=60, weight_decay=0.01,
     per_device_train_batch_size=32, per_device_eval_batch_size=64, eval_strategy="epoch", save_strategy="no",
     fp16=True, logging_steps=50, report_to="none", seed=0,
 )

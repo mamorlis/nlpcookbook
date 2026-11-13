@@ -406,7 +406,7 @@ def compute_metrics(eval_pred):
             **f1.compute(predictions=pred, references=labels, average="macro")}
 
 args = TrainingArguments(
-    output_dir="out", num_train_epochs=3, learning_rate=3e-5, warmup_ratio=0.1, weight_decay=0.01,
+    output_dir="out", num_train_epochs=3, learning_rate=3e-5, warmup_steps=50, weight_decay=0.01,
     per_device_train_batch_size=32, per_device_eval_batch_size=64,
     eval_strategy="epoch", save_strategy="epoch", load_best_model_at_end=True, metric_for_best_model="f1",
     fp16=True, logging_steps=50, report_to="none", seed=0,
