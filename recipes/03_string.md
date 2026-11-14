@@ -577,3 +577,133 @@ print(repr(clean), len(text), "→", len(clean))
 ```
 
 - `Cf` を消すと絵文字の ZWJ (U+200D) も消えて家族の絵文字などが分解される。絵文字を残したいなら U+200D は除外する。
+
+## 編集距離とあいまい文字列マッチング (RapidFuzz) {edit_distance}
+
+表記ゆれやタイプミスを含む文字列同士の近さを測りたい。候補リストから一番近いものを選びたい。
+
+```python
+!pip install -q rapidfuzz
+```
+
+```python
+from rapidfuzz import fuzz, process
+from rapidfuzz.distance import DamerauLevenshtein, JaroWinkler, Levenshtein
+
+for a, b in [("コンピューター", "コンピュータ"), ("自然言語処理", "自然原語処理"), ("recieve", "receive"), ("東京都立大学", "首都大学東京")]:
+    print(f"{a} / {b}: 編集距離 {Levenshtein.distance(a, b)}  正規化類似度 {Levenshtein.normalized_similarity(a, b):.2f}"
+          f"  転置込み {DamerauLevenshtein.distance(a, b)}  Jaro-Winkler {JaroWinkler.similarity(a, b):.2f}")
+print(Levenshtein.editops("recieve", "receive"))
+```
+
+```python
+# 候補の中から近いものを探す
+universities = ["東京大学", "京都大学", "東京工業大学", "東京都立大学", "一橋大学", "大阪大学", "東京科学大学", "東北大学"]
+for q in ["東京都率大学", "ひとつばし大学", "東工大"]:
+    print(q, process.extract(q, universities, scorer=fuzz.WRatio, limit=2))
+```
+
+```python
+# 単語単位の編集距離 (リストを渡す)
+ref, hyp = "the cat sat on the mat".split(), "the cat sit on mat".split()
+print(Levenshtein.distance(ref, hyp), Levenshtein.editops(ref, hyp))
+```
+
+- 「東工大」のような略称や「ひとつばし」のような読みの違いは、文字の編集距離では拾えない。読みに変換してから比べるか、別名辞書を使う。
+- RapidFuzz は C++ 実装で、数百万件の突き合わせにも使える (`process.cdist` で行列計算)。
+
+## MinHash と LSH で大量文書からほぼ重複を見つける {minhash_lsh}
+
+数十万件の文書から、コピペや微修正による「ほぼ同じ文書」を、全ペア比較せずに高速に見つけたい。
+
+```python
+!pip install -q datasketch
+```
+
+```python
+from datasketch import MinHash, MinHashLSH
+
+def shingles(text, n=3):
+    text = "".join(text.split())
+    return {text[i:i + n] for i in range(len(text) - n + 1)}
+
+def minhash(text, num_perm=128):
+    m = MinHash(num_perm=num_perm)
+    for s in shingles(text):
+        m.update(s.encode("utf-8"))
+    return m
+
+docs = {
+    "a": "自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる一連の技術である。",
+    "b": "自然言語処理とは、人間が日常的に使っている言語をコンピューターに処理させる技術のことである。",
+    "c": "機械学習は、データから規則性を学習してタスクを解くアルゴリズムの研究分野である。",
+    "d": "自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる一連の技術である！",
+}
+mh = {k: minhash(v) for k, v in docs.items()}
+
+def jaccard(a, b):
+    A, B = shingles(docs[a]), shingles(docs[b])
+    return len(A & B) / len(A | B)
+
+for x, y in [("a", "b"), ("a", "c"), ("a", "d")]:
+    print(f"{x}-{y}: 真の Jaccard = {jaccard(x, y):.2f}  MinHash による推定 = {mh[x].jaccard(mh[y]):.2f}")
+```
+
+```python
+lsh = MinHashLSH(threshold=0.5, num_perm=128)
+for k, m in mh.items():
+    lsh.insert(k, m)
+for k in docs:
+    print(k, "と似ている:", sorted(set(lsh.query(mh[k])) - {k}))
+```
+
+- MinHash は集合の Jaccard 係数を固定長の署名で近似する。LSH は署名が似たものだけを同じバケットに入れ、候補を絞る。
+- 大規模な事前学習コーパスの重複除去で標準的に使われている。意味的な重複 (言い換え) は拾えないので、それには埋め込みを使う。
+
+## 巨大な辞書の語をテキストから一括で探す (Aho-Corasick) {aho_corasick}
+
+数万〜数百万語の辞書 (商品名、病名、NG ワードなど) に載っている語を、長いテキストから高速にすべて見つけたい。
+
+```python
+!pip install -q pyahocorasick
+```
+
+```python
+import ahocorasick
+
+terms = {"東京": "LOC", "東京都": "LOC", "京都": "LOC", "東京都立大学": "ORG", "自然言語処理": "TERM", "言語": "TERM", "機械翻訳": "TERM"}
+A = ahocorasick.Automaton()
+for term, label in terms.items():
+    A.add_word(term, (term, label))
+A.make_automaton()
+
+text = "東京都立大学では自然言語処理と機械翻訳を研究している。京都にも行った。"
+for end, (term, label) in A.iter(text):          # 重なりも含めてすべての一致
+    print(end - len(term) + 1, end + 1, term, label)
+```
+
+```python
+# 最長一致だけ残す (重なったら長い語を優先)
+for end, (term, label) in A.iter_long(text):
+    print(end - len(term) + 1, end + 1, term, label)
+```
+
+```python
+# 正規表現の | 連結と速度を比べる
+import random, re, time
+
+random.seed(0)
+vocab = ["".join(random.choices("あいうえおかきくけこさしすせそ", k=random.randint(3, 6))) for _ in range(50000)]
+big = "".join(random.choices("あいうえおかきくけこさしすせそ", k=200000))
+B = ahocorasick.Automaton()
+for w in vocab:
+    B.add_word(w, w)
+B.make_automaton()
+
+t = time.perf_counter(); n1 = sum(1 for _ in B.iter(big)); t1 = time.perf_counter() - t
+t = time.perf_counter(); n2 = sum(1 for w in vocab[:500] if w in big); t2 = time.perf_counter() - t
+print(f"Aho-Corasick (5 万語): {t1:.3f} 秒 / 単純な in 判定 (500 語だけ): {t2:.3f} 秒")
+```
+
+- テキストを 1 回走査するだけで、辞書の語数に関係なくすべての一致を列挙できる。
+- 「東京都」の中の「京都」のような誤一致は最長一致でも完全には防げない。形態素境界と照合すると精度が上がる。

@@ -364,7 +364,7 @@ df[df["reason"] == ""]["text"].tolist()
 
 - 何を何件捨てたかを理由ごとに記録しておく。フィルタのバグでデータの大半を捨てていた、という事故に気づける。
 - 学習データと評価データの間の重複 (リーク) も必ず確認する: `set(train_keys) & set(test_keys)`。
-- ほぼ同じ内容の文書 (ニアデュプリケート) は、類似度の章の MinHash のレシピで検出する。
+- ほぼ同じ内容の文書 (ニアデュプリケート) は、文字列処理の章の MinHash のレシピで検出する。
 
 ## データを学習・開発・評価に正しく分割する {data_split}
 
@@ -412,40 +412,3 @@ df[["text", "split"]].head(3)
 - 同じ文書から切り出した文、同じ人が書いた文、同じ原文の翻訳や言い換えは、必ず同じ側に入れる。両側にまたがると評価が不当に高くなる。
 - 時系列のあるデータ (ニュース、SNS) は、ランダムではなく時間で分割する (過去で学習、未来で評価)。
 - test は最後に 1 回だけ使う。ハイパーパラメータの調整やモデル選択は dev で行う。
-
-## 対訳コーパスを取得して中身を確認する {parallel_corpus}
-
-機械翻訳の実験用に、日英の対訳データを手に入れて、品質や長さの分布を確認したい。
-
-```python
-!pip install -q datasets
-```
-
-```python
-from datasets import load_dataset
-
-ds = load_dataset("Helsinki-NLP/opus-100", "en-ja")     # OPUS から抽出した 100 言語の対訳 (日英は 100 万文対)
-print(ds)
-for ex in ds["train"].select(range(5)):
-    print(ex["translation"]["ja"], "|", ex["translation"]["en"])
-```
-
-```python
-import pandas as pd
-
-sample = ds["train"].shuffle(seed=0).select(range(20000))
-df = pd.DataFrame(sample["translation"])
-df["len_ja"], df["len_en"] = df["ja"].str.len(), df["en"].str.split().str.len()
-df["ratio"] = df["len_ja"] / df["len_en"].clip(lower=1)
-print(df[["len_ja", "len_en", "ratio"]].describe().round(1))
-
-# 対訳として怪しいものを機械的に除く: 空、長すぎ、長さの比が極端、原文と訳文が同じ、日本語を含まない
-ok = ((df["len_ja"] > 0) & (df["len_en"] > 0) & (df["len_en"] <= 100) & df["ratio"].between(0.5, 8)
-      & (df["ja"] != df["en"]) & df["ja"].str.contains(r"[ぁ-んァ-ヶ一-龥]"))
-print(f"残る割合: {ok.mean():.1%}")
-print(df[~ok].sample(5, random_state=0)[["ja", "en"]].to_string(index=False))
-```
-
-- OPUS の日英は映画字幕 (OpenSubtitles) 由来が多く、口語的で短く、ノイズや意訳も多い。データの出どころと分野を必ず確認する。
-- 日英の定番データ: JParaCrawl (Web、大規模)、ASPEC (科学技術論文、要申請)、KFTT (京都関連の Wikipedia)、JESC (字幕)、WMT の news タスク。
-- 長さの比によるフィルタは最低限の処理。さらに、言語判定、文埋め込みの類似度 (LaBSE など) によるフィルタが有効。

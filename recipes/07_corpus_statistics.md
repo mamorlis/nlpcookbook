@@ -1,6 +1,6 @@
-# コーパスの統計と可視化
+# コーパスの統計と探索
 
-単語を数える、特徴語を見つける、分布を図にする。コーパスを手に入れたらまずやること。
+単語を数える、特徴語やトピックを見つける、分布を図にする。コーパスを手に入れたらまずやること。
 
 ## 単語の頻度を数える {word_freq}
 
@@ -659,3 +659,146 @@ for name, text in [("日本語", ja), ("英語", en)]:
 
 - 文脈を長くするほど条件付きエントロピーは下がる。その極限がその言語のエントロピーレートで、言語モデルの交差エントロピー (= log2 パープレキシティ) はその上界になる。
 - 短いテキストでは過小評価になる。実際の推定には大きなコーパスが必要。
+
+## LDA で文書集合のトピックを見つける {lda_topics}
+
+大量の文書がどんな話題で構成されているのかを、ラベルなしで把握したい。各文書がどの話題をどれくらい含むかも知りたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import io, tarfile, urllib.request
+import pandas as pd
+from fugashi import Tagger
+
+def load_livedoor():
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+df = load_livedoor().sample(3000, random_state=0).reset_index(drop=True)
+tagger = Tagger()
+
+def nouns(text):
+    return " ".join(w.surface for w in tagger(text[:1500]) if w.feature.pos1 == "名詞" and w.feature.pos2 == "普通名詞" and len(w.surface) > 1)
+
+df["nouns"] = df["text"].map(nouns)
+```
+
+```python
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.feature_extraction.text import CountVectorizer
+
+vec = CountVectorizer(token_pattern=r"\S+", min_df=5, max_df=0.3)   # LDA には TF-IDF ではなく単語の出現回数を渡す
+X = vec.fit_transform(df["nouns"])
+lda = LatentDirichletAllocation(n_components=9, learning_method="batch", max_iter=30, random_state=0)
+doc_topic = lda.fit_transform(X)        # 文書 × トピックの分布 (各行の和は 1)
+
+vocab = vec.get_feature_names_out()
+for k, weights in enumerate(lda.components_):
+    print(k, " ".join(vocab[i] for i in weights.argsort()[::-1][:10]))
+```
+
+```python
+# 各トピックと元のカテゴリの対応を見る (答え合わせ)
+df["topic"] = doc_topic.argmax(axis=1)
+pd.crosstab(df["label"], df["topic"])
+```
+
+- トピックは「単語の確率分布」、文書は「トピックの確率分布」として表される。1 つの文書が複数のトピックを持てるのが、クラスタリングとの違い。
+- トピック数は自分で決める。パープレキシティやコヒーレンスも参考になるが、最終的には「人間が見て解釈できるか」で選ぶ。
+- 前処理が結果を大きく左右する。名詞に絞る、高頻度語・低頻度語を除く (`max_df`、`min_df`) のが基本。
+- 大規模なコーパスや、コヒーレンスの計算・可視化 (pyLDAvis) まで行うなら gensim の `LdaModel` が定番。
+
+## NMF でトピックを抽出する {nmf_topics}
+
+LDA より速く、短い文書でも安定しやすい方法でトピックを抽出したい。TF-IDF 行列を非負値行列因子分解する。
+
+```python
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.decomposition import NMF
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+data = fetch_20newsgroups(subset="train", remove=("headers", "footers", "quotes"))
+docs = [d for d in data.data if len(d) > 200]
+vec = TfidfVectorizer(stop_words="english", min_df=5, max_df=0.5, max_features=20000, token_pattern=r"(?u)\b[a-zA-Z]{3,}\b")
+X = vec.fit_transform(docs)
+
+nmf = NMF(n_components=12, init="nndsvd", random_state=0, max_iter=400)
+W = nmf.fit_transform(X)      # 文書 × トピックの重み
+H = nmf.components_           # トピック × 単語の重み
+vocab = vec.get_feature_names_out()
+for k, row in enumerate(H):
+    print(f"{k:2} {' '.join(vocab[i] for i in row.argsort()[::-1][:9])}")
+```
+
+```python
+# 各トピックを最もよく代表する文書
+for k in [0, 1, 2]:
+    i = W[:, k].argmax()
+    print(k, "|", " ".join(docs[i].split())[:110])
+```
+
+- TF-IDF 行列 X を、非負の 2 つの行列の積 W × H で近似する。非負なので「足し算だけ」で文書が表現され、解釈しやすい。
+- 確率モデルではないので、LDA のような確率的な解釈はできないが、決定的 (`init="nndsvd"`) で再現性が高い。
+- ツイートやタイトルのような短文には、LDA より NMF のほうが良い結果になることが多い。
+
+## 文書からキーワードを抽出する (埋め込みによる KeyBERT 方式) {keyword_extraction}
+
+1 つの文書から、その内容を代表するキーワードを数個選びたい。コーパス全体の統計なしで、単独の文書に対して行いたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import numpy as np
+from fugashi import Tagger
+from sentence_transformers import SentenceTransformer
+
+tagger = Tagger()
+model = SentenceTransformer("intfloat/multilingual-e5-small")
+
+def candidates(text):
+    """連続する名詞をつなげた複合名詞を候補にする"""
+    out, buf = [], []
+    for w in list(tagger(text)) + [None]:
+        if w is not None and w.feature.pos1 in ("名詞", "接頭辞", "接尾辞") and w.feature.pos2 != "数詞":
+            buf.append(w.surface)
+        else:
+            if buf and len("".join(buf)) > 1:
+                out.append("".join(buf))
+            buf = []
+    return list(dict.fromkeys(out))
+
+def keywords(text, top_k=6, diversity=0.5):
+    cands = candidates(text)
+    doc = model.encode("query: " + text, normalize_embeddings=True)
+    emb = model.encode(["query: " + c for c in cands], normalize_embeddings=True)
+    sim_doc, sim_cand = emb @ doc, emb @ emb.T
+    selected = [int(sim_doc.argmax())]
+    while len(selected) < min(top_k, len(cands)):      # MMR: 文書に近く、かつ選択済みの語とは似ていないものを選ぶ
+        rest = [i for i in range(len(cands)) if i not in selected]
+        mmr = [(1 - diversity) * sim_doc[i] - diversity * sim_cand[i, selected].max() for i in rest]
+        selected.append(rest[int(np.argmax(mmr))])
+    return [(cands[i], round(float(sim_doc[i]), 3)) for i in selected]
+
+text = ("文法誤り訂正は、学習者が書いた文に含まれる誤りを自動的に訂正する自然言語処理のタスクである。"
+        "近年は系列変換モデルや大規模言語モデルを用いた手法が主流となっており、擬似誤りデータによる事前学習が性能向上に寄与している。"
+        "評価には編集単位の適合率と再現率に基づく F0.5 が広く用いられる。")
+print("候補:", candidates(text))
+print("キーワード:", keywords(text))
+```
+
+- 「文書全体の埋め込みに近い語句ほど、その文書を代表している」という考え方。学習もコーパスも要らない。
+- MMR で多様性を持たせないと、「言語モデル」「大規模言語モデル」のように似た語ばかりが選ばれる。
+- 統計ベースなら TF-IDF (この章の「TF-IDF で文書ごとの特徴語を取り出す」を参照)、英語なら YAKE や RAKE、グラフベースなら TextRank などがある。ライブラリは `keybert` や `pke`。
