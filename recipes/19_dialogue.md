@@ -27,7 +27,8 @@ def respond(text, rng):
     for pattern, templates in RULES:           # 上から順に照合し、最初に合った規則を使う
         m = re.search(pattern, text)
         if m:
-            return rng.choice(templates).format(*[g.strip("、。 ") for g in m.groups()])
+            groups = [re.sub(r"^(?:でも|けど|最近|実は|正直)[、,]?\s*", "", g).strip("、。 ") for g in m.groups()]
+            return rng.choice(templates).format(*groups)
     return rng.choice(DEFAULT)
 
 rng = random.Random(0)
@@ -101,16 +102,16 @@ examples = {
 model = SentenceTransformer("intfloat/multilingual-e5-small")
 texts = [t for ts in examples.values() for t in ts]
 labels = [intent for intent, ts in examples.items() for _ in ts]
-clf = LogisticRegression(C=20, max_iter=1000).fit(model.encode(["query: " + t for t in texts], normalize_embeddings=True), labels)
+clf = LogisticRegression(C=1000, max_iter=5000).fit(model.encode(["query: " + t for t in texts], normalize_embeddings=True), labels)
 
-def classify(text, min_prob=0.4):
+def classify(text, min_prob=0.55):
     probs = clf.predict_proba(model.encode(["query: " + text], normalize_embeddings=True))[0]
     order = np.argsort(-probs)
-    intent = clf.classes_[order[0]] if probs[order[0]] >= min_prob else "不明"
-    return intent, [(clf.classes_[i], round(float(probs[i]), 2)) for i in order[:2]]
+    intent = str(clf.classes_[order[0]]) if probs[order[0]] >= min_prob else "不明"
+    return intent, [(str(clf.classes_[i]), round(float(probs[i]), 2)) for i in order[:2]]
 
 for text in ["土曜の 18 時に 4 人で行きたいんですが", "やっぱり行けなくなりました", "予約を 1 時間遅らせたい", "月曜って開いてる？",
-             "車で行けますか", "予約", "領収書は出ますか？"]:
+             "車で行けますか", "予約", "領収書は出ますか？", "今日の夕飯は何にしよう"]:
     print(classify(text), text)
 ```
 
@@ -119,10 +120,11 @@ for text in ["土曜の 18 時に 4 人で行きたいんですが", "やっぱ�
 from sklearn.model_selection import cross_val_score
 
 X = model.encode(["query: " + t for t in texts], normalize_embeddings=True)
-print("5 分割交差検証の正解率:", cross_val_score(LogisticRegression(C=20, max_iter=1000), X, labels, cv=5).mean().round(3))
+print("5 分割交差検証の正解率:", round(cross_val_score(LogisticRegression(C=1000, max_iter=5000), X, labels, cv=5).mean(), 3))
 ```
 
 - 意図ごとに 5 件ほどの例文でも、埋め込み + 線形分類器でかなり動く。誤分類された発話を例文に足していくと、すぐに改善する。
+- 例文が少ないので、正則化を弱く (`C` を大きく) しないと確率が全体に平らになり、ほとんどが「不明」になる。
 - 「予約」「キャンセル」「変更」のように似た意図は混同しやすい。確率が低いときは「不明」として、聞き返すか人に回す。
 - どの意図にも当てはまらない発話 (領収書) を無理に分類しないよう、「その他」の例文を入れるか、確率のしきい値を設ける。
 
@@ -215,7 +217,7 @@ tokenizer = AutoTokenizer.from_pretrained(name)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 class Chat:
-    def __init__(self, system, max_input_tokens=400):
+    def __init__(self, system, max_input_tokens=200):
         self.system = {"role": "system", "content": system}
         self.history = []                       # user と assistant の発話を交互に積む
         self.max_input_tokens = max_input_tokens
@@ -230,7 +232,7 @@ class Chat:
             history = history[2:]
         return [self.system] + history
 
-    def say(self, text, max_new_tokens=80):
+    def say(self, text, max_new_tokens=60):
         self.history.append({"role": "user", "content": text})
         messages = self.window()
         inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
@@ -240,7 +242,7 @@ class Chat:
         self.history.append({"role": "assistant", "content": reply})
         return reply, inputs["input_ids"].shape[1], (len(messages) - 1) // 2
 
-chat = Chat("あなたは旅行の相談に乗るアシスタントです。2 文以内で簡潔に答えてください。")
+chat = Chat("あなたは旅行の相談に乗るアシスタントです。1〜2 文で短く答えてください。")
 for user in ["私の名前は田中です。来月、京都に 2 泊で行く予定です。", "秋におすすめのお寺を 1 つ教えてください。", "そこへは京都駅からどう行けばいいですか？",
              "近くでお昼を食べるなら何がいいですか？", "ところで、私の名前を覚えていますか？"]:
     reply, n_in, n_turns = chat.say(user)
@@ -286,12 +288,12 @@ class SummaryChat:
         self.history.append({"role": "user", "content": text})
         if len(self.history) > self.keep + 2:
             self.compress()
-        system = self.system + (f"\n\nこれまでの対話の要約: {self.summary}" if self.summary else "")
-        reply = generate([{"role": "system", "content": system}] + self.history, max_new_tokens=80)
+        system = self.system + (f"\n\n# これまでの対話で分かっていること\n{self.summary}" if self.summary else "")
+        reply = generate([{"role": "system", "content": system}] + self.history, max_new_tokens=60)
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
-chat = SummaryChat("あなたは旅行の相談に乗るアシスタントです。2 文以内で簡潔に答えてください。")
+chat = SummaryChat("あなたは旅行の相談に乗るアシスタントです。1〜2 文で短く答えてください。")
 for user in ["私の名前は田中です。来月、京都に 2 泊で行く予定です。", "混雑が苦手なので、静かな場所が好きです。", "秋におすすめのお寺を 1 つ教えてください。",
              "そこへは京都駅からどう行けばいいですか？", "近くでお昼を食べるなら何がいいですか？", "ところで、私の名前と、どんな場所が好きかを覚えていますか？"]:
     print(f"あなた: {user}\nボット: {chat.say(user)}")
@@ -382,16 +384,32 @@ def generate(messages, max_new_tokens=80):
 ```
 
 ```python
-SYSTEM = ("あなたはクックブック食堂の案内係です。丁寧な言葉で、2 文以内で答えてください。"
-          "お店に関する質問には、与えられた資料に書かれていることだけを使って答え、資料にないことは「わかりかねます」と答えてください。")
+import re
+from transformers import AutoModelForSequenceClassification
+
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+nli_tok = AutoTokenizer.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
+
+def supported(context, reply):
+    """応答の各文が資料から言えるか (含意確率の最小値)"""
+    sents = [s for s in re.split(r"(?<=[。！？])", reply) if s.strip()]
+    with torch.no_grad():
+        probs = nli(**nli_tok([context] * len(sents), sents, return_tensors="pt", padding=True, truncation=True)).logits.softmax(-1)
+    return probs[:, 0].min().item()
+
+SYSTEM = "あなたはクックブック食堂の案内係です。丁寧な言葉で、1 文で短く答えてください。"
+SMALL_TALK = re.compile(r"こんにちは|こんばんは|おはよう|はじめまして|ありがとう|助かりました|さようなら|また来ます")
+REFERENCE = re.compile(r"それ|そこ|その|これ|あれ|そちら|ここ")
+FALLBACK = "申し訳ありませんが、その件はわかりかねます。お店に直接お問い合わせください。"
 
 class RagChat:
-    def __init__(self, threshold=0.80):
-        self.history, self.threshold = [], threshold
+    def __init__(self):
+        self.history = []
 
     def rewrite(self, question):
-        """対話の文脈を補って、検索用の質問にする (最初のターンはそのまま)"""
-        if not self.history:
+        """指示語を含む質問だけ、対話の文脈を補って検索用の質問にする"""
+        if not self.history or not REFERENCE.search(question):
             return question
         dialogue = "\n".join(f"{'ユーザー' if m['role'] == 'user' else 'アシスタント'}: {m['content']}" for m in self.history[-4:])
         prompt = ("次の対話の最後の質問を、対話を読んでいない人にも意味が通じる、検索用の 1 つの質問に書き換えてください。"
@@ -399,26 +417,35 @@ class RagChat:
         return generate([{"role": "user", "content": prompt}], max_new_tokens=50).strip("「」")
 
     def say(self, question):
-        query = self.rewrite(question)
-        sims = doc_emb @ embedder.encode("query: " + query, normalize_embeddings=True)
-        hits = [int(i) for i in sims.argsort()[::-1][:2] if sims[i] >= self.threshold]
-        # 資料は履歴に残さず、今回の質問にだけ付ける (履歴が資料で膨らむのを防ぐ)
-        content = question if not hits else "# 資料\n" + "\n".join(f"- {docs[i]}" for i in hits) + f"\n\n# 質問\n{question}"
-        reply = generate([{"role": "system", "content": SYSTEM}] + self.history[-6:] + [{"role": "user", "content": content}])
+        if SMALL_TALK.search(question):                      # 挨拶やお礼は、検索せずにそのまま応答する
+            reply, query, hits, score = generate([{"role": "system", "content": SYSTEM}, {"role": "user", "content": question}], 40), None, [], None
+        else:
+            query = self.rewrite(question)
+            sims = doc_emb @ embedder.encode("query: " + query, normalize_embeddings=True)
+            hits = [int(i) for i in sims.argsort()[::-1][:2]]
+            context = "\n".join(docs[i] for i in hits)
+            # 資料は履歴に残さず、今回の質問にだけ付ける (履歴が資料で膨らむのを防ぐ)
+            content = f"次の資料だけに基づいて質問に答えてください。\n\n# 資料\n{context}\n\n# 質問\n{query}"
+            reply = generate([{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}], 70)
+            score = supported(context, reply)
+            if score < 0.5:                                  # 資料から言えないことを述べていたら、定型の応答に差し替える
+                reply = FALLBACK
         self.history += [{"role": "user", "content": question}, {"role": "assistant", "content": reply}]
-        return reply, query, hits
+        return reply, query, hits, score
 
 bot = RagChat()
-for user in ["こんにちは。", "おすすめのメニューは何ですか？", "それはいくらですか？", "辛いのが苦手なのですが大丈夫でしょうか。",
-             "日曜の夜に行きたいのですが、開いていますか？", "カードは使えますか？", "ペットを連れて行けますか？"]:
-    reply, query, hits = bot.say(user)
-    print(f"あなた: {user}\nボット: {reply}\n   (検索クエリ: {query} / 参照した資料: {hits})")
+for user in ["こんにちは。", "おすすめのメニューは何ですか？", "それはいくらですか？", "子ども向けのメニューはありますか？",
+             "日曜の 18 時は開いていますか？", "クレジットカードは使えますか？", "ペットを連れて行けますか？", "ありがとうございました。"]:
+    reply, query, hits, score = bot.say(user)
+    detail = "検索なし" if query is None else f"検索クエリ: {query} / 資料: {hits} / 裏付け: {score:.2f}"
+    print(f"あなた: {user}\nボット: {reply}\n   ({detail})")
 ```
 
-- 各ターンで「質問の書き換え → 検索 → 資料を付けて生成」を行う。「それはいくら」のような質問は、書き換えないと検索に当たらない。
-- 検索した資料は、そのターンの入力にだけ付けて、履歴には質問と回答だけを残す。資料まで履歴に積むと、数ターンで入力があふれる。
-- 類似度が低いときは資料を付けない。挨拶や雑談に無関係な資料を付けると、それに引きずられた応答になる。
-- 資料にないこと (ペット) を聞かれたときに正直に断れるかは、モデルの大きさとプロンプトに左右される。RAG の章の「わかりませんと答えさせる」「回答を評価する」と合わせて確認する。
+- 各ターンで「(必要なら) 質問の書き換え → 検索 → 資料を付けて生成 → 資料との照合」を行う。
+- 小さな埋め込みモデルの類似度では、挨拶と質問、答えのある質問とない質問をうまく区別できない (挨拶のほうが類似度が高く出ることもある)。そこで、挨拶は規則で判定し、答えが資料にあるかどうかは生成した応答を NLI で資料と照合して確かめている。
+- 3B クラスのモデルは、資料にないこと (ペット) を聞かれると、もっともらしい答えを作ってしまうことが多い。照合で裏付けが取れない応答は定型文に差し替えると、誤った案内を防げる。そのかわり、正しい応答まで差し替えてしまうこともある (安全側に倒す設計)。
+- 質問の書き換えは、指示語を含むときだけ行う。毎回書き換えると、関係のない前の話題を持ち込んで検索を外すことがある (RAG の章の「質問を書き換える」を参照)。
+- 検索した資料は、そのターンの入力にだけ付けて、履歴には質問と回答だけを残す。
 
 ## 入力と出力に安全策を入れる (ガードレール) {dialogue_guardrail}
 
@@ -433,7 +460,8 @@ model = SentenceTransformer("intfloat/multilingual-e5-small")
 
 # 1. 話題の範囲: 受け付ける話題の例文との類似度で判定する
 IN_SCOPE = ["営業時間を教えてください", "予約したいのですが", "メニューと値段を知りたい", "お店の場所はどこですか", "支払い方法は何がありますか",
-            "アレルギーに対応していますか", "駐車場はありますか", "こんにちは", "ありがとうございました"]
+            "アレルギーに対応していますか", "駐車場はありますか", "何時まで開いていますか", "日曜日は営業していますか",
+            "子ども向けの料理はありますか", "こんにちは", "ありがとうございました"]
 scope_emb = model.encode(["query: " + t for t in IN_SCOPE], normalize_embeddings=True)
 
 def in_scope(text, threshold=0.84):
