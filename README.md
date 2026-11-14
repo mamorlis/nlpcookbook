@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 266 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 283 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. Google Colab の小技](#1-google-colab-の小技) (11)
 - [2. データの収集と入出力](#2-データの収集と入出力) (11)
@@ -28,9 +28,11 @@
 - [14. テキスト分類](#14-テキスト分類) (16)
 - [15. 系列ラベリング](#15-系列ラベリング) (8)
 - [16. Transformers の基本操作](#16-transformers-の基本操作) (17)
-- [17. 大規模言語モデル (LLM)](#17-大規模言語モデル-llm) (17)
-- [18. 評価指標と統計的検定](#18-評価指標と統計的検定) (16)
-- [19. 文法誤り訂正と言語教育](#19-文法誤り訂正と言語教育) (10)
+- [17. 大規模言語モデル (LLM)](#17-大規模言語モデル-llm) (15)
+- [18. RAG (検索拡張生成)](#18-rag-検索拡張生成) (9)
+- [19. 対話システム](#19-対話システム) (10)
+- [20. 評価指標と統計的検定](#20-評価指標と統計的検定) (16)
+- [21. 文法誤り訂正と言語教育](#21-文法誤り訂正と言語教育) (10)
 
 ### 1. Google Colab の小技
 
@@ -380,56 +382,87 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 17-05 | [複数のプロンプトをまとめてバッチ生成する](notebooks/17_llm/llm_batch_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_batch_generation.ipynb) |
 | 17-06 | [LLM の出力から JSON を取り出して検証する](notebooks/17_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_json_output.ipynb) |
 | 17-07 | [プロンプトをテンプレートで管理し、似た例を動的に選ぶ](notebooks/17_llm/prompt_template.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/prompt_template.ipynb) |
-| 17-08 | [長い文書をチャンクに分割する](notebooks/17_llm/chunking.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/chunking.ipynb) |
-| 17-09 | [検索した文書を LLM に渡して答えさせる (最小の RAG)](notebooks/17_llm/rag_minimal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/rag_minimal.ipynb) |
-| 17-10 | [LLM を 4bit 量子化して少ないメモリで動かす](notebooks/17_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_4bit.ipynb) |
-| 17-11 | [LoRA で LLM を少ないメモリでファインチューニングする](notebooks/17_llm/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/lora_finetune.ipynb) |
-| 17-12 | [Claude API を呼び出す](notebooks/17_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_basic.ipynb) |
-| 17-13 | [Claude の応答をストリーミングで受け取る](notebooks/17_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_streaming.ipynb) |
-| 17-14 | [Claude に決まった形式 (JSON スキーマ) で出力させる](notebooks/17_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_structured.ipynb) |
-| 17-15 | [Claude で大量のテキストを安く処理する (Message Batches API)](notebooks/17_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_batch.ipynb) |
-| 17-16 | [Claude API のトークン数と料金を事前に見積もる](notebooks/17_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_count_tokens.ipynb) |
-| 17-17 | [LLM に生成文の品質を採点させる (LLM-as-a-judge)](notebooks/17_llm/llm_judge.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_judge.ipynb) |
+| 17-08 | [LLM を 4bit 量子化して少ないメモリで動かす](notebooks/17_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_4bit.ipynb) |
+| 17-09 | [LoRA で LLM を少ないメモリでファインチューニングする](notebooks/17_llm/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/lora_finetune.ipynb) |
+| 17-10 | [Claude API を呼び出す](notebooks/17_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_basic.ipynb) |
+| 17-11 | [Claude の応答をストリーミングで受け取る](notebooks/17_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_streaming.ipynb) |
+| 17-12 | [Claude に決まった形式 (JSON スキーマ) で出力させる](notebooks/17_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_structured.ipynb) |
+| 17-13 | [Claude で大量のテキストを安く処理する (Message Batches API)](notebooks/17_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_batch.ipynb) |
+| 17-14 | [Claude API のトークン数と料金を事前に見積もる](notebooks/17_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/claude_count_tokens.ipynb) |
+| 17-15 | [LLM に生成文の品質を採点させる (LLM-as-a-judge)](notebooks/17_llm/llm_judge.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_llm/llm_judge.ipynb) |
 
-### 18. 評価指標と統計的検定
+### 18. RAG (検索拡張生成)
+
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる。検索の部品 (埋め込み、BM25、ハイブリッド、リランキング) は「文埋め込み・類似度・検索」の章を参照。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 18-01 | [検索した文書を LLM に渡して答えさせる (最小の RAG)](notebooks/18_rag/rag_minimal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_minimal.ipynb) |
+| 18-02 | [長い文書をチャンクに分割する](notebooks/18_rag/chunking.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/chunking.ipynb) |
+| 18-03 | [小さなチャンクで検索して、周りの文脈ごと LLM に渡す](notebooks/18_rag/rag_parent_child.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_parent_child.ipynb) |
+| 18-04 | [ベクトル DB に保存して、メタデータで絞り込んで検索する (Qdrant)](notebooks/18_rag/rag_vector_db.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_vector_db.ipynb) |
+| 18-05 | [回答に出典を付けさせ、その出典を検証する](notebooks/18_rag/rag_citation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_citation.ipynb) |
+| 18-06 | [答えが資料にないときに「わかりません」と答えさせる](notebooks/18_rag/rag_refusal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_refusal.ipynb) |
+| 18-07 | [検索しやすい形に質問を書き換える (文脈の補完と HyDE)](notebooks/18_rag/rag_query_rewrite.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_query_rewrite.ipynb) |
+| 18-08 | [検索の評価セットを作って手法を比べる](notebooks/18_rag/rag_eval_retrieval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_eval_retrieval.ipynb) |
+| 18-09 | [RAG の回答を LLM を使わずに評価する](notebooks/18_rag/rag_eval_answer.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_rag/rag_eval_answer.ipynb) |
+
+### 19. 対話システム
+
+規則ベース、FAQ 検索、タスク指向、LLM による雑談まで。チャットボットを組み立てる部品を、CPU で動く範囲で。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 19-01 | [規則だけでチャットボットを作る (ELIZA 方式)](notebooks/19_dialogue/eliza_rule.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/eliza_rule.ipynb) |
+| 19-02 | [よくある質問に自動で答える FAQ ボットを作る](notebooks/19_dialogue/faq_bot.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/faq_bot.ipynb) |
+| 19-03 | [発話の意図を分類する (少数の例から)](notebooks/19_dialogue/intent_classifier.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/intent_classifier.ipynb) |
+| 19-04 | [必要な情報を聞き出しながら予約を受け付ける (スロットフィリング)](notebooks/19_dialogue/slot_filling.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/slot_filling.ipynb) |
+| 19-05 | [対話の履歴を管理して、長くなったら古いターンを捨てる](notebooks/19_dialogue/chat_history.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/chat_history.ipynb) |
+| 19-06 | [古い対話を要約して長い対話を続ける](notebooks/19_dialogue/chat_summary_memory.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/chat_summary_memory.ipynb) |
+| 19-07 | [キャラクターや口調を設定する (ペルソナ)](notebooks/19_dialogue/persona_prompt.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/persona_prompt.ipynb) |
+| 19-08 | [資料を調べて答えるチャットボットを作る (複数ターンの RAG)](notebooks/19_dialogue/chat_rag.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/chat_rag.ipynb) |
+| 19-09 | [入力と出力に安全策を入れる (ガードレール)](notebooks/19_dialogue/dialogue_guardrail.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/dialogue_guardrail.ipynb) |
+| 19-10 | [ブラウザで使えるチャット画面を作る (Gradio)](notebooks/19_dialogue/gradio_chat.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_dialogue/gradio_chat.ipynb) |
+
+### 20. 評価指標と統計的検定
 
 翻訳・要約・検索・分類の出力を数値で評価し、その差が偶然でないかを確かめる。
 
 | # | やりたいこと | Colab |
 |---|---|---|
-| 18-01 | [機械翻訳を BLEU で評価する (sacreBLEU)](notebooks/18_evaluation/bleu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/bleu.ipynb) |
-| 18-02 | [chrF と TER で翻訳を評価する](notebooks/18_evaluation/chrf_ter.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/chrf_ter.ipynb) |
-| 18-03 | [要約を ROUGE で評価する (日本語対応)](notebooks/18_evaluation/rouge_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/rouge_ja.ipynb) |
-| 18-04 | [BERTScore で意味的な近さを評価する](notebooks/18_evaluation/bertscore.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/bertscore.ipynb) |
-| 18-05 | [COMET で翻訳の品質を評価する](notebooks/18_evaluation/comet.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/comet.ipynb) |
-| 18-06 | [音声認識や OCR の誤り率 (WER / CER) を計算する](notebooks/18_evaluation/wer_cer.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/wer_cer.ipynb) |
-| 18-07 | [適合率・再現率・F1 を自分で計算する (micro と macro)](notebooks/18_evaluation/prf_manual.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/prf_manual.ipynb) |
-| 18-08 | [アノテーションの一致度を測る (κ 係数、Krippendorff の α)](notebooks/18_evaluation/agreement.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/agreement.ipynb) |
-| 18-09 | [ブートストラップ法で評価値の信頼区間を求める](notebooks/18_evaluation/bootstrap_ci.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/bootstrap_ci.ipynb) |
-| 18-10 | [2 つのシステムの差が有意かどうかを検定する](notebooks/18_evaluation/significance_test.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/significance_test.ipynb) |
-| 18-11 | [乱数シードによるばらつきを考慮して結果を報告する](notebooks/18_evaluation/seed_variance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/seed_variance.ipynb) |
-| 18-12 | [自動評価指標と人手評価の相関を調べる](notebooks/18_evaluation/metric_correlation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/metric_correlation.ipynb) |
-| 18-13 | [質問応答を完全一致と F1 で評価する](notebooks/18_evaluation/qa_em_f1.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/qa_em_f1.ipynb) |
-| 18-14 | [検索・ランキングを評価する (Recall@k、MRR、nDCG)](notebooks/18_evaluation/ranking_metrics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/ranking_metrics.ipynb) |
-| 18-15 | [生成テキストの多様性と繰り返しを測る (distinct-n)](notebooks/18_evaluation/distinct_n.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/distinct_n.ipynb) |
-| 18-16 | [モデルの確信度が当てになるか調べる (較正、ECE)](notebooks/18_evaluation/calibration_ece.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_evaluation/calibration_ece.ipynb) |
+| 20-01 | [機械翻訳を BLEU で評価する (sacreBLEU)](notebooks/20_evaluation/bleu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/bleu.ipynb) |
+| 20-02 | [chrF と TER で翻訳を評価する](notebooks/20_evaluation/chrf_ter.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/chrf_ter.ipynb) |
+| 20-03 | [要約を ROUGE で評価する (日本語対応)](notebooks/20_evaluation/rouge_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/rouge_ja.ipynb) |
+| 20-04 | [BERTScore で意味的な近さを評価する](notebooks/20_evaluation/bertscore.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/bertscore.ipynb) |
+| 20-05 | [COMET で翻訳の品質を評価する](notebooks/20_evaluation/comet.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/comet.ipynb) |
+| 20-06 | [音声認識や OCR の誤り率 (WER / CER) を計算する](notebooks/20_evaluation/wer_cer.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/wer_cer.ipynb) |
+| 20-07 | [適合率・再現率・F1 を自分で計算する (micro と macro)](notebooks/20_evaluation/prf_manual.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/prf_manual.ipynb) |
+| 20-08 | [アノテーションの一致度を測る (κ 係数、Krippendorff の α)](notebooks/20_evaluation/agreement.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/agreement.ipynb) |
+| 20-09 | [ブートストラップ法で評価値の信頼区間を求める](notebooks/20_evaluation/bootstrap_ci.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/bootstrap_ci.ipynb) |
+| 20-10 | [2 つのシステムの差が有意かどうかを検定する](notebooks/20_evaluation/significance_test.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/significance_test.ipynb) |
+| 20-11 | [乱数シードによるばらつきを考慮して結果を報告する](notebooks/20_evaluation/seed_variance.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/seed_variance.ipynb) |
+| 20-12 | [自動評価指標と人手評価の相関を調べる](notebooks/20_evaluation/metric_correlation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/metric_correlation.ipynb) |
+| 20-13 | [質問応答を完全一致と F1 で評価する](notebooks/20_evaluation/qa_em_f1.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/qa_em_f1.ipynb) |
+| 20-14 | [検索・ランキングを評価する (Recall@k、MRR、nDCG)](notebooks/20_evaluation/ranking_metrics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/ranking_metrics.ipynb) |
+| 20-15 | [生成テキストの多様性と繰り返しを測る (distinct-n)](notebooks/20_evaluation/distinct_n.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/distinct_n.ipynb) |
+| 20-16 | [モデルの確信度が当てになるか調べる (較正、ECE)](notebooks/20_evaluation/calibration_ece.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/20_evaluation/calibration_ece.ipynb) |
 
-### 19. 文法誤り訂正と言語教育
+### 21. 文法誤り訂正と言語教育
 
 学習者の作文を訂正する、訂正箇所を取り出して分類・評価する、教材づくりに使う。
 
 | # | やりたいこと | Colab |
 |---|---|---|
-| 19-01 | [2 つの文の違いを色付きで表示する](notebooks/19_gec_education/diff_highlight.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/diff_highlight.ipynb) |
-| 19-02 | [訂正前後の文から編集 (置換・挿入・削除) を取り出す](notebooks/19_gec_education/edit_extraction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/edit_extraction.ipynb) |
-| 19-03 | [ERRANT で英語の訂正を誤りタイプ付きの編集に変換する](notebooks/19_gec_education/errant.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/errant.ipynb) |
-| 19-04 | [M2 形式のファイルを読み書きする](notebooks/19_gec_education/m2_format.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/m2_format.ipynb) |
-| 19-05 | [文法誤り訂正を編集単位の F0.5 で評価する](notebooks/19_gec_education/gec_f05.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/gec_f05.ipynb) |
-| 19-06 | [学習済みモデルで英語の文法誤りを訂正する](notebooks/19_gec_education/gec_model_en.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/gec_model_en.ipynb) |
-| 19-07 | [規則で誤りを注入して GEC の擬似学習データを作る](notebooks/19_gec_education/synthetic_errors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/synthetic_errors.ipynb) |
-| 19-08 | [日本語の文章の読みやすさを測る](notebooks/19_gec_education/readability_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/readability_ja.ipynb) |
-| 19-09 | [単語の頻度から語彙の難しさを推定する (wordfreq)](notebooks/19_gec_education/word_frequency_level.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/word_frequency_level.ipynb) |
-| 19-10 | [穴埋め問題 (クローズテスト) を自動で作る](notebooks/19_gec_education/cloze_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/19_gec_education/cloze_generation.ipynb) |
+| 21-01 | [2 つの文の違いを色付きで表示する](notebooks/21_gec_education/diff_highlight.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/diff_highlight.ipynb) |
+| 21-02 | [訂正前後の文から編集 (置換・挿入・削除) を取り出す](notebooks/21_gec_education/edit_extraction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/edit_extraction.ipynb) |
+| 21-03 | [ERRANT で英語の訂正を誤りタイプ付きの編集に変換する](notebooks/21_gec_education/errant.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/errant.ipynb) |
+| 21-04 | [M2 形式のファイルを読み書きする](notebooks/21_gec_education/m2_format.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/m2_format.ipynb) |
+| 21-05 | [文法誤り訂正を編集単位の F0.5 で評価する](notebooks/21_gec_education/gec_f05.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/gec_f05.ipynb) |
+| 21-06 | [学習済みモデルで英語の文法誤りを訂正する](notebooks/21_gec_education/gec_model_en.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/gec_model_en.ipynb) |
+| 21-07 | [規則で誤りを注入して GEC の擬似学習データを作る](notebooks/21_gec_education/synthetic_errors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/synthetic_errors.ipynb) |
+| 21-08 | [日本語の文章の読みやすさを測る](notebooks/21_gec_education/readability_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/readability_ja.ipynb) |
+| 21-09 | [単語の頻度から語彙の難しさを推定する (wordfreq)](notebooks/21_gec_education/word_frequency_level.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/word_frequency_level.ipynb) |
+| 21-10 | [穴埋め問題 (クローズテスト) を自動で作る](notebooks/21_gec_education/cloze_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_gec_education/cloze_generation.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->
