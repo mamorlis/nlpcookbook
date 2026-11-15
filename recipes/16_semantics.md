@@ -145,6 +145,71 @@ print(resolve(doc))
 - 置換後の文は不自然になることがある。人が読むためではなく、関係抽出や検索の前処理として使う。
 - Stanza の共参照モデルは英語のほか、ドイツ語、フランス語、スペイン語など多数の言語に対応している (日本語は未対応なので、前項の KWJA を使う)。
 
+## 代名詞が何を指すかを常識で判断させる (Winograd Schema Challenge) {winograd_ja}
+
+「狙撃兵はテロリストを撃った。彼は悪漢だったからだ。」の「彼」が誰を指すかのように、文法だけでは決まらず、常識が必要な照応の問題をモデルに解かせたい。
+
+```python
+import re, urllib.request
+import numpy as np
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+url = "https://raw.githubusercontent.com/ku-nlp/Winograd-Schema-Challenge-Ja/master/test.txt"
+blocks = urllib.request.urlopen(url).read().decode("utf-8").strip().split("\n\t\t\n")
+problems = []
+for block in blocks:
+    lines = [line.split("\t") for line in block.split("\n")]
+    if len(lines) >= 4:
+        candidates = [c.strip() for c in re.split(r"[、,，]", lines[2][1]) if c.strip()]
+        problems.append({"text": lines[0][1], "pronoun": lines[1][1], "candidates": candidates, "answer": lines[3][1].strip()})
+problems = [p for p in problems if len(p["candidates"]) == 2 and p["answer"] in p["candidates"]]
+print(len(problems), "問"); print(problems[0]); print(problems[1])
+```
+
+```python
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+ONE_TWO = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["1", "2"]]
+
+@torch.no_grad()
+def p_first(text, pronoun, a, b):
+    prompt = (f"次の文の「{pronoun}」が指しているのはどちらですか。番号だけで答えてください。\n\n文: {text}\n1. {a}\n2. {b}")
+    chat = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return float(llm(ids).logits[0, -1, ONE_TWO].softmax(-1)[0])
+
+def solve(p):
+    """選択肢の順序を入れ替えて 2 回聞き、平均する (1 番目を選びやすい、といった偏りを打ち消す)"""
+    a, b = p["candidates"]
+    score = (p_first(p["text"], p["pronoun"], a, b) + 1 - p_first(p["text"], p["pronoun"], b, a)) / 2
+    return a if score > 0.5 else b
+
+sample = problems[:200]
+df = pd.DataFrame(sample)
+df["prediction"] = [solve(p) for p in sample]
+df["correct"] = df["prediction"] == df["answer"]
+print("正解率:", round(df["correct"].mean(), 3), "(でたらめなら 0.5)")
+```
+
+```python
+# このデータは 2 文で 1 組 (同じ登場人物で、1 語か 2 語だけ違い、答えが入れ替わる)。組の両方に正解できた割合を見る
+pair_ok = [df["correct"][i] and df["correct"][i + 1] for i in range(0, len(df) - 1, 2)]
+print("組の両方に正解:", round(np.mean(pair_ok), 3), "/ 常に同じ側を答えているだけの組:",
+      round(np.mean([df["prediction"][i] == df["prediction"][i + 1] for i in range(0, len(df) - 1, 2)]), 3))
+print("先に出てくる候補を選んだ割合:", round(np.mean([p == c[0] for p, c in zip(df["prediction"], df["candidates"])]), 3))
+for r in df[~df["correct"]].head(5).itertuples():
+    print(f"× {r.text}\n     「{r.pronoun}」→ 予測: {r.prediction} / 正解: {r.answer}")
+```
+
+- Winograd Schema Challenge は、文法的にはどちらの候補も先行詞になれるが、常識を使えば一方に決まる問題を集めたもの。1 語を変えると答えが入れ替わる 2 文が組になっている。
+- 組になっていることが重要。片方だけ正解しても、「主語を選びやすい」「先に出たほうを選びやすい」といった癖で当たっただけかもしれない。組の両方に正解した割合のほうが、実力をよく表す。
+- 日本語版 (JWSC) は英語からの翻訳で作られている。日本語ではゼロ代名詞が自然な場面でも「彼」「それ」が使われるので、やや不自然な文が含まれる。
+- 事前学習済みモデルの登場で、この種の問題の正解率は大きく上がった。ただし、Web 上の類似文を覚えているだけの可能性や、データの偏りを使っている可能性が指摘されており、改良版 (WinoGrande など) が作られている。
+- 照応解析の一般的な方法は、意味解析の章の共参照解析のレシピを参照。
+
 ## 多義語の語義を文脈から判定する (語義曖昧性解消) {wsd_en}
 
 `bank` が「銀行」なのか「土手」なのかを、文脈から自動で判定したい。WordNet の語義のどれに当たるかを選ぶ。
@@ -488,6 +553,104 @@ for s in ["彼は会議に出席した。", "彼は会議に出席しなかっ�
 - この規則は文末の述語しか見ていない。「来なかった人が合格した」のような従属節の否定、「全員は来なかった」のような否定の作用域 (スコープ) は扱えない。
 - 事実性 (その出来事が実際に起きたと書き手が述べているか) の判定は、否定・モダリティ・時制・条件節 (「もし〜なら」) の組み合わせで決まる。医療文書の所見抽出 (「〜を認めない」) などで実用上とても重要。
 - この章の前半で扱った KWJA も、基本句の素性として時制やモダリティの情報を出力する。
+
+## 2 つの文の論理的な関係を接続表現から推定する (談話関係) {discourse_relation}
+
+2 つの文が「原因と結果」「逆接」「例示」などのどの関係にあるかを推定したい。注釈付きデータを使わず、接続表現の予測として解く。
+
+```python
+!pip install -q fugashi unidic-lite datasets
+```
+
+```python
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+name = "tohoku-nlp/bert-base-japanese-v3"
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForMaskedLM.from_pretrained(name).eval()
+
+# 談話関係ごとの代表的な接続表現
+CONNECTIVES = {"原因・理由": ["だから", "そのため", "したがって"], "逆接": ["しかし", "ところが", "だが"], "例示": ["たとえば", "例えば"],
+               "付加": ["また", "さらに", "そして"], "言い換え": ["つまり", "すなわち"]}
+print({c: tokenizer.tokenize(c) for cs in CONNECTIVES.values() for c in cs})      # 「だから」は「だ / から」のように 2 トークンになるものがある
+
+@torch.no_grad()
+def connective_score(first, second, connective):
+    """接続表現を入れた文で、その接続表現のトークンを 1 つずつ [MASK] にして予測させ、対数確率の平均をとる (疑似対数尤度)"""
+    enc = tokenizer(f"{first}{connective}、{second}", return_tensors="pt")
+    ids = enc["input_ids"][0]
+    conn_ids = tokenizer(connective, add_special_tokens=False)["input_ids"]
+    start = next(i for i in range(len(ids)) if ids[i:i + len(conn_ids)].tolist() == conn_ids)
+    batch = ids.repeat(len(conn_ids), 1)
+    for k in range(len(conn_ids)):
+        batch[k, start + k] = tokenizer.mask_token_id
+    logp = model(input_ids=batch).logits.log_softmax(-1)
+    return float(sum(logp[k, start + k, conn_ids[k]] for k in range(len(conn_ids)))) / len(conn_ids)     # トークン数で割って、長い表現が不利にならないようにする
+
+def relation_scores(first, second):
+    """関係ごとに、その関係の接続表現のうち最も自然なもののスコアをとる"""
+    return {rel: max(connective_score(first, second, c) for c in cs) for rel, cs in CONNECTIVES.items()}
+
+def relation(first, second, prior=None):
+    """スコアを確率の形に直す。prior を与えると、関係ごとの「どんな文の組でも出やすい度合い」を差し引く"""
+    best = relation_scores(first, second)
+    if prior:
+        best = {rel: v - prior[rel] for rel, v in best.items()}
+    z = torch.tensor(list(best.values())).softmax(0)
+    return {rel: round(float(p), 3) for rel, p in sorted(zip(best, z), key=lambda x: -x[1])}
+
+examples = [("昨夜は大雪が降った。", "今朝は電車が大幅に遅れた。"), ("彼は毎日遅くまで練習した。", "試合には勝てなかった。"),
+            ("この地域には多くの果物がある。", "りんごやぶどうが有名だ。"), ("この店は料理がおいしい。", "値段も手ごろだ。"),
+            ("彼は約束の時間に来なかった。", "約束を破ったのだ。"), ("新しい薬の効果が確認された。", "副作用も報告されている。")]
+for a, b in examples:
+    print(a, "→", b, "\n    ", relation(a, b))
+```
+
+```python
+# 明示的な接続表現のある文の組をコーパスから集めて、正解率を測る (接続表現を隠して当てさせる)
+import re
+from datasets import load_dataset
+
+ds = load_dataset("globis-university/aozorabunko-clean", split="train")
+c2r = {c: rel for rel, cs in CONNECTIVES.items() for c in cs}
+pattern = re.compile("([^。「」\n]{12,50}。)(" + "|".join(c2r) + ")、([^。「」\n]{12,50}。)")
+data = []
+for ex in ds.select(range(3000)):
+    if ex["meta"]["文字遣い種別"] == "新字新仮名":
+        data += [(m.group(1), m.group(3), c2r[m.group(2)]) for m in pattern.finditer(ex["text"][:20000])]
+import random
+random.seed(0); random.shuffle(data)
+by_rel = {}
+for a, b, rel in data:
+    by_rel.setdefault(rel, []).append((a, b, rel))
+test = [x for rel, items in by_rel.items() for x in items[:60]]          # 関係ごとに最大 60 組
+calibration = [x for rel, items in by_rel.items() for x in items[60:72]]  # 補正用に、評価に使わない組を関係ごとに 12 組
+print({rel: len(items) for rel, items in by_rel.items()}, "→ 評価に", len(test), "組 / 補正に", len(calibration), "組")
+
+import numpy as np
+import pandas as pd
+
+# 補正: 関係ごとのスコアの平均 (= その関係の接続表現が、文の中身と関係なく選ばれやすい度合い) を求める
+cal_scores = [relation_scores(a, b) for a, b, _ in calibration]
+prior = {rel: float(np.mean([s[rel] for s in cal_scores])) for rel in CONNECTIVES}
+print("関係ごとの平均スコア:", {rel: round(v, 2) for rel, v in prior.items()})
+
+gold = [rel for _, _, rel in test]
+scores = [relation_scores(a, b) for a, b, _ in test]
+for label, p in [("補正なし", None), ("補正あり", prior)]:
+    pred = [max(s, key=lambda rel: s[rel] - (p[rel] if p else 0)) for s in scores]
+    print(f"{label}: 正解率 {sum(x == g for x, g in zip(pred, gold)) / len(test):.3f}")
+print("最も多い関係を常に答えた場合:", round(max(pd.Series(gold).value_counts()) / len(test), 3))
+print(pd.crosstab(pd.Series(gold, name="正解"), pd.Series(pred, name="予測 (補正あり)")).to_string())
+```
+
+- 談話関係の解析には、接続表現が書かれている場合 (明示的) と、書かれていない場合 (暗黙的) がある。暗黙的な関係の推定は、今も難しい課題。
+- 「接続表現を隠して当てる」問題は、テキストから自動的に大量に作れる。これで学習・評価したモデルを暗黙的な関係の推定に転用する方法は、古くから使われている。
+- ただし、書き手が接続表現を省略する場面と、明示する場面は性質が違う。明示的な例での成績が、暗黙的な関係でもそのまま出るとは限らない。
+- 接続表現は 1 トークンとは限らない (「だから」は「だ / から」)。トークンを 1 つずつ隠して予測させる疑似対数尤度で、長さの違う表現を比べられるようにしている。ただし、表現によってスコアの出やすさが大きく違い、補正しないと特定の関係 (ここでは原因・理由) ばかりが選ばれる。評価に使わない少数の組で関係ごとの平均スコアを求め、差し引いてから比べる。
+- 「また」「そして」のような付加の表現は頻度が高く、モデルの予測もそこに偏る。関係ごとに事前確率で割る、関係ごとの再現率を見る、といった補正を検討する。
+- 注釈付きのデータとしては、英語の Penn Discourse Treebank、日本語の京都大学ウェブ文書リードコーパスの談話関係注釈がある。精度が必要なら、これらで分類器を学習する。
 
 ## 文を一階述語論理の式に変換して真偽を確かめる (NLTK) {logic_semantics}
 

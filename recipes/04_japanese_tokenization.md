@@ -536,6 +536,65 @@ print(unk.most_common())
 
 - `*` が未知語。未知語でなくても誤って細かく分割されている語 (「バズった」「エモい」「インスタ」) は検出できない点に注意。
 
+## 古文を形態素解析する (中古和文 UniDic) {classical_japanese}
+
+源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
+
+```python
+!pip install -q fugashi unidic-lite
+!wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
+!find chuko -name "dicrc" | head -n 1
+```
+
+```python
+import glob, os
+from fugashi import GenericTagger, Tagger
+
+dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
+classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
+modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
+
+text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
+print("中古和文 UniDic:", " | ".join(w.surface for w in classical(text)))
+print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
+```
+
+```python
+# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
+for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
+    f = w.feature
+    print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
+```
+
+```python
+# 助動詞を取り出して、意味を調べる手がかりにする
+def auxiliaries(text):
+    return [(w.surface, w.feature[7], w.feature[5]) for w in classical(text) if w.feature[0] == "助動詞"]
+
+for s in ["竹取の翁といふ者ありけり。", "花の色は移りにけりないたづらに", "男もすなる日記といふものを、女もしてみむとてするなり。", "行く河の流れは絶えずして、しかももとの水にあらず。"]:
+    print(s, "→", auxiliaries(s))
+```
+
+```python
+# 現代語の辞書で解析すると、どこが違ってくるか
+import difflib
+
+s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに"
+a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
+print("中古和文:", a); print("現代語  :", b)
+print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
+# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
+s2 = "男もすなる日記といふものを"
+print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
+print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])
+```
+
+- 古文は、語彙も活用も仮名遣いも現代語と違う。現代語用の辞書では、助動詞 (けり、なり、む) や歴史的仮名遣い (いふ、やうやう) を正しく扱えない。
+- 国立国語研究所が、時代・文体別の UniDic を公開している。平安時代の仮名文学には「中古和文」、明治の文語文には「近代文語」、ほかに上代語、中世の説話や狂言、近世の洒落本向けなどがある。対象のテキストに合うものを選ぶ。
+- 辞書の形式は現代語の UniDic と共通なので、MeCab (fugashi) の辞書を差し替えるだけで使える。語彙素 (辞書の見出し) でまとめれば、表記のゆれをそろえて数えられる。
+- 活用形や助動詞の語彙素が分かるので、古文の学習支援 (品詞分解)、文体の計量的な分析、時代による語の変化の調査に使える。
+- 辞書と違う時代・文体のテキスト (漢文訓読体、和漢混交文、近世の口語) では精度が落ちる。解析結果を抜き取って確かめる。
+
 ## 日本語の単語を読みの五十音順に並べる {sort_by_reading}
 
 漢字を含む単語リストを、文字コード順ではなく読みの五十音順でソートしたい (索引や用語集の作成)。
