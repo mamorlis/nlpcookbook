@@ -2,6 +2,58 @@
 
 SentencePiece や Hugging Face のトークナイザを学習・利用し、モデルに入れる ID 列を作る。
 
+## BPE を 30 行で自作して仕組みを理解する {bpe_scratch}
+
+Byte Pair Encoding が何をしているのか、最小限の実装で確かめたい。
+
+```python
+from collections import Counter
+
+def learn_bpe(words, num_merges):
+    # 各単語を文字列に分解し、語末記号 </w> を付ける
+    vocab = Counter(tuple(w) + ("</w>",) for w in words)
+    merges = []
+    for _ in range(num_merges):
+        pairs = Counter()
+        for symbols, freq in vocab.items():
+            for a, b in zip(symbols, symbols[1:]):
+                pairs[a, b] += freq
+        if not pairs:
+            break
+        best = max(pairs, key=pairs.get)      # 最頻の隣接ペアを 1 つの記号に併合
+        merges.append(best)
+        new_vocab = Counter()
+        for symbols, freq in vocab.items():
+            out, i = [], 0
+            while i < len(symbols):
+                if i + 1 < len(symbols) and (symbols[i], symbols[i + 1]) == best:
+                    out.append(symbols[i] + symbols[i + 1]); i += 2
+                else:
+                    out.append(symbols[i]); i += 1
+            new_vocab[tuple(out)] += freq
+        vocab = new_vocab
+    return merges
+
+def apply_bpe(word, merges):
+    symbols = list(word) + ["</w>"]
+    for a, b in merges:                        # 学習した順に併合を適用
+        i = 0
+        while i < len(symbols) - 1:
+            if symbols[i] == a and symbols[i + 1] == b:
+                symbols[i:i + 2] = [a + b]
+            else:
+                i += 1
+    return symbols
+
+corpus = "low low low low low lower lower newest newest newest newest newest newest widest widest widest".split()
+merges = learn_bpe(corpus, 10)
+print(merges)
+for w in ["lowest", "newer", "wider"]:
+    print(w, "→", apply_bpe(w, merges))
+```
+
+- 未知語 `lowest` が既知の部品 `low` + `est</w>` に分解される。これがサブワードで未知語がなくなる理由。
+
 ## SentencePiece でサブワードモデルを学習する {sentencepiece_train}
 
 自分のコーパスからサブワード分割モデルを作りたい。日本語でも事前の単語分割なしで学習できる。
@@ -87,58 +139,6 @@ for pieces in sp.nbest_encode(text, nbest_size=3, out_type=str):
 
 - `alpha` が小さいほど多様な (確率の低い) 分割が出る。`nbest_size=-1` は全候補からサンプリング。
 - 学習時だけサンプリングし、評価時は最尤分割を使う。
-
-## BPE を 30 行で自作して仕組みを理解する {bpe_scratch}
-
-Byte Pair Encoding が何をしているのか、最小限の実装で確かめたい。
-
-```python
-from collections import Counter
-
-def learn_bpe(words, num_merges):
-    # 各単語を文字列に分解し、語末記号 </w> を付ける
-    vocab = Counter(tuple(w) + ("</w>",) for w in words)
-    merges = []
-    for _ in range(num_merges):
-        pairs = Counter()
-        for symbols, freq in vocab.items():
-            for a, b in zip(symbols, symbols[1:]):
-                pairs[a, b] += freq
-        if not pairs:
-            break
-        best = max(pairs, key=pairs.get)      # 最頻の隣接ペアを 1 つの記号に併合
-        merges.append(best)
-        new_vocab = Counter()
-        for symbols, freq in vocab.items():
-            out, i = [], 0
-            while i < len(symbols):
-                if i + 1 < len(symbols) and (symbols[i], symbols[i + 1]) == best:
-                    out.append(symbols[i] + symbols[i + 1]); i += 2
-                else:
-                    out.append(symbols[i]); i += 1
-            new_vocab[tuple(out)] += freq
-        vocab = new_vocab
-    return merges
-
-def apply_bpe(word, merges):
-    symbols = list(word) + ["</w>"]
-    for a, b in merges:                        # 学習した順に併合を適用
-        i = 0
-        while i < len(symbols) - 1:
-            if symbols[i] == a and symbols[i + 1] == b:
-                symbols[i:i + 2] = [a + b]
-            else:
-                i += 1
-    return symbols
-
-corpus = "low low low low low lower lower newest newest newest newest newest newest widest widest widest".split()
-merges = learn_bpe(corpus, 10)
-print(merges)
-for w in ["lowest", "newer", "wider"]:
-    print(w, "→", apply_bpe(w, merges))
-```
-
-- 未知語 `lowest` が既知の部品 `low` + `est</w>` に分解される。これがサブワードで未知語がなくなる理由。
 
 ## Hugging Face tokenizers で BPE / WordPiece を学習する {tokenizers_train}
 
@@ -239,6 +239,30 @@ for name, kwargs in {
 - 学習時は `padding=True` を tokenizer ではなく `DataCollatorWithPadding` に任せると、バッチごとに最短で済んで速い (動的パディング)。
 - 生成モデル (GPT 系) は左パディングが必要: `tokenizer.padding_side = "left"`。
 
+## 文ペアを 1 つの入力にまとめる {sentence_pair}
+
+含意関係認識や質問応答のように、2 つの文をまとめてモデルに入力したい。
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
+enc = tokenizer("猫がマットの上で寝ている。", "動物が眠っている。")
+print(tokenizer.decode(enc["input_ids"]))
+print(enc["token_type_ids"])  # 0 = 1 文目, 1 = 2 文目
+```
+
+```python
+# バッチの場合は 1 文目のリストと 2 文目のリストを渡す。長い方 (ここでは文書側) だけを切り詰める
+questions = ["日本の首都は？", "富士山の高さは？"]
+contexts = ["日本の首都は東京である。" * 20, "富士山は標高 3776 メートルの山である。" * 20]
+batch = tokenizer(questions, contexts, truncation="only_second", max_length=32, padding=True)
+print([len(x) for x in batch["input_ids"]])
+print(tokenizer.decode(batch["input_ids"][0]))
+```
+
+- RoBERTa 系には `token_type_ids` がなく、`</s></s>` で区切るだけ。`tokenizer(a, b)` と書いておけばモデルに合った形式になる。
+
 ## 日本語 BERT のデコード結果から余分な空白を消す {decode_ja_spaces}
 
 日本語 BERT の `decode()` はトークン間に空白を入れてしまう。元の文のように連結したい。
@@ -320,37 +344,6 @@ for tok, lab in zip(enc.tokens(), aligned):
 
 - 予測時も同じ `word_ids()` を使って、各単語の先頭サブワードの予測だけを取り出す。
 
-## トークン数を数える (LLM のコンテキスト長・料金の見積もり) {count_tokens}
-
-テキストが LLM の何トークンになるかを数えたい。日本語と英語でトークン数がどれくらい違うかも知りたい。
-
-```python
-!pip install -q tiktoken
-```
-
-```python
-import tiktoken
-
-enc = tiktoken.get_encoding("o200k_base")  # GPT-4o 系の語彙
-for text in ["Natural language processing is fun.", "自然言語処理は楽しい。", "吾輩は猫である。名前はまだ無い。"]:
-    ids = enc.encode(text)
-    print(len(text), "文字", len(ids), "トークン", [enc.decode([i]) for i in ids])
-```
-
-```python
-# オープンなモデルは Hugging Face のトークナイザで数える
-from transformers import AutoTokenizer
-
-text = "自然言語処理は楽しい。吾輩は猫である。名前はまだ無い。"
-for name in ["Qwen/Qwen2.5-0.5B-Instruct", "xlm-roberta-base", "google/byt5-small"]:
-    tok = AutoTokenizer.from_pretrained(name)
-    print(f"{name:30} {len(tok(text, add_special_tokens=False)['input_ids'])} トークン")
-```
-
-- 1 文字が複数トークンに分かれると、トークン単体では表示できず `�` になる (上の「輩」)。
-- 日本語は「1 文字 ≒ 1 トークン前後」、英語は「1 単語 ≒ 1.3 トークン」が大まかな目安。モデルによって大きく違うので実測する。
-- API 型のモデルは各社が公式のトークン数カウント API を提供している。厳密な見積もりにはそちらを使う。
-
 ## 語彙に新しいトークン・特殊トークンを追加する {add_tokens}
 
 `<URL>` のような特殊トークンや、ドメイン固有の用語を 1 トークンとして扱えるようにしたい。
@@ -379,29 +372,32 @@ print(model.get_input_embeddings().weight.shape)
 - 追加したトークンの埋め込みはランダム初期化なので、ファインチューニングで学習させる必要がある。
 - `tokenizer.vocab_size` は追加前のサイズのまま。追加後のサイズは `len(tokenizer)`。
 
-## 文ペアを 1 つの入力にまとめる {sentence_pair}
+## 未知語 ([UNK]) がどれくらい出るか調べる {unk_rate}
 
-含意関係認識や質問応答のように、2 つの文をまとめてモデルに入力したい。
+使おうとしているモデルのトークナイザが、手元のテキストをきちんと表現できているか確認したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
 
 ```python
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("bert-base-multilingual-cased")
-enc = tokenizer("猫がマットの上で寝ている。", "動物が眠っている。")
-print(tokenizer.decode(enc["input_ids"]))
-print(enc["token_type_ids"])  # 0 = 1 文目, 1 = 2 文目
+texts = ["𠮷野家で牛丼を食べた😋", "髙橋さんと﨑山さんが来た。", "한국어와 日本語 and English", "ｷﾀ━━━(ﾟ∀ﾟ)━━━!!", "普通の日本語の文です。"]
+
+for name in ["tohoku-nlp/bert-base-japanese-v3", "bert-base-multilingual-cased", "xlm-roberta-base"]:
+    tok = AutoTokenizer.from_pretrained(name)
+    total, unk = 0, 0
+    for t in texts:
+        ids = tok(t, add_special_tokens=False)["input_ids"]
+        total += len(ids)
+        unk += sum(i == tok.unk_token_id for i in ids)
+    print(f"{name:36} UNK 率 {unk / total:.1%} ({unk}/{total})")
+    print("   ", tok.tokenize(texts[0]))
 ```
 
-```python
-# バッチの場合は 1 文目のリストと 2 文目のリストを渡す。長い方 (ここでは文書側) だけを切り詰める
-questions = ["日本の首都は？", "富士山の高さは？"]
-contexts = ["日本の首都は東京である。" * 20, "富士山は標高 3776 メートルの山である。" * 20]
-batch = tokenizer(questions, contexts, truncation="only_second", max_length=32, padding=True)
-print([len(x) for x in batch["input_ids"]])
-print(tokenizer.decode(batch["input_ids"][0]))
-```
-
-- RoBERTa 系には `token_type_ids` がなく、`</s></s>` で区切るだけ。`tokenizer(a, b)` と書いておけばモデルに合った形式になる。
+- WordPiece は語彙にない文字を含む単語をまるごと `[UNK]` にする。SentencePiece 系 (XLM-R) は文字単位にフォールバックするので UNK が出にくい。
+- UNK が多い場合は、NFKC 正規化や異体字の置換などの前処理を検討する。
 
 ## トークン長の分布を調べて max_length を決める {token_length_dist}
 
@@ -435,29 +431,33 @@ plt.xlabel("tokens"); plt.ylabel("documents"); plt.legend(); plt.show()
 
 - 95 パーセンタイルあたりを `max_length` にするのが定番。長い文書が多いなら、先頭 + 末尾を残す・分割して集約するなどを検討する。
 
-## 未知語 ([UNK]) がどれくらい出るか調べる {unk_rate}
+## トークン数を数える (LLM のコンテキスト長・料金の見積もり) {count_tokens}
 
-使おうとしているモデルのトークナイザが、手元のテキストをきちんと表現できているか確認したい。
+テキストが LLM の何トークンになるかを数えたい。日本語と英語でトークン数がどれくらい違うかも知りたい。
 
 ```python
-!pip install -q fugashi unidic-lite
+!pip install -q tiktoken
 ```
 
 ```python
+import tiktoken
+
+enc = tiktoken.get_encoding("o200k_base")  # GPT-4o 系の語彙
+for text in ["Natural language processing is fun.", "自然言語処理は楽しい。", "吾輩は猫である。名前はまだ無い。"]:
+    ids = enc.encode(text)
+    print(len(text), "文字", len(ids), "トークン", [enc.decode([i]) for i in ids])
+```
+
+```python
+# オープンなモデルは Hugging Face のトークナイザで数える
 from transformers import AutoTokenizer
 
-texts = ["𠮷野家で牛丼を食べた😋", "髙橋さんと﨑山さんが来た。", "한국어와 日本語 and English", "ｷﾀ━━━(ﾟ∀ﾟ)━━━!!", "普通の日本語の文です。"]
-
-for name in ["tohoku-nlp/bert-base-japanese-v3", "bert-base-multilingual-cased", "xlm-roberta-base"]:
+text = "自然言語処理は楽しい。吾輩は猫である。名前はまだ無い。"
+for name in ["Qwen/Qwen2.5-0.5B-Instruct", "xlm-roberta-base", "google/byt5-small"]:
     tok = AutoTokenizer.from_pretrained(name)
-    total, unk = 0, 0
-    for t in texts:
-        ids = tok(t, add_special_tokens=False)["input_ids"]
-        total += len(ids)
-        unk += sum(i == tok.unk_token_id for i in ids)
-    print(f"{name:36} UNK 率 {unk / total:.1%} ({unk}/{total})")
-    print("   ", tok.tokenize(texts[0]))
+    print(f"{name:30} {len(tok(text, add_special_tokens=False)['input_ids'])} トークン")
 ```
 
-- WordPiece は語彙にない文字を含む単語をまるごと `[UNK]` にする。SentencePiece 系 (XLM-R) は文字単位にフォールバックするので UNK が出にくい。
-- UNK が多い場合は、NFKC 正規化や異体字の置換などの前処理を検討する。
+- 1 文字が複数トークンに分かれると、トークン単体では表示できず `�` になる (上の「輩」)。
+- 日本語は「1 文字 ≒ 1 トークン前後」、英語は「1 単語 ≒ 1.3 トークン」が大まかな目安。モデルによって大きく違うので実測する。
+- API 型のモデルは各社が公式のトークン数カウント API を提供している。厳密な見積もりにはそちらを使う。

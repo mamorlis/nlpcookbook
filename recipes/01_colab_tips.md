@@ -33,41 +33,39 @@ print([p.name for p in base.iterdir()])
 - Drive 上のファイルの読み書きは遅い。小さなファイルが大量にあるデータセットは、zip にまとめて置き、ローカルに展開して使う。
 - 書き込みはすぐには反映されないことがある。ランタイムを切る前に `drive.flush_and_unmount()` を呼ぶと確実。
 
-## GPU が使えるか確認し、メモリを解放する {colab_gpu}
+## ファイルをアップロード・ダウンロードする {colab_files norun}
 
-GPU ランタイムになっているか、メモリがどれくらい空いているかを確認したい。`CUDA out of memory` から復帰したい。
+手元の PC にあるデータを Colab に上げたい。実行結果のファイルを PC に落としたい。
 
 ```python
-import torch
+from google.colab import files
 
-print("PyTorch:", torch.__version__)
-print("GPU が使える:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print(torch.cuda.get_device_name(0))
-    free, total = torch.cuda.mem_get_info()
-    print(f"空き {free / 1e9:.1f} GB / 全体 {total / 1e9:.1f} GB")
-device = "cuda" if torch.cuda.is_available() else "cpu"   # GPU がなくても動くコードにしておく
+uploaded = files.upload()          # ファイル選択ダイアログが出る。複数選択可
+for name, data in uploaded.items():
+    print(name, len(data), "バイト")   # カレントディレクトリ (/content) にも保存されている
 ```
 
 ```python
-import gc
+import pandas as pd
 
-x = torch.zeros(256, 1024, 1024, device=device)   # 約 1GB を確保
-print(f"確保後: {torch.cuda.memory_allocated() / 1e9:.2f} GB" if device == "cuda" else "CPU で実行中")
-
-del x                      # 1. 参照を消す (モデルやテンソルを指す変数をすべて)
-gc.collect()               # 2. Python のガベージコレクションを走らせる
-torch.cuda.empty_cache()   # 3. PyTorch がキャッシュしている GPU メモリを返す
-print(f"解放後: {torch.cuda.memory_allocated() / 1e9:.2f} GB" if device == "cuda" else "(GPU なし)")
+df = pd.DataFrame({"text": ["こんにちは", "さようなら"], "label": [1, 0]})
+df.to_csv("result.csv", index=False, encoding="utf-8-sig")
+files.download("result.csv")       # ブラウザのダウンロードが始まる
 ```
 
 ```python
-!nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv 2>/dev/null || echo "GPU なし (ランタイム → ランタイムのタイプを変更 → T4 GPU)"
+# フォルダごと落とすなら zip にまとめる
+!zip -qr outputs.zip /content/sample_data
+files.download("outputs.zip")
+
+# URL が分かっているファイルは、アップロードせずに直接取得する
+!wget -q https://www.aozora.gr.jp/cards/000148/files/789_ruby_5639.zip -O neko.zip
+!unzip -o -q neko.zip && ls -la *.txt
 ```
 
-- ノートブックでは、直前の出力 (`_`) や例外のトレースバックがテンソルへの参照を握っていて解放されないことがある。どうしても空かなければ、ランタイムを再起動するのが早い。
-- メモリ不足のときの対処: バッチサイズを下げる → 系列長 (`max_length`) を下げる → 半精度 (`fp16` / `torch_dtype=torch.float16`) → 勾配累積 → 量子化、の順に試す。
-- 推論では `torch.inference_mode()` を忘れない。勾配用の中間結果を保持してメモリを浪費する。
+- 左サイドバーのフォルダアイコンから、ドラッグ & ドロップでもアップロードできる。
+- アップロードしたファイルはランタイムが切れると消える。繰り返し使うデータは Drive か、Hugging Face Hub / GitHub に置く。
+- 数百 MB を超えるファイルはブラウザ経由だと遅く不安定。Drive に置いてマウントするほうが確実。
 
 ## API キーをシークレット機能で安全に扱う {colab_secrets norun}
 
@@ -105,6 +103,81 @@ except userdata.NotebookAccessError:
 - シークレットは Google アカウントに紐づいて保存され、ノートブックのファイルには含まれない。共有相手には見えない。
 - キーを `print` した出力はノートブックに保存される。出力に残っていないか、共有や GitHub への保存の前に確認する。
 - うっかり公開してしまったキーは、すぐに発行元で無効化して作り直す。
+
+## GPU が使えるか確認し、メモリを解放する {colab_gpu}
+
+GPU ランタイムになっているか、メモリがどれくらい空いているかを確認したい。`CUDA out of memory` から復帰したい。
+
+```python
+import torch
+
+print("PyTorch:", torch.__version__)
+print("GPU が使える:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print(torch.cuda.get_device_name(0))
+    free, total = torch.cuda.mem_get_info()
+    print(f"空き {free / 1e9:.1f} GB / 全体 {total / 1e9:.1f} GB")
+device = "cuda" if torch.cuda.is_available() else "cpu"   # GPU がなくても動くコードにしておく
+```
+
+```python
+import gc
+
+x = torch.zeros(256, 1024, 1024, device=device)   # 約 1GB を確保
+print(f"確保後: {torch.cuda.memory_allocated() / 1e9:.2f} GB" if device == "cuda" else "CPU で実行中")
+
+del x                      # 1. 参照を消す (モデルやテンソルを指す変数をすべて)
+gc.collect()               # 2. Python のガベージコレクションを走らせる
+torch.cuda.empty_cache()   # 3. PyTorch がキャッシュしている GPU メモリを返す
+print(f"解放後: {torch.cuda.memory_allocated() / 1e9:.2f} GB" if device == "cuda" else "(GPU なし)")
+```
+
+```python
+!nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv 2>/dev/null || echo "GPU なし (ランタイム → ランタイムのタイプを変更 → T4 GPU)"
+```
+
+- ノートブックでは、直前の出力 (`_`) や例外のトレースバックがテンソルへの参照を握っていて解放されないことがある。どうしても空かなければ、ランタイムを再起動するのが早い。
+- メモリ不足のときの対処: バッチサイズを下げる → 系列長 (`max_length`) を下げる → 半精度 (`fp16` / `torch_dtype=torch.float16`) → 勾配累積 → 量子化、の順に試す。
+- 推論では `torch.inference_mode()` を忘れない。勾配用の中間結果を保持してメモリを浪費する。
+
+## ライブラリのバージョンを確認・固定する {pip_versions}
+
+Colab のプリインストールライブラリは予告なく更新される。動いていたコードが動かなくなったときに、バージョンを確認し、固定したい。
+
+```python
+import importlib.metadata as md
+import platform
+import sys
+
+print("Python", sys.version.split()[0], "/", platform.platform())
+for pkg in ["torch", "transformers", "datasets", "tokenizers", "sentence-transformers", "scikit-learn", "numpy", "pandas", "spacy", "nltk"]:
+    try:
+        print(f"{pkg:24}{md.version(pkg)}")
+    except md.PackageNotFoundError:
+        print(f"{pkg:24}(未インストール)")
+```
+
+```python
+# 実験したときの環境を丸ごと記録しておく (論文の再現や、後日の自分のため)
+!pip freeze > requirements-lock.txt
+!wc -l requirements-lock.txt && grep -i -E "^(torch|transformers|numpy)==" requirements-lock.txt
+```
+
+```python
+# バージョンを指定して入れる例 (実際に入れ替える場合はコメントを外す)
+# !pip install -q "transformers==4.57.1" "tokenizers>=0.22,<0.23"
+# !pip install -q -r requirements-lock.txt
+
+# コードの中でバージョンによって分岐する
+from packaging.version import Version
+import transformers
+
+print("v5 以降:", Version(transformers.__version__) >= Version("5.0.0"))
+```
+
+- すでに import 済みのライブラリを `pip install` で入れ替えた場合は、ランタイムの再起動 (ランタイム → セッションを再起動) が必要。
+- NumPy や PyTorch のような土台のライブラリを入れ替えると、他のプリインストールライブラリが壊れやすい。必要最小限にとどめる。
+- 「前は動いたのに」というときは、まずエラーメッセージとライブラリのバージョンの変更履歴 (リリースノート、移行ガイド) を確認する。
 
 ## 乱数シードを固定して実験を再現できるようにする {set_seed}
 
@@ -154,40 +227,6 @@ print(rng.integers(0, 100, 3), torch.randperm(5, generator=g).tolist())
 - シードを固定しても、GPU の機種、ライブラリのバージョン、並列処理の順序が違えば結果は変わりうる。完全な再現より、「複数シードで傾向が変わらないこと」を確認するほうが大事。
 - モデルの初期化の前、データのシャッフルの前など、乱数を使う処理より前に呼ぶ。セルを実行し直すと乱数の状態が進むので、必要なら再度呼ぶ。
 - `DataLoader` で `num_workers > 0` のときは、`worker_init_fn` と `generator` も指定する。
-
-## ファイルをアップロード・ダウンロードする {colab_files norun}
-
-手元の PC にあるデータを Colab に上げたい。実行結果のファイルを PC に落としたい。
-
-```python
-from google.colab import files
-
-uploaded = files.upload()          # ファイル選択ダイアログが出る。複数選択可
-for name, data in uploaded.items():
-    print(name, len(data), "バイト")   # カレントディレクトリ (/content) にも保存されている
-```
-
-```python
-import pandas as pd
-
-df = pd.DataFrame({"text": ["こんにちは", "さようなら"], "label": [1, 0]})
-df.to_csv("result.csv", index=False, encoding="utf-8-sig")
-files.download("result.csv")       # ブラウザのダウンロードが始まる
-```
-
-```python
-# フォルダごと落とすなら zip にまとめる
-!zip -qr outputs.zip /content/sample_data
-files.download("outputs.zip")
-
-# URL が分かっているファイルは、アップロードせずに直接取得する
-!wget -q https://www.aozora.gr.jp/cards/000148/files/789_ruby_5639.zip -O neko.zip
-!unzip -o -q neko.zip && ls -la *.txt
-```
-
-- 左サイドバーのフォルダアイコンから、ドラッグ & ドロップでもアップロードできる。
-- アップロードしたファイルはランタイムが切れると消える。繰り返し使うデータは Drive か、Hugging Face Hub / GitHub に置く。
-- 数百 MB を超えるファイルはブラウザ経由だと遅く不安定。Drive に置いてマウントするほうが確実。
 
 ## 処理時間を計測する {timing}
 
@@ -243,6 +282,51 @@ _ = pstats.Stats(profiler).sort_stats("cumulative").print_stats(5)
 - GPU の処理は非同期なので、正確に測るには計測の前後で `torch.cuda.synchronize()` を呼ぶ。
 - 初回の実行は、モデルの読み込みやキャッシュの作成で遅い。2 回目以降を測る。
 - Colab の無料枠は実行のたびに CPU や GPU の割り当てが変わる。異なるセッションで測った時間は比較できない。
+
+## 進捗バーを表示する (tqdm) {tqdm_progress}
+
+時間のかかる処理が、いまどこまで進んでいて、あと何分かかるのかを知りたい。
+
+```python
+import time
+from tqdm.auto import tqdm   # ノートブックでもスクリプトでも適切な表示になる
+
+texts = [f"文 {i}" for i in range(200)]
+results = []
+for text in tqdm(texts, desc="処理中"):
+    time.sleep(0.005)
+    results.append(len(text))
+```
+
+```python
+# バッチ処理: 件数ベースで進める / 途中経過 (損失など) を右側に表示する
+batch_size = 32
+with tqdm(total=len(texts), desc="推論", unit="文") as pbar:
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        time.sleep(0.02)
+        pbar.update(len(batch))
+        pbar.set_postfix(loss=f"{1 / (i + 1):.4f}")
+```
+
+```python
+# pandas の apply に進捗バーを付ける
+import pandas as pd
+
+tqdm.pandas(desc="apply")
+df = pd.DataFrame({"text": texts})
+df["length"] = df["text"].progress_apply(len)
+
+# ジェネレータなど長さの分からないものは total を渡す。並列処理は tqdm.contrib.concurrent が便利
+from tqdm.contrib.concurrent import thread_map
+
+lengths = thread_map(lambda t: (time.sleep(0.005), len(t))[1], texts, max_workers=8, desc="並列")
+print(sum(lengths))
+```
+
+- `tqdm.auto` を使うと、Colab ではウィジェットの進捗バー、端末ではテキストの進捗バーになる。
+- ループの中で `print` するとバーが崩れる。代わりに `tqdm.write("...")` を使う。
+- API 呼び出しのような待ち時間の長い処理は、`thread_map` でスレッド並列にすると大幅に速くなる (レート制限に注意)。
 
 ## 長時間の学習を途中から再開できるようにする {colab_checkpoint norun}
 
@@ -337,45 +421,6 @@ on_change(None)
 - フォームの値を変えると、セルのコード (右辺の値) が書き換わる。セルを再実行して初めて反映される。
 - `#@title` を付けて `display-mode: "form"` にすると、コードを隠してフォームだけを見せられる。
 
-## ライブラリのバージョンを確認・固定する {pip_versions}
-
-Colab のプリインストールライブラリは予告なく更新される。動いていたコードが動かなくなったときに、バージョンを確認し、固定したい。
-
-```python
-import importlib.metadata as md
-import platform
-import sys
-
-print("Python", sys.version.split()[0], "/", platform.platform())
-for pkg in ["torch", "transformers", "datasets", "tokenizers", "sentence-transformers", "scikit-learn", "numpy", "pandas", "spacy", "nltk"]:
-    try:
-        print(f"{pkg:24}{md.version(pkg)}")
-    except md.PackageNotFoundError:
-        print(f"{pkg:24}(未インストール)")
-```
-
-```python
-# 実験したときの環境を丸ごと記録しておく (論文の再現や、後日の自分のため)
-!pip freeze > requirements-lock.txt
-!wc -l requirements-lock.txt && grep -i -E "^(torch|transformers|numpy)==" requirements-lock.txt
-```
-
-```python
-# バージョンを指定して入れる例 (実際に入れ替える場合はコメントを外す)
-# !pip install -q "transformers==4.57.1" "tokenizers>=0.22,<0.23"
-# !pip install -q -r requirements-lock.txt
-
-# コードの中でバージョンによって分岐する
-from packaging.version import Version
-import transformers
-
-print("v5 以降:", Version(transformers.__version__) >= Version("5.0.0"))
-```
-
-- すでに import 済みのライブラリを `pip install` で入れ替えた場合は、ランタイムの再起動 (ランタイム → セッションを再起動) が必要。
-- NumPy や PyTorch のような土台のライブラリを入れ替えると、他のプリインストールライブラリが壊れやすい。必要最小限にとどめる。
-- 「前は動いたのに」というときは、まずエラーメッセージとライブラリのバージョンの変更履歴 (リリースノート、移行ガイド) を確認する。
-
 ## pandas で長いテキストを省略せずに表示する {pandas_display}
 
 DataFrame を表示すると、テキストの列が「…」で省略されて中身が読めない。全文を見たい。行や列も省略されたくない。
@@ -418,48 +463,3 @@ pd.reset_option("display.max_colwidth")
 
 - Colab では `from google.colab import data_table; data_table.enable_dataframe_formatter()` を実行すると、並べ替えや絞り込みのできる対話的な表になる。
 - エラー分析では、全文を読めることが何より大事。省略された表を眺めて分かった気にならない。
-
-## 進捗バーを表示する (tqdm) {tqdm_progress}
-
-時間のかかる処理が、いまどこまで進んでいて、あと何分かかるのかを知りたい。
-
-```python
-import time
-from tqdm.auto import tqdm   # ノートブックでもスクリプトでも適切な表示になる
-
-texts = [f"文 {i}" for i in range(200)]
-results = []
-for text in tqdm(texts, desc="処理中"):
-    time.sleep(0.005)
-    results.append(len(text))
-```
-
-```python
-# バッチ処理: 件数ベースで進める / 途中経過 (損失など) を右側に表示する
-batch_size = 32
-with tqdm(total=len(texts), desc="推論", unit="文") as pbar:
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        time.sleep(0.02)
-        pbar.update(len(batch))
-        pbar.set_postfix(loss=f"{1 / (i + 1):.4f}")
-```
-
-```python
-# pandas の apply に進捗バーを付ける
-import pandas as pd
-
-tqdm.pandas(desc="apply")
-df = pd.DataFrame({"text": texts})
-df["length"] = df["text"].progress_apply(len)
-
-# ジェネレータなど長さの分からないものは total を渡す。並列処理は tqdm.contrib.concurrent が便利
-from tqdm.contrib.concurrent import thread_map
-
-lengths = thread_map(lambda t: (time.sleep(0.005), len(t))[1], texts, max_workers=8, desc="並列")
-print(sum(lengths))
-```
-
-- `tqdm.auto` を使うと、Colab ではウィジェットの進捗バー、端末ではテキストの進捗バーになる。
-- ループの中で `print` するとバーが崩れる。代わりに `tqdm.write("...")` を使う。
-- API 呼び出しのような待ち時間の長い処理は、`thread_map` でスレッド並列にすると大幅に速くなる (レート制限に注意)。

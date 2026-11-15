@@ -545,71 +545,6 @@ for threshold in [0.001, 0.01, 0.05]:
 - 誤りの位置を正確に指すとは限らない (誤った助詞ではなく、その後ろの動詞の確率が下がることがある)。「このあたりが怪しい」という手がかりとして使う。
 - 高い精度が必要なら、誤りの注釈付きデータで系列ラベリング (各トークンが正しいか誤りか) を学習する。固有表現抽出の章の BERT のファインチューニングと同じ方法が使える。
 
-## 訂正にフィードバックコメントを付ける {feedback_comment}
-
-学習者に、誤りを直した結果だけでなく、「なぜ誤りなのか」「どう直せばよいか」の説明を返したい。
-
-```python
-import difflib
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
-
-@torch.no_grad()
-def chat(prompt, max_new_tokens=160):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
-    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-def diff(source, corrected):
-    """訂正箇所を「元 → 訂正後」の組として取り出す"""
-    ops = difflib.SequenceMatcher(None, source, corrected, autojunk=False).get_opcodes()
-    return [(source[i1:i2] or "(なし)", corrected[j1:j2] or "(削除)") for op, i1, i2, j1, j2 in ops if op != "equal"]
-
-pairs = [("私は毎日学校を行きます。", "私は毎日学校に行きます。"), ("この料理はとてもおいしいでした。", "この料理はとてもおいしかったです。"),
-         ("日本に来たばかりので、日本語がまだ下手です。", "日本に来たばかりなので、日本語がまだ下手です。"), ("彼は私にプレゼントをもらいました。", "彼は私にプレゼントをくれました。")]
-for s, c in pairs:
-    print(s, "→", c, diff(s, c))
-```
-
-```python
-PROMPT = """あなたは日本語教師です。日本語学習者の文と、その訂正を示します。
-訂正箇所について、学習者向けのフィードバックを書いてください。
-- なぜ元の表現が誤りなのかを、文法の規則として 1〜2 文で説明する
-- 専門用語はできるだけ使わず、やさしい日本語で書く
-- 同じ規則を使った正しい例文を 1 つ挙げる
-- あいさつや前置きは書かず、全体で 150 字以内にする
-
-学習者の文: {source}
-訂正後の文: {corrected}
-訂正箇所: {edits}"""
-
-for s, c in pairs:
-    edits = "、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))
-    print(f"■ {s} → {c}\n{chat(PROMPT.format(source=s, corrected=c, edits=edits))}\n")
-```
-
-```python
-# 訂正と説明を別々に行う理由: LLM に一度に任せると、説明が訂正と食い違うことがある。説明に訂正後の表現が含まれているかを機械的に確かめる
-def check(source, corrected, comment):
-    return {"訂正後の表現に触れている": all(b in comment for a, b in diff(source, corrected) if b != "(削除)"),
-            "長すぎない": len(comment) <= 300}
-
-s, c = pairs[0]
-comment = chat(PROMPT.format(source=s, corrected=c, edits="、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))))
-print(check(s, c, comment))
-```
-
-- フィードバックコメント生成は、訂正 (何を直すか) とは別のタスクとして研究されている。学習効果のためには、答えを示すだけでなく、規則に気付かせる説明が重要とされる。
-- 訂正箇所を差分で明示してから説明させると、どの誤りについての説明かがぶれにくい。誤りが複数あるときは、1 か所ずつ説明させる。
-- 長さの指示は守られにくい。この実験でも、あいさつから始まる長い説明になり、字数の点検で引っかかった。英語が混ざる (destination) こともある。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
-- 小さな LLM は、もっともらしいが誤った文法説明を書くことがある (存在しない規則を作る、助詞の働きを取り違える)。学習者にそのまま見せる前に、教師による確認か、誤りの種類ごとに用意した説明文 (テンプレート) との併用を検討する。
-- 誤りの種類が分かっていれば (助詞の選択、時制、活用など)、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
-- 学習者のレベルに合わせて説明の言葉を変える (初級者には母語で、など) ことも、LLM への指示で行える。
-
 ## 英語のスペル誤りを訂正する {spelling_correction}
 
 英語のつづりの誤りを見つけて訂正したい。編集距離と単語の頻度による古典的な方法を作り、文脈を使う方法と比べる。
@@ -765,6 +700,71 @@ for s in clean:
 - 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
 - 逆翻訳 (正しい文 → 誤り文を生成するモデル) や、LLM に誤りを書かせる方法もある。
 
+## 訂正にフィードバックコメントを付ける {feedback_comment}
+
+学習者に、誤りを直した結果だけでなく、「なぜ誤りなのか」「どう直せばよいか」の説明を返したい。
+
+```python
+import difflib
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+
+@torch.no_grad()
+def chat(prompt, max_new_tokens=160):
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+def diff(source, corrected):
+    """訂正箇所を「元 → 訂正後」の組として取り出す"""
+    ops = difflib.SequenceMatcher(None, source, corrected, autojunk=False).get_opcodes()
+    return [(source[i1:i2] or "(なし)", corrected[j1:j2] or "(削除)") for op, i1, i2, j1, j2 in ops if op != "equal"]
+
+pairs = [("私は毎日学校を行きます。", "私は毎日学校に行きます。"), ("この料理はとてもおいしいでした。", "この料理はとてもおいしかったです。"),
+         ("日本に来たばかりので、日本語がまだ下手です。", "日本に来たばかりなので、日本語がまだ下手です。"), ("彼は私にプレゼントをもらいました。", "彼は私にプレゼントをくれました。")]
+for s, c in pairs:
+    print(s, "→", c, diff(s, c))
+```
+
+```python
+PROMPT = """あなたは日本語教師です。日本語学習者の文と、その訂正を示します。
+訂正箇所について、学習者向けのフィードバックを書いてください。
+- なぜ元の表現が誤りなのかを、文法の規則として 1〜2 文で説明する
+- 専門用語はできるだけ使わず、やさしい日本語で書く
+- 同じ規則を使った正しい例文を 1 つ挙げる
+- あいさつや前置きは書かず、全体で 150 字以内にする
+
+学習者の文: {source}
+訂正後の文: {corrected}
+訂正箇所: {edits}"""
+
+for s, c in pairs:
+    edits = "、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))
+    print(f"■ {s} → {c}\n{chat(PROMPT.format(source=s, corrected=c, edits=edits))}\n")
+```
+
+```python
+# 訂正と説明を別々に行う理由: LLM に一度に任せると、説明が訂正と食い違うことがある。説明に訂正後の表現が含まれているかを機械的に確かめる
+def check(source, corrected, comment):
+    return {"訂正後の表現に触れている": all(b in comment for a, b in diff(source, corrected) if b != "(削除)"),
+            "長すぎない": len(comment) <= 300}
+
+s, c = pairs[0]
+comment = chat(PROMPT.format(source=s, corrected=c, edits="、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))))
+print(check(s, c, comment))
+```
+
+- フィードバックコメント生成は、訂正 (何を直すか) とは別のタスクとして研究されている。学習効果のためには、答えを示すだけでなく、規則に気付かせる説明が重要とされる。
+- 訂正箇所を差分で明示してから説明させると、どの誤りについての説明かがぶれにくい。誤りが複数あるときは、1 か所ずつ説明させる。
+- 長さの指示は守られにくい。この実験でも、あいさつから始まる長い説明になり、字数の点検で引っかかった。英語が混ざる (destination) こともある。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
+- 小さな LLM は、もっともらしいが誤った文法説明を書くことがある (存在しない規則を作る、助詞の働きを取り違える)。学習者にそのまま見せる前に、教師による確認か、誤りの種類ごとに用意した説明文 (テンプレート) との併用を検討する。
+- 誤りの種類が分かっていれば (助詞の選択、時制、活用など)、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
+- 学習者のレベルに合わせて説明の言葉を変える (初級者には母語で、など) ことも、LLM への指示で行える。
+
 ## 日本語の文章の読みやすさを測る {readability_ja}
 
 日本語の文章の難しさを、文の長さ・漢字の割合・語種などの簡単な指標で数値化したい (教材選び、やさしい日本語の確認)。
@@ -851,60 +851,6 @@ for text in ["猫が庭で寝ている。", "当該事案の瑕疵について�
 - 頻度は難しさの近似にすぎない。高頻度でも多義で難しい語 (「かける」「とる」) や、学習者の母語によって易しい語 (漢字圏の学習者にとっての漢語) がある。
 - 日本語の教育語彙としては、日本語教育語彙表や旧日本語能力試験の出題基準などが使われる。
 
-## 穴埋め問題 (クローズテスト) を自動で作る {cloze_generation}
-
-文章から語を抜いて穴埋め問題を作り、もっともらしい誤答選択肢も自動で用意したい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-import random
-import torch
-from fugashi import Tagger
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-
-tagger = Tagger()
-name = "tohoku-nlp/bert-base-japanese-v3"
-tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForMaskedLM.from_pretrained(name).eval()
-
-def make_cloze(sentence, target_pos=("名詞", "動詞", "形容詞"), n_distractors=3, seed=0):
-    rng = random.Random(seed)
-    words = [(w.surface, w.feature.pos1, w.feature.pos2) for w in tagger(sentence)]
-    candidates = [i for i, (s, p1, p2) in enumerate(words) if p1 in target_pos and p2 not in ("非自立可能", "数詞") and len(tokenizer.tokenize(s)) == 1]
-    if not candidates:
-        return None
-    i = rng.choice(candidates)
-    answer, pos = words[i][0], words[i][1]
-    masked = "".join(tokenizer.mask_token if j == i else s for j, (s, _, _) in enumerate(words))
-
-    enc = tokenizer(masked, return_tensors="pt")
-    mask_pos = (enc["input_ids"][0] == tokenizer.mask_token_id).nonzero()[0, 0]
-    with torch.no_grad():
-        probs = model(**enc).logits[0, mask_pos].softmax(-1)
-    distractors = []
-    for tok_id in probs.argsort(descending=True)[5:200].tolist():     # 上位すぎる語は「別の正解」になりうるので避ける
-        tok = tokenizer.convert_ids_to_tokens(tok_id)
-        analysis = list(tagger(tok))
-        if len(analysis) == 1 and analysis[0].feature.pos1 == pos and tok != answer and not tok.startswith("##"):
-            distractors.append(tok)
-        if len(distractors) == n_distractors:
-            break
-    choices = distractors + [answer]
-    rng.shuffle(choices)
-    return {"question": masked.replace(tokenizer.mask_token, "（　　）"), "choices": choices, "answer": answer}
-
-for s in ["太郎は図書館で本を借りた。", "雨が降ったので、試合は中止になった。", "この料理はとても辛いので、水をたくさん飲んだ。"]:
-    q = make_cloze(s)
-    print(q["question"], " / ".join(q["choices"]), f"(正解: {q['answer']})")
-```
-
-- 誤答選択肢は「同じ品詞で、文脈にそこそこ合うが、正解ではない語」が良い。マスク言語モデルの中位の候補はその性質に近い。
-- 自動生成した選択肢には、正解になりうるものが混ざる。出題前に人間が確認する。
-- 特定の文法項目 (助詞、活用) を問いたいときは、`target_pos` を変える。
-
 ## 難しい単語を見つけてやさしい単語に言い換える (語彙平易化) {lexical_simplification}
 
 文章の中の難しい単語を見つけ、文脈に合うやさしい単語に置き換えたい。
@@ -987,6 +933,60 @@ for s in [sentence, "医師は患者に対し、速やかに治療を開始す�
 - 活用語は、候補の語を元の語と同じ活用形にそろえる必要がある。ここでは形の合う候補だけを残す簡易な方法をとっている。
 - LLM に「この語をやさしく言い換えて」と頼む方法が、現在は最も精度が高い。その場合も、候補が本当にやさしいか (頻度) と、意味が保たれているかの確認は別に行う。
 - 単語単位の言い換えでは、文の構造の難しさは解消しない。文全体の平易化は、要約と平易化の章を参照。
+
+## 穴埋め問題 (クローズテスト) を自動で作る {cloze_generation}
+
+文章から語を抜いて穴埋め問題を作り、もっともらしい誤答選択肢も自動で用意したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import random
+import torch
+from fugashi import Tagger
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+tagger = Tagger()
+name = "tohoku-nlp/bert-base-japanese-v3"
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForMaskedLM.from_pretrained(name).eval()
+
+def make_cloze(sentence, target_pos=("名詞", "動詞", "形容詞"), n_distractors=3, seed=0):
+    rng = random.Random(seed)
+    words = [(w.surface, w.feature.pos1, w.feature.pos2) for w in tagger(sentence)]
+    candidates = [i for i, (s, p1, p2) in enumerate(words) if p1 in target_pos and p2 not in ("非自立可能", "数詞") and len(tokenizer.tokenize(s)) == 1]
+    if not candidates:
+        return None
+    i = rng.choice(candidates)
+    answer, pos = words[i][0], words[i][1]
+    masked = "".join(tokenizer.mask_token if j == i else s for j, (s, _, _) in enumerate(words))
+
+    enc = tokenizer(masked, return_tensors="pt")
+    mask_pos = (enc["input_ids"][0] == tokenizer.mask_token_id).nonzero()[0, 0]
+    with torch.no_grad():
+        probs = model(**enc).logits[0, mask_pos].softmax(-1)
+    distractors = []
+    for tok_id in probs.argsort(descending=True)[5:200].tolist():     # 上位すぎる語は「別の正解」になりうるので避ける
+        tok = tokenizer.convert_ids_to_tokens(tok_id)
+        analysis = list(tagger(tok))
+        if len(analysis) == 1 and analysis[0].feature.pos1 == pos and tok != answer and not tok.startswith("##"):
+            distractors.append(tok)
+        if len(distractors) == n_distractors:
+            break
+    choices = distractors + [answer]
+    rng.shuffle(choices)
+    return {"question": masked.replace(tokenizer.mask_token, "（　　）"), "choices": choices, "answer": answer}
+
+for s in ["太郎は図書館で本を借りた。", "雨が降ったので、試合は中止になった。", "この料理はとても辛いので、水をたくさん飲んだ。"]:
+    q = make_cloze(s)
+    print(q["question"], " / ".join(q["choices"]), f"(正解: {q['answer']})")
+```
+
+- 誤答選択肢は「同じ品詞で、文脈にそこそこ合うが、正解ではない語」が良い。マスク言語モデルの中位の候補はその性質に近い。
+- 自動生成した選択肢には、正解になりうるものが混ざる。出題前に人間が確認する。
+- 特定の文法項目 (助詞、活用) を問いたいときは、`target_pos` を変える。
 
 ## 作文を自動で採点する {essay_scoring}
 

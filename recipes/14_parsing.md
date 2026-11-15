@@ -328,6 +328,47 @@ pd.DataFrame(complexity(text))
 - 平均依存距離 (MDD) は、係り元と係り先が離れているほど大きくなり、ワーキングメモリの負荷の指標とされる。
 - 日本語は主辞後置型なので、長い連体修飾節があると依存距離が大きくなる。
 
+## spaCy で大量の文書を高速に処理する {spacy_pipe}
+
+数万件のテキストを spaCy で解析したいが、1 件ずつ `nlp(text)` すると遅い。
+
+```python
+!python -m spacy download en_core_web_sm -q
+```
+
+```python
+import time
+import spacy
+
+texts = ["Apple is looking at buying a U.K. startup for $1 billion.", "The quick brown fox jumps over the lazy dog."] * 1000
+
+def timeit(label, fn):
+    t = time.perf_counter()
+    result = fn()
+    print(f"{label:38} {time.perf_counter() - t:5.1f} 秒")
+    return result
+
+nlp = spacy.load("en_core_web_sm")
+_ = timeit("1 件ずつ nlp(text)", lambda: [nlp(t) for t in texts])
+_ = timeit("nlp.pipe (バッチ処理)", lambda: list(nlp.pipe(texts, batch_size=256)))
+
+nlp_light = spacy.load("en_core_web_sm", exclude=["parser", "ner", "lemmatizer"])  # 品詞だけ欲しい場合
+_ = timeit("不要な要素を除外 + pipe", lambda: list(nlp_light.pipe(texts, batch_size=256)))
+
+nlp_tok = spacy.blank("en")  # トークナイズだけ
+_ = timeit("トークナイザのみ", lambda: list(nlp_tok.pipe(texts)))
+```
+
+```python
+# メタデータを一緒に流す (as_tuples) と、ID との対応を保ったまま処理できる
+data = [("Tokyo is the capital of Japan.", {"id": 1}), ("Paris is in France.", {"id": 2})]
+for doc, ctx in nlp.pipe(data, as_tuples=True):
+    print(ctx["id"], [(e.text, e.label_) for e in doc.ents])
+```
+
+- `nlp.pipe(texts, n_process=2)` でマルチプロセス化もできる (Transformer モデル + GPU の場合は使わない)。
+- 文分割だけ必要なら `nlp.add_pipe("sentencizer")` を入れた `spacy.blank` が最速。
+
 ## 解析結果を CoNLL-U 形式で保存・読み込みする {conllu}
 
 依存構造解析の結果を、標準的な CoNLL-U 形式でファイルに保存したり、UD のツリーバンクを読み込んだりしたい。
@@ -883,44 +924,3 @@ chart.printCCGDerivation(parses[0])
 - 範疇と意味表現 (ラムダ式) を対応させると、導出と同時に論理式が組み上がる。意味解析の章の「一階述語論理の式に変換する」レシピと同じ考え方。
 - 規則を増やすと、意味が同じ導出が大量に生まれる (擬似的曖昧性)。実用的なパーザは正規形の制約でこれを抑える。
 - 実用的な CCG パーザには、英語と日本語に対応した depccg がある。日本語 CCGbank や、CCG 導出から論理式を作って推論する ccg2lambda と組み合わせて使われる。
-
-## spaCy で大量の文書を高速に処理する {spacy_pipe}
-
-数万件のテキストを spaCy で解析したいが、1 件ずつ `nlp(text)` すると遅い。
-
-```python
-!python -m spacy download en_core_web_sm -q
-```
-
-```python
-import time
-import spacy
-
-texts = ["Apple is looking at buying a U.K. startup for $1 billion.", "The quick brown fox jumps over the lazy dog."] * 1000
-
-def timeit(label, fn):
-    t = time.perf_counter()
-    result = fn()
-    print(f"{label:38} {time.perf_counter() - t:5.1f} 秒")
-    return result
-
-nlp = spacy.load("en_core_web_sm")
-_ = timeit("1 件ずつ nlp(text)", lambda: [nlp(t) for t in texts])
-_ = timeit("nlp.pipe (バッチ処理)", lambda: list(nlp.pipe(texts, batch_size=256)))
-
-nlp_light = spacy.load("en_core_web_sm", exclude=["parser", "ner", "lemmatizer"])  # 品詞だけ欲しい場合
-_ = timeit("不要な要素を除外 + pipe", lambda: list(nlp_light.pipe(texts, batch_size=256)))
-
-nlp_tok = spacy.blank("en")  # トークナイズだけ
-_ = timeit("トークナイザのみ", lambda: list(nlp_tok.pipe(texts)))
-```
-
-```python
-# メタデータを一緒に流す (as_tuples) と、ID との対応を保ったまま処理できる
-data = [("Tokyo is the capital of Japan.", {"id": 1}), ("Paris is in France.", {"id": 2})]
-for doc, ctx in nlp.pipe(data, as_tuples=True):
-    print(ctx["id"], [(e.text, e.label_) for e in doc.ents])
-```
-
-- `nlp.pipe(texts, n_process=2)` でマルチプロセス化もできる (Transformer モデル + GPU の場合は使わない)。
-- 文分割だけ必要なら `nlp.add_pipe("sentencizer")` を入れた `spacy.blank` が最速。

@@ -70,6 +70,45 @@ for q, result in queries.items():
 - 日本語では単語の区切り方が検索結果を左右する。「東京都立大学」が 1 語になる辞書だと「東京」で検索しても当たらない。対策は、この章の文字 n-gram による検索。
 - 実用の検索エンジン (Lucene、Elasticsearch、Tantivy) も、この構造を圧縮し、スコア計算と組み合わせたもの。
 
+## TF-IDF とコサイン類似度で似た文書を探す {tfidf_similarity}
+
+ニューラルモデルを使わずに、単語の重なりに基づいて類似文書を高速に検索したい。
+
+```python
+import numpy as np
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+data = fetch_20newsgroups(subset="train", remove=("headers", "footers", "quotes"))
+docs = [d for d in data.data if len(d) > 200][:5000]
+vec = TfidfVectorizer(stop_words="english", max_df=0.5, min_df=2, sublinear_tf=True)
+X = vec.fit_transform(docs)   # 疎行列 (文書数 × 語彙数)。行は L2 正規化済み
+print(X.shape, f"非ゼロ要素の割合 {X.nnz / (X.shape[0] * X.shape[1]):.4f}")
+```
+
+```python
+def search(query, k=3):
+    sims = cosine_similarity(vec.transform([query]), X).ravel()
+    for i in np.argsort(-sims)[:k]:
+        print(f"  {sims[i]:.3f}  {' '.join(docs[i].split())[:90]}")
+
+for q in ["space shuttle launch NASA", "best graphics card for windows"]:
+    print(q)
+    search(q)
+```
+
+```python
+# 文書同士の類似度: 0 番の文書に似た文書
+sims = cosine_similarity(X[0], X).ravel()
+print(" ".join(docs[0].split())[:100])
+for i in np.argsort(-sims)[1:3]:
+    print(f"  {sims[i]:.3f}  {' '.join(docs[i].split())[:90]}")
+```
+
+- 日本語の場合は `TfidfVectorizer(tokenizer=分かち書き関数, token_pattern=None)` とする。
+- 文字 n-gram (`analyzer="char", ngram_range=(2, 3)`) にすると、分かち書きなしで表記ゆれにも強くなる。
+
 ## BM25 を自分で実装してパラメータの働きを確かめる {bm25_scratch}
 
 キーワード検索の標準的なスコアである BM25 が、何を計算しているのかを理解したい。パラメータ k1 と b を変えると何が起きるかを見たい。
@@ -228,44 +267,76 @@ for q in ["京都", "都立"]:
 - 日本語の全文検索エンジンでは、形態素解析による索引と 2-gram の索引を両方持つのが定石。
 - 表記ゆれの吸収には、検索前の正規化 (NFKC、長音の統一、Sudachi の正規化形) も有効。
 
-## TF-IDF とコサイン類似度で似た文書を探す {tfidf_similarity}
+## 検索結果の上位からクエリを拡張する (擬似適合性フィードバック) {query_expansion}
 
-ニューラルモデルを使わずに、単語の重なりに基づいて類似文書を高速に検索したい。
+短いクエリでは語が足りず、関連文書に当たらない。最初の検索結果の上位に出てくる語をクエリに足して、もう一度検索したい。
 
 ```python
+!pip install -q rank_bm25 fugashi unidic-lite
+```
+
+```python
+import io, tarfile, urllib.request
+from collections import Counter
 import numpy as np
-from sklearn.datasets import fetch_20newsgroups
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
+from fugashi import Tagger
+from rank_bm25 import BM25Okapi
 
-data = fetch_20newsgroups(subset="train", remove=("headers", "footers", "quotes"))
-docs = [d for d in data.data if len(d) > 200][:5000]
-vec = TfidfVectorizer(stop_words="english", max_df=0.5, min_df=2, sublinear_tf=True)
-X = vec.fit_transform(docs)   # 疎行列 (文書数 × 語彙数)。行は L2 正規化済み
-print(X.shape, f"非ゼロ要素の割合 {X.nnz / (X.shape[0] * X.shape[1]):.4f}")
+def load_livedoor():
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+df = load_livedoor().sample(1500, random_state=0).reset_index(drop=True)
+tagger = Tagger()
+tok = lambda s: [w.surface.lower() for w in tagger(s) if w.feature.pos1 in ("名詞", "動詞", "形容詞") and w.feature.pos2 not in ("非自立可能", "数詞") and len(w.surface) > 1]
+corpus = [tok(t[:600]) for t in df["text"]]
+bm25 = BM25Okapi(corpus)
+doc_freq = Counter(t for d in corpus for t in set(d))
 ```
 
 ```python
-def search(query, k=3):
-    sims = cosine_similarity(vec.transform([query]), X).ravel()
-    for i in np.argsort(-sims)[:k]:
-        print(f"  {sims[i]:.3f}  {' '.join(docs[i].split())[:90]}")
+def expand(query_terms, top_docs=5, n_terms=5):
+    """上位文書に多く、コーパス全体では珍しい語 (TF × IDF) をクエリに足す"""
+    first = np.argsort(-bm25.get_scores(query_terms))[:top_docs]
+    tf = Counter(t for i in first for t in corpus[i])
+    weight = {t: c * np.log(len(corpus) / doc_freq[t]) for t, c in tf.items() if t not in query_terms}
+    return [t for t, _ in sorted(weight.items(), key=lambda x: -x[1])[:n_terms]]
 
-for q in ["space shuttle launch NASA", "best graphics card for windows"]:
-    print(q)
-    search(q)
+for q in ["スマホ 電池", "サッカー 日本代表", "結婚 悩み"]:
+    terms = tok(q)
+    added = expand(terms)
+    before = np.argsort(-bm25.get_scores(terms))[:3]
+    after = np.argsort(-bm25.get_scores(terms + added))[:3]
+    print(f"{q} + {added}")
+    print("   拡張前:", [df['title'][i][:22] for i in before])
+    print("   拡張後:", [df['title'][i][:22] for i in after])
 ```
 
 ```python
-# 文書同士の類似度: 0 番の文書に似た文書
-sims = cosine_similarity(X[0], X).ravel()
-print(" ".join(docs[0].split())[:100])
-for i in np.argsort(-sims)[1:3]:
-    print(f"  {sims[i]:.3f}  {' '.join(docs[i].split())[:90]}")
+# 効果を測る: カテゴリが同じ記事を「関連あり」とみなして、上位 10 件の適合率を比べる
+queries = {"スマホ アプリ": "smax", "映画 公開": "movie-enter", "試合 選手": "sports-watch", "恋愛 結婚": "dokujo-tsushin", "家電 売れ筋": "kaden-channel", "パソコン ソフト": "it-life-hack"}
+rows = []
+for q, label in queries.items():
+    terms = tok(q)
+    p = lambda ts: (df["label"].to_numpy()[np.argsort(-bm25.get_scores(ts))[:10]] == label).mean()
+    rows.append({"クエリ": q, "拡張前 P@10": p(terms), "拡張後 P@10": p(terms + expand(terms)), "足した語": " ".join(expand(terms))})
+print(pd.DataFrame(rows).to_string(index=False))
 ```
 
-- 日本語の場合は `TfidfVectorizer(tokenizer=分かち書き関数, token_pattern=None)` とする。
-- 文字 n-gram (`analyzer="char", ngram_range=(2, 3)`) にすると、分かち書きなしで表記ゆれにも強くなる。
+- 「最初の検索の上位はだいたい関連文書だろう」と仮定して、そこから特徴的な語を拾う。人の判断を使わないので「擬似」適合性フィードバックと呼ぶ。
+- 上位が外れていると、無関係な語が足されて検索がさらにずれる (クエリドリフト)。足す語数と使う文書数は控えめにする。
+- この例でも、拡張で適合率が上がったのは 6 クエリ中 1 つだけで、多くは人名や番組名のような偶然の語が足されて下がっている。クエリ拡張は「入れれば良くなる」ものではないので、必ず評価データで効果を確かめる。
+- 元のクエリの語を、足した語より重くするのが普通 (ここでは同じ重み)。RM3 と呼ばれる方式が古典的な標準。
+- 同義語辞書 (WordNet) による拡張や、LLM にクエリを言い換えさせる方法もある。埋め込み検索は、同じ効果を内部で実現していると言える。
 
 ## 埋め込みで意味検索 (セマンティックサーチ) をする {semantic_search}
 
@@ -352,6 +423,54 @@ print(index.ntotal)
 - 近似探索は速度と recall のトレードオフ。`efSearch` や `nprobe` を上げると recall が上がり、遅くなる。自分のデータで必ず recall を測る。
 - 100 万件以下で精度重視なら Flat か HNSW、メモリを節約したいなら IVF + PQ (直積量子化)。
 - GPU 版は `faiss-gpu`。メタデータによる絞り込みや永続化まで欲しければ Qdrant や Chroma などのベクトル DB を検討する。
+
+## 検索・ランキングを評価する (Recall@k、MRR、nDCG) {ranking_metrics}
+
+検索システムやリランカーが、正解の文書をどれくらい上位に出せているかを測りたい。
+
+```python
+import numpy as np
+
+def recall_at_k(ranked, relevant, k):
+    return len(set(ranked[:k]) & relevant) / len(relevant)
+
+def reciprocal_rank(ranked, relevant):
+    for i, doc in enumerate(ranked, 1):
+        if doc in relevant:
+            return 1 / i
+    return 0.0
+
+def average_precision(ranked, relevant):
+    hits, total = 0, 0.0
+    for i, doc in enumerate(ranked, 1):
+        if doc in relevant:
+            hits += 1
+            total += hits / i            # 正解が出た位置での適合率
+    return total / len(relevant)
+
+def ndcg_at_k(ranked, gains, k):
+    """gains: {文書 ID: 関連度 (0, 1, 2, ...)}。上位ほど大きい重みで関連度を足し、理想的な順位での値で割る"""
+    dcg = sum(gains.get(doc, 0) / np.log2(i + 1) for i, doc in enumerate(ranked[:k], 1))
+    ideal = sum(g / np.log2(i + 1) for i, g in enumerate(sorted(gains.values(), reverse=True)[:k], 1))
+    return float(dcg / ideal) if ideal else 0.0
+
+# クエリごとの (システムの出力順位, 関連度付きの正解)
+runs = {
+    "q1": (["d3", "d1", "d7", "d2", "d9"], {"d1": 2, "d2": 1}),
+    "q2": (["d5", "d4", "d8", "d6", "d1"], {"d5": 2}),
+    "q3": (["d2", "d9", "d4", "d3", "d6"], {"d7": 2, "d6": 1}),
+}
+rows = []
+for q, (ranked, gains) in runs.items():
+    rel = set(gains)
+    rows.append([recall_at_k(ranked, rel, 1), recall_at_k(ranked, rel, 5), reciprocal_rank(ranked, rel), average_precision(ranked, rel), ndcg_at_k(ranked, gains, 5)])
+    print(q, [round(x, 3) for x in rows[-1]])
+print("平均: Recall@1 {:.3f}  Recall@5 {:.3f}  MRR {:.3f}  MAP {:.3f}  nDCG@5 {:.3f}".format(*np.mean(rows, axis=0)))
+```
+
+- RAG の検索段階なら Recall@k (正解が上位 k 件に入っているか)、最終的な順位付けなら MRR や nDCG を見る。
+- MRR は最初の正解の順位だけを見る。正解が複数あって段階的な関連度が付いているなら nDCG。
+- 標準的な実装は `pytrec_eval` や `ranx`。論文で報告するなら、それらを使うのが安全。
 
 ## キーワード検索と埋め込み検索を組み合わせる (ハイブリッド検索、RRF) {hybrid_search}
 
@@ -441,77 +560,6 @@ for r in reranker.rank(query, candidates, top_k=2, return_documents=True):
 - バイエンコーダ (文埋め込み) はクエリと文書を別々にベクトル化するので速いが粗い。クロスエンコーダは両方を連結して入力するので正確だが遅い。
 - 定番の構成: BM25 や埋め込み検索で上位 100 件を取得 → クロスエンコーダで上位 10 件に絞る。
 - 多言語なら `BAAI/bge-reranker-v2-m3`、日本語で高精度なら `hotchpotch/japanese-reranker-cross-encoder-large-v1` など。
-
-## 検索結果の上位からクエリを拡張する (擬似適合性フィードバック) {query_expansion}
-
-短いクエリでは語が足りず、関連文書に当たらない。最初の検索結果の上位に出てくる語をクエリに足して、もう一度検索したい。
-
-```python
-!pip install -q rank_bm25 fugashi unidic-lite
-```
-
-```python
-import io, tarfile, urllib.request
-from collections import Counter
-import numpy as np
-import pandas as pd
-from fugashi import Tagger
-from rank_bm25 import BM25Okapi
-
-def load_livedoor():
-    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
-    with urllib.request.urlopen(url) as r:
-        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
-    rows = []
-    for m in tar.getmembers():
-        parts = m.name.split("/")
-        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
-            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
-            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
-    return pd.DataFrame(rows)
-
-df = load_livedoor().sample(1500, random_state=0).reset_index(drop=True)
-tagger = Tagger()
-tok = lambda s: [w.surface.lower() for w in tagger(s) if w.feature.pos1 in ("名詞", "動詞", "形容詞") and w.feature.pos2 not in ("非自立可能", "数詞") and len(w.surface) > 1]
-corpus = [tok(t[:600]) for t in df["text"]]
-bm25 = BM25Okapi(corpus)
-doc_freq = Counter(t for d in corpus for t in set(d))
-```
-
-```python
-def expand(query_terms, top_docs=5, n_terms=5):
-    """上位文書に多く、コーパス全体では珍しい語 (TF × IDF) をクエリに足す"""
-    first = np.argsort(-bm25.get_scores(query_terms))[:top_docs]
-    tf = Counter(t for i in first for t in corpus[i])
-    weight = {t: c * np.log(len(corpus) / doc_freq[t]) for t, c in tf.items() if t not in query_terms}
-    return [t for t, _ in sorted(weight.items(), key=lambda x: -x[1])[:n_terms]]
-
-for q in ["スマホ 電池", "サッカー 日本代表", "結婚 悩み"]:
-    terms = tok(q)
-    added = expand(terms)
-    before = np.argsort(-bm25.get_scores(terms))[:3]
-    after = np.argsort(-bm25.get_scores(terms + added))[:3]
-    print(f"{q} + {added}")
-    print("   拡張前:", [df['title'][i][:22] for i in before])
-    print("   拡張後:", [df['title'][i][:22] for i in after])
-```
-
-```python
-# 効果を測る: カテゴリが同じ記事を「関連あり」とみなして、上位 10 件の適合率を比べる
-queries = {"スマホ アプリ": "smax", "映画 公開": "movie-enter", "試合 選手": "sports-watch", "恋愛 結婚": "dokujo-tsushin", "家電 売れ筋": "kaden-channel", "パソコン ソフト": "it-life-hack"}
-rows = []
-for q, label in queries.items():
-    terms = tok(q)
-    p = lambda ts: (df["label"].to_numpy()[np.argsort(-bm25.get_scores(ts))[:10]] == label).mean()
-    rows.append({"クエリ": q, "拡張前 P@10": p(terms), "拡張後 P@10": p(terms + expand(terms)), "足した語": " ".join(expand(terms))})
-print(pd.DataFrame(rows).to_string(index=False))
-```
-
-- 「最初の検索の上位はだいたい関連文書だろう」と仮定して、そこから特徴的な語を拾う。人の判断を使わないので「擬似」適合性フィードバックと呼ぶ。
-- 上位が外れていると、無関係な語が足されて検索がさらにずれる (クエリドリフト)。足す語数と使う文書数は控えめにする。
-- この例でも、拡張で適合率が上がったのは 6 クエリ中 1 つだけで、多くは人名や番組名のような偶然の語が足されて下がっている。クエリ拡張は「入れれば良くなる」ものではないので、必ず評価データで効果を確かめる。
-- 元のクエリの語を、足した語より重くするのが普通 (ここでは同じ重み)。RM3 と呼ばれる方式が古典的な標準。
-- 同義語辞書 (WordNet) による拡張や、LLM にクエリを言い換えさせる方法もある。埋め込み検索は、同じ効果を内部で実現していると言える。
 
 ## 検索結果の重複を減らして多様にする (MMR) {mmr_diversify}
 
@@ -691,64 +739,6 @@ for q in ["日本で一番高い山は？", "What is the highest mountain in Jap
 - 固有名詞や専門用語が言語によって大きく違う場合は弱い。クエリを機械翻訳してから検索する方法と比べて、良いほうを使う。
 - BM25 のようなキーワード検索は、言語が違うと語が一致しないので使えない。ハイブリッド検索にするなら、クエリの翻訳と組み合わせる。
 
-## 入力の途中で候補を出す・打ち間違いを直す (サジェストと「もしかして」) {search_suggest}
-
-検索窓に数文字入れた時点で候補を出したい。打ち間違いや、ひらがなで入力された語にも対応したい。
-
-```python
-!pip install -q rapidfuzz fugashi unidic-lite jaconv
-```
-
-```python
-import bisect
-import jaconv
-from fugashi import Tagger
-from rapidfuzz import fuzz, process
-
-# 候補の語と人気度 (検索回数など)
-terms = {"自然言語処理": 950, "自然言語理解": 120, "自然言語生成": 200, "機械翻訳": 800, "機械学習": 990, "形態素解析": 400, "係り受け解析": 150,
-         "固有表現抽出": 300, "感情分析": 350, "質問応答": 280, "文法誤り訂正": 180, "大規模言語モデル": 700, "検索拡張生成": 260, "言語モデル": 500}
-
-tagger = Tagger()
-def reading(word):
-    return jaconv.kata2hira("".join(w.feature.kana or w.surface for w in tagger(word)))
-
-# 表記と読みの両方を、前方一致で引けるように並べておく
-entries = sorted([(t, t) for t in terms] + [(reading(t), t) for t in terms])
-keys = [k for k, _ in entries]
-
-def suggest(prefix, k=5):
-    """前方一致する候補を、人気度の高い順に返す (二分探索なので、候補が数百万あっても速い)"""
-    prefix = jaconv.kata2hira(prefix)
-    lo = bisect.bisect_left(keys, prefix)
-    hi = bisect.bisect_right(keys, prefix + "￿")
-    found = {t for _, t in entries[lo:hi]}
-    return sorted(found, key=lambda t: -terms[t])[:k]
-
-for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう"]:
-    print(prefix, "→", suggest(prefix))
-```
-
-```python
-# 前方一致で見つからないときは、編集距離の近い語を「もしかして」として出す
-def did_you_mean(query, limit=2, threshold=60):
-    by_surface = process.extract(query, list(terms), scorer=fuzz.ratio, limit=limit)
-    by_reading = process.extract(reading(query), {t: reading(t) for t in terms}, scorer=fuzz.ratio, limit=limit)
-    best = {}
-    for name, score in [(m[0], m[1]) for m in by_surface] + [(m[2], m[1]) for m in by_reading]:
-        best[name] = max(best.get(name, 0), score)
-    return [(t, round(s)) for t, s in sorted(best.items(), key=lambda x: -x[1]) if s >= threshold][:limit]
-
-for q in ["自然原語処理", "機会翻訳", "けいたいそかいせき", "固有表現注出", "大規模言語モデル", "らーめん"]:
-    hits = suggest(q, 1)
-    print(q, "→", hits if hits else f"もしかして: {did_you_mean(q)}")
-```
-
-- サジェストは「前方一致 + 人気順」が基本。候補をソートしておけば二分探索で引ける。大規模にはトライ木や、検索エンジンの補完機能を使う。
-- 日本語では、変換前のひらがなやローマ字で入力されることが多い。読みでも引けるようにしておくと、「しぜんげんごし」の時点で候補を出せる。
-- 「機会翻訳」のような同音の誤変換は、表記の編集距離では遠くても、読みに直すと完全に一致する。表記と読みの両方で照合するのが有効。
-- しきい値未満なら何も出さない。無関係な語を「もしかして」と出すと、かえって邪魔になる。
-
 ## 検索用の埋め込みモデルを自分のデータで微調整する {embedding_finetune}
 
 汎用の埋め込みモデルでは、自分の分野の検索で精度が足りない。クエリと正解文書の組から、埋め込みモデルを追加学習したい。
@@ -816,50 +806,60 @@ model.save("e5-finetuned")
 - 「正解ではないが紛らわしい文書」(ハードネガティブ) を BM25 や元のモデルの検索結果から集めて加えると、さらに伸びる。
 - 評価データは必ず学習に使っていない組にする。微調整後は、分野外のクエリでの性能が下がっていないかも確かめる。
 
-## 検索・ランキングを評価する (Recall@k、MRR、nDCG) {ranking_metrics}
+## 入力の途中で候補を出す・打ち間違いを直す (サジェストと「もしかして」) {search_suggest}
 
-検索システムやリランカーが、正解の文書をどれくらい上位に出せているかを測りたい。
+検索窓に数文字入れた時点で候補を出したい。打ち間違いや、ひらがなで入力された語にも対応したい。
 
 ```python
-import numpy as np
-
-def recall_at_k(ranked, relevant, k):
-    return len(set(ranked[:k]) & relevant) / len(relevant)
-
-def reciprocal_rank(ranked, relevant):
-    for i, doc in enumerate(ranked, 1):
-        if doc in relevant:
-            return 1 / i
-    return 0.0
-
-def average_precision(ranked, relevant):
-    hits, total = 0, 0.0
-    for i, doc in enumerate(ranked, 1):
-        if doc in relevant:
-            hits += 1
-            total += hits / i            # 正解が出た位置での適合率
-    return total / len(relevant)
-
-def ndcg_at_k(ranked, gains, k):
-    """gains: {文書 ID: 関連度 (0, 1, 2, ...)}。上位ほど大きい重みで関連度を足し、理想的な順位での値で割る"""
-    dcg = sum(gains.get(doc, 0) / np.log2(i + 1) for i, doc in enumerate(ranked[:k], 1))
-    ideal = sum(g / np.log2(i + 1) for i, g in enumerate(sorted(gains.values(), reverse=True)[:k], 1))
-    return float(dcg / ideal) if ideal else 0.0
-
-# クエリごとの (システムの出力順位, 関連度付きの正解)
-runs = {
-    "q1": (["d3", "d1", "d7", "d2", "d9"], {"d1": 2, "d2": 1}),
-    "q2": (["d5", "d4", "d8", "d6", "d1"], {"d5": 2}),
-    "q3": (["d2", "d9", "d4", "d3", "d6"], {"d7": 2, "d6": 1}),
-}
-rows = []
-for q, (ranked, gains) in runs.items():
-    rel = set(gains)
-    rows.append([recall_at_k(ranked, rel, 1), recall_at_k(ranked, rel, 5), reciprocal_rank(ranked, rel), average_precision(ranked, rel), ndcg_at_k(ranked, gains, 5)])
-    print(q, [round(x, 3) for x in rows[-1]])
-print("平均: Recall@1 {:.3f}  Recall@5 {:.3f}  MRR {:.3f}  MAP {:.3f}  nDCG@5 {:.3f}".format(*np.mean(rows, axis=0)))
+!pip install -q rapidfuzz fugashi unidic-lite jaconv
 ```
 
-- RAG の検索段階なら Recall@k (正解が上位 k 件に入っているか)、最終的な順位付けなら MRR や nDCG を見る。
-- MRR は最初の正解の順位だけを見る。正解が複数あって段階的な関連度が付いているなら nDCG。
-- 標準的な実装は `pytrec_eval` や `ranx`。論文で報告するなら、それらを使うのが安全。
+```python
+import bisect
+import jaconv
+from fugashi import Tagger
+from rapidfuzz import fuzz, process
+
+# 候補の語と人気度 (検索回数など)
+terms = {"自然言語処理": 950, "自然言語理解": 120, "自然言語生成": 200, "機械翻訳": 800, "機械学習": 990, "形態素解析": 400, "係り受け解析": 150,
+         "固有表現抽出": 300, "感情分析": 350, "質問応答": 280, "文法誤り訂正": 180, "大規模言語モデル": 700, "検索拡張生成": 260, "言語モデル": 500}
+
+tagger = Tagger()
+def reading(word):
+    return jaconv.kata2hira("".join(w.feature.kana or w.surface for w in tagger(word)))
+
+# 表記と読みの両方を、前方一致で引けるように並べておく
+entries = sorted([(t, t) for t in terms] + [(reading(t), t) for t in terms])
+keys = [k for k, _ in entries]
+
+def suggest(prefix, k=5):
+    """前方一致する候補を、人気度の高い順に返す (二分探索なので、候補が数百万あっても速い)"""
+    prefix = jaconv.kata2hira(prefix)
+    lo = bisect.bisect_left(keys, prefix)
+    hi = bisect.bisect_right(keys, prefix + "￿")
+    found = {t for _, t in entries[lo:hi]}
+    return sorted(found, key=lambda t: -terms[t])[:k]
+
+for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう"]:
+    print(prefix, "→", suggest(prefix))
+```
+
+```python
+# 前方一致で見つからないときは、編集距離の近い語を「もしかして」として出す
+def did_you_mean(query, limit=2, threshold=60):
+    by_surface = process.extract(query, list(terms), scorer=fuzz.ratio, limit=limit)
+    by_reading = process.extract(reading(query), {t: reading(t) for t in terms}, scorer=fuzz.ratio, limit=limit)
+    best = {}
+    for name, score in [(m[0], m[1]) for m in by_surface] + [(m[2], m[1]) for m in by_reading]:
+        best[name] = max(best.get(name, 0), score)
+    return [(t, round(s)) for t, s in sorted(best.items(), key=lambda x: -x[1]) if s >= threshold][:limit]
+
+for q in ["自然原語処理", "機会翻訳", "けいたいそかいせき", "固有表現注出", "大規模言語モデル", "らーめん"]:
+    hits = suggest(q, 1)
+    print(q, "→", hits if hits else f"もしかして: {did_you_mean(q)}")
+```
+
+- サジェストは「前方一致 + 人気順」が基本。候補をソートしておけば二分探索で引ける。大規模にはトライ木や、検索エンジンの補完機能を使う。
+- 日本語では、変換前のひらがなやローマ字で入力されることが多い。読みでも引けるようにしておくと、「しぜんげんごし」の時点で候補を出せる。
+- 「機会翻訳」のような同音の誤変換は、表記の編集距離では遠くても、読みに直すと完全に一致する。表記と読みの両方で照合するのが有効。
+- しきい値未満なら何も出さない。無関係な語を「もしかして」と出すと、かえって邪魔になる。

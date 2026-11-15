@@ -2,71 +2,6 @@
 
 分類・抽出・生成の出力を数値で評価し、その差が偶然でないかを確かめる。LLM による評価も扱う。翻訳・要約・質問応答・検索に固有の指標は、それぞれの章を参照。
 
-## BERTScore で意味的な近さを評価する {bertscore}
-
-表現が違っても意味が同じなら高く評価したい。n-gram の一致ではなく、文脈化埋め込みの類似度で測る。
-
-```python
-!pip install -q bert-score
-```
-
-```python
-from bert_score import score
-
-refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。", "この本は非常に面白い。"]
-hyps = ["猫がマットの上に座っている。", "昨日、彼は東京へ出かけた。", "この書籍はとても興味深い。", "この本は非常に面白くない。"]
-
-P, R, F = score(hyps, refs, lang="ja", verbose=False)   # lang="ja" では bert-base-multilingual-cased が使われる
-for h, r, f in zip(hyps, refs, F.tolist()):
-    print(f"{f:.3f}  {h}  /  {r}")
-print("平均 F1:", F.mean().item())
-```
-
-```python
-# 無関係な文同士でも 0.6 前後になる (値の範囲が狭い) ことに注意。設定を表すハッシュも取得できる
-(P, R, F), setting = score(["今日は天気が良い。"], ["会議は午後 3 時に始まります。"], lang="ja", verbose=False, return_hash=True)
-print(round(F.item(), 3), setting)
-```
-
-- 言い換え (「本 / 書籍」「面白い / 興味深い」) にも高いスコアが付く。一方で、否定のような小さいが決定的な違い (4 つ目の例) には鈍感。
-- 値はモデルと層に依存する。報告するときはハッシュを添える。英語などでは `rescale_with_baseline=True` で値の範囲を広げて読みやすくできる。
-- 翻訳評価では、人手評価で学習した COMET などのほうが人間の判断との相関が高い。
-
-## 音声認識や OCR の誤り率 (WER / CER) を計算する {wer_cer}
-
-音声認識や OCR の出力が、正解とどれくらい違うかを単語誤り率・文字誤り率で測りたい。
-
-```python
-!pip install -q jiwer
-```
-
-```python
-import jiwer
-
-ref = ["the quick brown fox jumps over the lazy dog", "natural language processing is fun"]
-hyp = ["the quick brown fox jumped over lazy dog", "natural language processing fun is"]
-out = jiwer.process_words(ref, hyp)
-print(f"WER = {out.wer:.3f}  (置換 {out.substitutions} / 削除 {out.deletions} / 挿入 {out.insertions} / 正解 {out.hits})")
-print(jiwer.visualize_alignment(out))
-```
-
-```python
-# 日本語は単語境界がないので、文字誤り率 (CER) を使うのが一般的
-import unicodedata
-
-def normalize(s):
-    s = unicodedata.normalize("NFKC", s)
-    return "".join(c for c in s if not unicodedata.category(c).startswith(("P", "Z")))   # 句読点と空白を除く
-
-ref_ja = ["今日は良い天気ですね。", "自然言語処理の研究をしています。"]
-hyp_ja = ["今日はいい天気ですね", "自然原語処理の研究をしてます。"]
-print("CER (そのまま):", round(jiwer.cer(ref_ja, hyp_ja), 3))
-print("CER (正規化後):", round(jiwer.cer([normalize(s) for s in ref_ja], [normalize(s) for s in hyp_ja]), 3))
-```
-
-- WER = (置換 + 削除 + 挿入) ÷ 参照の単語数。挿入が多いと 100% を超えることもある。
-- 「良い / いい」「3 / 三」のような表記の違いも誤りに数えられる。評価前の正規化 (句読点、全角半角、数字の表記) の方針を決めて明記する。
-
 ## 適合率・再現率・F1 を自分で計算する (micro と macro) {prf_manual}
 
 ライブラリに頼らず、適合率・再現率・F1 を定義から計算して、micro 平均と macro 平均の違いを理解したい。
@@ -117,254 +52,6 @@ print("抽出の P/R/F1:", [round(x, 3) for x in prf(n, len(pred_set) - n, len(g
 - 単一ラベルの多クラス分類では、micro-F1 は正解率と一致する。
 - macro-F1 は少数クラス (ここでは一度も当たっていない C) の影響を強く受ける。クラスの偏りがあるときに、モデルの弱点が見える。
 - 「macro-F1」には「クラスごとの F1 の平均」と「macro 適合率と macro 再現率の調和平均」の 2 つの流儀があり、値が違う。前者が一般的。
-
-## アノテーションの一致度を測る (κ 係数、Krippendorff の α) {agreement}
-
-複数人が付けたラベルがどれくらい一致しているかを、偶然の一致を差し引いて評価したい。
-
-```python
-!pip install -q krippendorff statsmodels
-```
-
-```python
-import numpy as np
-from sklearn.metrics import cohen_kappa_score
-
-a = ["pos", "pos", "neg", "neu", "pos", "neg", "neg", "pos", "neu", "pos", "neg", "pos"]
-b = ["pos", "neu", "neg", "neu", "pos", "neg", "pos", "pos", "neg", "pos", "neg", "pos"]
-print("単純一致率:", round(float(np.mean([x == y for x, y in zip(a, b)])), 3))
-print("Cohen の κ:", round(cohen_kappa_score(a, b), 3))
-
-# 順序のあるラベル (1〜5 の評点など) は、近い食い違いを軽く扱う重み付き κ を使う
-r1, r2 = [1, 2, 3, 4, 5, 3, 2, 4, 5, 1], [1, 3, 3, 5, 5, 2, 2, 4, 4, 2]
-print("重みなし κ:", round(cohen_kappa_score(r1, r2), 3), " 2 次重み付き κ:", round(cohen_kappa_score(r1, r2, weights="quadratic"), 3))
-```
-
-```python
-# 3 人以上: Fleiss の κ
-from statsmodels.stats.inter_rater import aggregate_raters, fleiss_kappa
-
-ratings = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 1], [2, 2, 1], [0, 0, 0], [1, 1, 2], [2, 2, 2], [0, 0, 1]])   # 行 = 事例、列 = 評定者
-table, _ = aggregate_raters(ratings)
-print("Fleiss の κ:", round(fleiss_kappa(table), 3))
-```
-
-```python
-# 欠損があってもよく、名義・順序・間隔尺度に対応する Krippendorff の α
-import krippendorff
-
-data = np.array([[1, 2, 3, 3, 2, 1, 4, 1, 2, np.nan],      # 行 = 評定者、列 = 事例 (nan = 未評定)
-                 [1, 2, 3, 3, 2, 2, 4, 1, 2, 5],
-                 [np.nan, 3, 3, 3, 2, 3, 4, 2, 2, 5]])
-for level in ["nominal", "ordinal", "interval"]:
-    print(f"α ({level}):", round(krippendorff.alpha(reliability_data=data, level_of_measurement=level), 3))
-```
-
-- κ の目安 (Landis & Koch): 0.41〜0.60 中程度、0.61〜0.80 かなりの一致、0.81 以上ほぼ完全。ただし絶対的な基準ではない。
-- κ はラベルの分布が偏っていると、一致率が高くても低く出る。混同行列も併せて見る。
-- 一致度が低いときは、アノテータではなくガイドラインに問題があることが多い。食い違った事例を見て、基準を明確にする。
-
-## ブートストラップ法で評価値の信頼区間を求める {bootstrap_ci}
-
-テストセットで正解率 85% だったが、その値がどれくらい不確かなのか、信頼区間を付けて報告したい。
-
-```python
-import numpy as np
-
-rng = np.random.default_rng(0)
-n = 500
-gold = rng.integers(0, 2, n)
-pred = np.where(rng.random(n) < 0.85, gold, 1 - gold)      # 正解率が約 85% の予測を人工的に作る
-
-def bootstrap_ci(metric, gold, pred, n_boot=2000, alpha=0.05):
-    """テスト事例を復元抽出して指標を計算し直すことを繰り返し、分布の両端を信頼区間とする"""
-    stats = []
-    for _ in range(n_boot):
-        idx = rng.integers(0, len(gold), len(gold))
-        stats.append(metric(gold[idx], pred[idx]))
-    return metric(gold, pred), np.percentile(stats, 100 * alpha / 2), np.percentile(stats, 100 * (1 - alpha / 2))
-
-accuracy = lambda g, p: (g == p).mean()
-point, lo, hi = bootstrap_ci(accuracy, gold, pred)
-print(f"正解率 = {point:.3f}  95% 信頼区間 [{lo:.3f}, {hi:.3f}]")
-```
-
-```python
-# F1 のように単純な平均でない指標でも、同じ手順で求められる
-from sklearn.metrics import f1_score
-
-point, lo, hi = bootstrap_ci(lambda g, p: f1_score(g, p), gold, pred)
-print(f"F1 = {point:.3f}  95% 信頼区間 [{lo:.3f}, {hi:.3f}]")
-
-# テストセットの大きさと信頼区間の幅
-for size in [100, 500, 2000, 10000]:
-    g = rng.integers(0, 2, size); p = np.where(rng.random(size) < 0.85, g, 1 - g)
-    _, lo, hi = bootstrap_ci(accuracy, g, p, n_boot=500)
-    print(f"n = {size:5}: 幅 ±{(hi - lo) / 2 * 100:.1f} ポイント")
-```
-
-- 500 件のテストセットでは、正解率に ±3 ポイント程度の不確かさがある。1 ポイントの差を議論するには数千件が必要。
-- BLEU のようなコーパス単位の指標も、文をリサンプリングして計算し直せば同じように扱える (`sacrebleu` にも実装がある)。
-- これは「テストセットの選び方」による不確かさ。学習の乱数シードによるばらつきは別に評価する必要がある。
-
-## 2 つのシステムの差が有意かどうかを検定する {significance_test}
-
-システム A が B より 1 ポイント高かった。この差は偶然なのか、本当に A のほうが良いと言えるのかを確かめたい。
-
-```python
-import numpy as np
-
-rng = np.random.default_rng(0)
-n = 1000
-gold = rng.integers(0, 2, n)
-difficulty = rng.random(n)                                  # 事例ごとの難しさ (両システムに共通)
-pred_a = np.where(difficulty + rng.normal(0, 0.15, n) < 0.86, gold, 1 - gold)
-pred_b = np.where(difficulty + rng.normal(0, 0.15, n) < 0.83, gold, 1 - gold)
-correct_a, correct_b = pred_a == gold, pred_b == gold
-print(f"A = {correct_a.mean():.3f}  B = {correct_b.mean():.3f}  差 = {correct_a.mean() - correct_b.mean():+.3f}")
-```
-
-```python
-def paired_bootstrap(a, b, n_boot=10000):
-    """対応のあるブートストラップ検定: 同じ事例を両システムについてリサンプリングし、A が B を上回らない割合を p 値とする"""
-    idx = rng.integers(0, len(a), (n_boot, len(a)))
-    diffs = a[idx].mean(axis=1) - b[idx].mean(axis=1)
-    return (diffs <= 0).mean()
-
-def approximate_randomization(a, b, n_perm=10000):
-    """近似並べ替え検定: 事例ごとに A と B の結果をランダムに入れ替え、観測された差以上の差が出る割合を p 値とする (両側)"""
-    observed = abs(a.mean() - b.mean())
-    swap = rng.random((n_perm, len(a))) < 0.5
-    diffs = np.abs(np.where(swap, b, a).mean(axis=1) - np.where(swap, a, b).mean(axis=1))
-    return (diffs >= observed).mean()
-
-print("対応のあるブートストラップ (片側) p =", paired_bootstrap(correct_a, correct_b))
-print("近似並べ替え検定 (両側) p =", approximate_randomization(correct_a, correct_b))
-```
-
-```python
-# 分類の正誤なら、McNemar 検定が使える (片方だけが正解した事例の数だけを見る)
-from statsmodels.stats.contingency_tables import mcnemar
-
-table = [[(correct_a & correct_b).sum(), (correct_a & ~correct_b).sum()],
-         [(~correct_a & correct_b).sum(), (~correct_a & ~correct_b).sum()]]
-print("A だけ正解:", table[0][1], " B だけ正解:", table[1][0], " McNemar p =", round(mcnemar(table, exact=True).pvalue, 4))
-```
-
-- 同じテストセットで 2 つのシステムを比べるときは、事例ごとの対応を使う「対応のある」検定にする。対応を無視すると検出力が大きく落ちる。
-- p < 0.05 は「差がない場合にこの結果が出る確率が 5% 未満」という意味で、差の大きさや重要さは示さない。効果量と信頼区間も併せて報告する。
-- たくさんのシステムや設定を比べると、偶然「有意」になるものが出てくる (多重比較)。Bonferroni 補正などを検討する。
-
-## 乱数シードによるばらつきを考慮して結果を報告する {seed_variance}
-
-ファインチューニングは乱数シードで結果が変わる。1 回の実行の数字ではなく、複数回の平均とばらつきで手法を比較したい。
-
-```python
-import numpy as np
-from scipy import stats
-
-# 5 つのシードで学習したときのテスト F1 (例)
-baseline = np.array([84.2, 85.1, 83.6, 84.9, 84.4])
-proposed = np.array([85.0, 85.9, 84.1, 86.2, 85.3])
-
-for name, x in [("baseline", baseline), ("proposed", proposed)]:
-    ci = stats.t.interval(0.95, len(x) - 1, loc=x.mean(), scale=stats.sem(x))
-    print(f"{name}: {x.mean():.2f} ± {x.std(ddof=1):.2f} (標準偏差)  95% 信頼区間 [{ci[0]:.2f}, {ci[1]:.2f}]  最小 {x.min()} 最大 {x.max()}")
-```
-
-```python
-t, p = stats.ttest_ind(proposed, baseline, equal_var=False)       # Welch の t 検定
-u, p_u = stats.mannwhitneyu(proposed, baseline, alternative="two-sided")   # 正規性を仮定しないノンパラメトリック検定
-d = (proposed.mean() - baseline.mean()) / np.sqrt((proposed.var(ddof=1) + baseline.var(ddof=1)) / 2)
-print(f"差 = {proposed.mean() - baseline.mean():+.2f}  Welch の t 検定 p = {p:.3f}  Mann-Whitney p = {p_u:.3f}  効果量 d = {d:.2f}")
-
-# やってはいけない比較: 提案手法の最良のシードとベースラインの 1 回の結果を比べる
-print(f"最良同士の差: {proposed.max() - baseline.max():+.1f} / 提案の最良 vs ベースラインの最悪: {proposed.max() - baseline.min():+.1f}")
-```
-
-- 小さなデータセットでの BERT のファインチューニングでは、シードだけで数ポイント変わることがある。最低でも 3〜5 シードの平均と標準偏差を報告する。
-- シード数が少ないと検定の検出力は低い。有意にならなくても「差がない」とは言えない。
-- 両手法で同じシードを使ったからといって、対応のあるデータになるわけではない (初期値やデータ順が同じでも、手法が違えば別の乱数列になる)。
-
-## 自動評価指標と人手評価の相関を調べる {metric_correlation}
-
-提案した自動評価指標や LLM による評価が、人間の判断とどれくらい一致しているかを、相関係数で示したい。
-
-```python
-import numpy as np
-from scipy.stats import kendalltau, pearsonr, spearmanr
-
-rng = np.random.default_rng(0)
-human = rng.integers(1, 6, 200).astype(float)                    # 人手評価 (1〜5)
-metric_a = human * 15 + rng.normal(0, 12, 200)                   # 人手評価とよく合う指標
-metric_b = np.exp(human) + rng.normal(0, 15, 200)                # 単調だが非線形な関係の指標
-metric_c = rng.normal(50, 15, 200)                               # 無関係な指標
-
-print(f"{'':10}{'Pearson':>9}{'Spearman':>10}{'Kendall':>9}")
-for name, m in [("metric A", metric_a), ("metric B", metric_b), ("metric C", metric_c)]:
-    print(f"{name:10}{pearsonr(human, m).statistic:9.3f}{spearmanr(human, m).statistic:10.3f}{kendalltau(human, m).statistic:9.3f}")
-```
-
-```python
-# システム単位の相関: 各システムの平均スコア同士を比べる (文単位より高く出やすい)
-n_sys, n_sent = 8, 100
-quality = np.linspace(2.5, 4.0, n_sys)                            # システムの真の品質
-human_s = quality[:, None] + rng.normal(0, 1.0, (n_sys, n_sent))
-metric_s = quality[:, None] * 10 + rng.normal(0, 12, (n_sys, n_sent))
-print("文単位:", round(pearsonr(human_s.ravel(), metric_s.ravel()).statistic, 3),
-      " システム単位:", round(pearsonr(human_s.mean(1), metric_s.mean(1)).statistic, 3))
-
-# 相関係数の信頼区間 (ブートストラップ)
-idx = rng.integers(0, 200, (2000, 200))
-boots = [spearmanr(human[i], metric_a[i]).statistic for i in idx]
-print("Spearman の 95% 信頼区間:", np.percentile(boots, [2.5, 97.5]).round(3))
-```
-
-- Pearson は線形な関係の強さ、Spearman と Kendall は順位の一致を測る。非線形だが単調な関係 (metric B) は Pearson だと過小評価される。
-- 同点の多い離散的な評価 (1〜5 の評点) には Kendall の τ がよく使われる。
-- システム単位の相関は、システム数が少ないと不安定。数個のシステムでの高い相関は当てにならない。
-
-## 生成テキストの多様性と繰り返しを測る (distinct-n) {distinct_n}
-
-対話システムや生成モデルの出力が、単調で似た文ばかりになっていないか、同じ語句を繰り返していないかを数値化したい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from collections import Counter
-from fugashi import Tagger
-
-tagger = Tagger("-Owakati")
-tokenize = lambda s: tagger.parse(s).split()
-
-def ngrams(tokens, n):
-    return list(zip(*[tokens[i:] for i in range(n)]))
-
-def distinct_n(texts, n):
-    """出力全体での、異なり n-gram 数 ÷ 延べ n-gram 数"""
-    all_ngrams = [g for t in texts for g in ngrams(tokenize(t), n)]
-    return len(set(all_ngrams)) / max(1, len(all_ngrams))
-
-def repetition_rate(text, n=3):
-    """1 つの出力の中で、繰り返し現れた n-gram の割合"""
-    counts = Counter(ngrams(tokenize(text), n))
-    total = sum(counts.values())
-    return sum(c for c in counts.values() if c > 1) / max(1, total)
-
-bland = ["そうですね。", "それはいいですね。", "そうですね、いいと思います。", "わかりません。", "そうですね。"]
-diverse = ["京都なら秋の東福寺がおすすめです。", "私は辛い料理が苦手なんです。", "最近は古い映画ばかり観ています。", "猫を二匹飼っています。", "明日は雨らしいので傘を忘れずに。"]
-for name, texts in [("無難な応答", bland), ("多様な応答", diverse)]:
-    print(f"{name}: distinct-1 = {distinct_n(texts, 1):.3f}  distinct-2 = {distinct_n(texts, 2):.3f}")
-
-loop = "私は猫が好きです。私は猫が好きです。私は猫が好きです。なぜなら猫はかわいいからです。"
-print("繰り返し率:", round(repetition_rate(loop), 3), "/", round(repetition_rate(diverse[0]), 3))
-```
-
-- distinct-n は出力の総量が増えると下がるので、比較するシステム間で出力数と長さを揃える。
-- 多様性だけ高くても意味がない (ランダムな文字列が最も多様)。品質の指標と必ず組み合わせて見る。
-- 複数の出力同士の類似度を測る Self-BLEU も、多様性の指標としてよく使われる (低いほど多様)。
 
 ## モデルの確信度が当てになるか調べる (較正、ECE) {calibration_ece}
 
@@ -420,6 +107,197 @@ plt.xlabel("confidence"); plt.ylabel("accuracy"); plt.legend(); plt.show()
 - 対角線より下は自信過剰 (確信度のほうが正解率より高い)、上は自信不足。この例では、較正した SVM のほうが自信不足気味で ECE が大きい。較正の良し悪しはモデルとデータの組み合わせ次第なので、思い込みで決めずに測る。
 - ニューラルモデルの較正には、検証データでソフトマックスの温度を 1 つだけ調整する temperature scaling が簡単で効果的。
 - 正解率が同じでも、較正の良し悪しは違いうる。確信度でしきい値を設けて人手に回すような運用では、較正が重要になる。
+
+## 音声認識や OCR の誤り率 (WER / CER) を計算する {wer_cer}
+
+音声認識や OCR の出力が、正解とどれくらい違うかを単語誤り率・文字誤り率で測りたい。
+
+```python
+!pip install -q jiwer
+```
+
+```python
+import jiwer
+
+ref = ["the quick brown fox jumps over the lazy dog", "natural language processing is fun"]
+hyp = ["the quick brown fox jumped over lazy dog", "natural language processing fun is"]
+out = jiwer.process_words(ref, hyp)
+print(f"WER = {out.wer:.3f}  (置換 {out.substitutions} / 削除 {out.deletions} / 挿入 {out.insertions} / 正解 {out.hits})")
+print(jiwer.visualize_alignment(out))
+```
+
+```python
+# 日本語は単語境界がないので、文字誤り率 (CER) を使うのが一般的
+import unicodedata
+
+def normalize(s):
+    s = unicodedata.normalize("NFKC", s)
+    return "".join(c for c in s if not unicodedata.category(c).startswith(("P", "Z")))   # 句読点と空白を除く
+
+ref_ja = ["今日は良い天気ですね。", "自然言語処理の研究をしています。"]
+hyp_ja = ["今日はいい天気ですね", "自然原語処理の研究をしてます。"]
+print("CER (そのまま):", round(jiwer.cer(ref_ja, hyp_ja), 3))
+print("CER (正規化後):", round(jiwer.cer([normalize(s) for s in ref_ja], [normalize(s) for s in hyp_ja]), 3))
+```
+
+- WER = (置換 + 削除 + 挿入) ÷ 参照の単語数。挿入が多いと 100% を超えることもある。
+- 「良い / いい」「3 / 三」のような表記の違いも誤りに数えられる。評価前の正規化 (句読点、全角半角、数字の表記) の方針を決めて明記する。
+
+## BERTScore で意味的な近さを評価する {bertscore}
+
+表現が違っても意味が同じなら高く評価したい。n-gram の一致ではなく、文脈化埋め込みの類似度で測る。
+
+```python
+!pip install -q bert-score
+```
+
+```python
+from bert_score import score
+
+refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。", "この本は非常に面白い。"]
+hyps = ["猫がマットの上に座っている。", "昨日、彼は東京へ出かけた。", "この書籍はとても興味深い。", "この本は非常に面白くない。"]
+
+P, R, F = score(hyps, refs, lang="ja", verbose=False)   # lang="ja" では bert-base-multilingual-cased が使われる
+for h, r, f in zip(hyps, refs, F.tolist()):
+    print(f"{f:.3f}  {h}  /  {r}")
+print("平均 F1:", F.mean().item())
+```
+
+```python
+# 無関係な文同士でも 0.6 前後になる (値の範囲が狭い) ことに注意。設定を表すハッシュも取得できる
+(P, R, F), setting = score(["今日は天気が良い。"], ["会議は午後 3 時に始まります。"], lang="ja", verbose=False, return_hash=True)
+print(round(F.item(), 3), setting)
+```
+
+- 言い換え (「本 / 書籍」「面白い / 興味深い」) にも高いスコアが付く。一方で、否定のような小さいが決定的な違い (4 つ目の例) には鈍感。
+- 値はモデルと層に依存する。報告するときはハッシュを添える。英語などでは `rescale_with_baseline=True` で値の範囲を広げて読みやすくできる。
+- 翻訳評価では、人手評価で学習した COMET などのほうが人間の判断との相関が高い。
+
+## 生成テキストの多様性と繰り返しを測る (distinct-n) {distinct_n}
+
+対話システムや生成モデルの出力が、単調で似た文ばかりになっていないか、同じ語句を繰り返していないかを数値化したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger("-Owakati")
+tokenize = lambda s: tagger.parse(s).split()
+
+def ngrams(tokens, n):
+    return list(zip(*[tokens[i:] for i in range(n)]))
+
+def distinct_n(texts, n):
+    """出力全体での、異なり n-gram 数 ÷ 延べ n-gram 数"""
+    all_ngrams = [g for t in texts for g in ngrams(tokenize(t), n)]
+    return len(set(all_ngrams)) / max(1, len(all_ngrams))
+
+def repetition_rate(text, n=3):
+    """1 つの出力の中で、繰り返し現れた n-gram の割合"""
+    counts = Counter(ngrams(tokenize(text), n))
+    total = sum(counts.values())
+    return sum(c for c in counts.values() if c > 1) / max(1, total)
+
+bland = ["そうですね。", "それはいいですね。", "そうですね、いいと思います。", "わかりません。", "そうですね。"]
+diverse = ["京都なら秋の東福寺がおすすめです。", "私は辛い料理が苦手なんです。", "最近は古い映画ばかり観ています。", "猫を二匹飼っています。", "明日は雨らしいので傘を忘れずに。"]
+for name, texts in [("無難な応答", bland), ("多様な応答", diverse)]:
+    print(f"{name}: distinct-1 = {distinct_n(texts, 1):.3f}  distinct-2 = {distinct_n(texts, 2):.3f}")
+
+loop = "私は猫が好きです。私は猫が好きです。私は猫が好きです。なぜなら猫はかわいいからです。"
+print("繰り返し率:", round(repetition_rate(loop), 3), "/", round(repetition_rate(diverse[0]), 3))
+```
+
+- distinct-n は出力の総量が増えると下がるので、比較するシステム間で出力数と長さを揃える。
+- 多様性だけ高くても意味がない (ランダムな文字列が最も多様)。品質の指標と必ず組み合わせて見る。
+- 複数の出力同士の類似度を測る Self-BLEU も、多様性の指標としてよく使われる (低いほど多様)。
+
+## アノテーションの一致度を測る (κ 係数、Krippendorff の α) {agreement}
+
+複数人が付けたラベルがどれくらい一致しているかを、偶然の一致を差し引いて評価したい。
+
+```python
+!pip install -q krippendorff statsmodels
+```
+
+```python
+import numpy as np
+from sklearn.metrics import cohen_kappa_score
+
+a = ["pos", "pos", "neg", "neu", "pos", "neg", "neg", "pos", "neu", "pos", "neg", "pos"]
+b = ["pos", "neu", "neg", "neu", "pos", "neg", "pos", "pos", "neg", "pos", "neg", "pos"]
+print("単純一致率:", round(float(np.mean([x == y for x, y in zip(a, b)])), 3))
+print("Cohen の κ:", round(cohen_kappa_score(a, b), 3))
+
+# 順序のあるラベル (1〜5 の評点など) は、近い食い違いを軽く扱う重み付き κ を使う
+r1, r2 = [1, 2, 3, 4, 5, 3, 2, 4, 5, 1], [1, 3, 3, 5, 5, 2, 2, 4, 4, 2]
+print("重みなし κ:", round(cohen_kappa_score(r1, r2), 3), " 2 次重み付き κ:", round(cohen_kappa_score(r1, r2, weights="quadratic"), 3))
+```
+
+```python
+# 3 人以上: Fleiss の κ
+from statsmodels.stats.inter_rater import aggregate_raters, fleiss_kappa
+
+ratings = np.array([[0, 0, 0], [0, 1, 0], [1, 1, 1], [2, 2, 1], [0, 0, 0], [1, 1, 2], [2, 2, 2], [0, 0, 1]])   # 行 = 事例、列 = 評定者
+table, _ = aggregate_raters(ratings)
+print("Fleiss の κ:", round(fleiss_kappa(table), 3))
+```
+
+```python
+# 欠損があってもよく、名義・順序・間隔尺度に対応する Krippendorff の α
+import krippendorff
+
+data = np.array([[1, 2, 3, 3, 2, 1, 4, 1, 2, np.nan],      # 行 = 評定者、列 = 事例 (nan = 未評定)
+                 [1, 2, 3, 3, 2, 2, 4, 1, 2, 5],
+                 [np.nan, 3, 3, 3, 2, 3, 4, 2, 2, 5]])
+for level in ["nominal", "ordinal", "interval"]:
+    print(f"α ({level}):", round(krippendorff.alpha(reliability_data=data, level_of_measurement=level), 3))
+```
+
+- κ の目安 (Landis & Koch): 0.41〜0.60 中程度、0.61〜0.80 かなりの一致、0.81 以上ほぼ完全。ただし絶対的な基準ではない。
+- κ はラベルの分布が偏っていると、一致率が高くても低く出る。混同行列も併せて見る。
+- 一致度が低いときは、アノテータではなくガイドラインに問題があることが多い。食い違った事例を見て、基準を明確にする。
+
+## 自動評価指標と人手評価の相関を調べる {metric_correlation}
+
+提案した自動評価指標や LLM による評価が、人間の判断とどれくらい一致しているかを、相関係数で示したい。
+
+```python
+import numpy as np
+from scipy.stats import kendalltau, pearsonr, spearmanr
+
+rng = np.random.default_rng(0)
+human = rng.integers(1, 6, 200).astype(float)                    # 人手評価 (1〜5)
+metric_a = human * 15 + rng.normal(0, 12, 200)                   # 人手評価とよく合う指標
+metric_b = np.exp(human) + rng.normal(0, 15, 200)                # 単調だが非線形な関係の指標
+metric_c = rng.normal(50, 15, 200)                               # 無関係な指標
+
+print(f"{'':10}{'Pearson':>9}{'Spearman':>10}{'Kendall':>9}")
+for name, m in [("metric A", metric_a), ("metric B", metric_b), ("metric C", metric_c)]:
+    print(f"{name:10}{pearsonr(human, m).statistic:9.3f}{spearmanr(human, m).statistic:10.3f}{kendalltau(human, m).statistic:9.3f}")
+```
+
+```python
+# システム単位の相関: 各システムの平均スコア同士を比べる (文単位より高く出やすい)
+n_sys, n_sent = 8, 100
+quality = np.linspace(2.5, 4.0, n_sys)                            # システムの真の品質
+human_s = quality[:, None] + rng.normal(0, 1.0, (n_sys, n_sent))
+metric_s = quality[:, None] * 10 + rng.normal(0, 12, (n_sys, n_sent))
+print("文単位:", round(pearsonr(human_s.ravel(), metric_s.ravel()).statistic, 3),
+      " システム単位:", round(pearsonr(human_s.mean(1), metric_s.mean(1)).statistic, 3))
+
+# 相関係数の信頼区間 (ブートストラップ)
+idx = rng.integers(0, 200, (2000, 200))
+boots = [spearmanr(human[i], metric_a[i]).statistic for i in idx]
+print("Spearman の 95% 信頼区間:", np.percentile(boots, [2.5, 97.5]).round(3))
+```
+
+- Pearson は線形な関係の強さ、Spearman と Kendall は順位の一致を測る。非線形だが単調な関係 (metric B) は Pearson だと過小評価される。
+- 同点の多い離散的な評価 (1〜5 の評点) には Kendall の τ がよく使われる。
+- システム単位の相関は、システム数が少ないと不安定。数個のシステムでの高い相関は当てにならない。
 
 ## CPU で動く LLM に生成文を採点させる (LLM-as-a-judge) {llm_judge_local}
 
@@ -574,3 +452,125 @@ print("Spearman:", round(spearmanr(human, llm).statistic, 3))
 - LLM の評価には偏りがある (長い出力を好む、自分と同系統のモデルの出力に甘い、提示順に影響される)。2 つの出力を比べさせる場合は、順序を入れ替えて 2 回評価する。
 - 人手評価との一致を確認していない LLM 評価は、評価として使ってはいけない。
 - 評価されるモデルと評価するモデルは、できれば別系統のものにする。
+
+## ブートストラップ法で評価値の信頼区間を求める {bootstrap_ci}
+
+テストセットで正解率 85% だったが、その値がどれくらい不確かなのか、信頼区間を付けて報告したい。
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+n = 500
+gold = rng.integers(0, 2, n)
+pred = np.where(rng.random(n) < 0.85, gold, 1 - gold)      # 正解率が約 85% の予測を人工的に作る
+
+def bootstrap_ci(metric, gold, pred, n_boot=2000, alpha=0.05):
+    """テスト事例を復元抽出して指標を計算し直すことを繰り返し、分布の両端を信頼区間とする"""
+    stats = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(gold), len(gold))
+        stats.append(metric(gold[idx], pred[idx]))
+    return metric(gold, pred), np.percentile(stats, 100 * alpha / 2), np.percentile(stats, 100 * (1 - alpha / 2))
+
+accuracy = lambda g, p: (g == p).mean()
+point, lo, hi = bootstrap_ci(accuracy, gold, pred)
+print(f"正解率 = {point:.3f}  95% 信頼区間 [{lo:.3f}, {hi:.3f}]")
+```
+
+```python
+# F1 のように単純な平均でない指標でも、同じ手順で求められる
+from sklearn.metrics import f1_score
+
+point, lo, hi = bootstrap_ci(lambda g, p: f1_score(g, p), gold, pred)
+print(f"F1 = {point:.3f}  95% 信頼区間 [{lo:.3f}, {hi:.3f}]")
+
+# テストセットの大きさと信頼区間の幅
+for size in [100, 500, 2000, 10000]:
+    g = rng.integers(0, 2, size); p = np.where(rng.random(size) < 0.85, g, 1 - g)
+    _, lo, hi = bootstrap_ci(accuracy, g, p, n_boot=500)
+    print(f"n = {size:5}: 幅 ±{(hi - lo) / 2 * 100:.1f} ポイント")
+```
+
+- 500 件のテストセットでは、正解率に ±3 ポイント程度の不確かさがある。1 ポイントの差を議論するには数千件が必要。
+- BLEU のようなコーパス単位の指標も、文をリサンプリングして計算し直せば同じように扱える (`sacrebleu` にも実装がある)。
+- これは「テストセットの選び方」による不確かさ。学習の乱数シードによるばらつきは別に評価する必要がある。
+
+## 2 つのシステムの差が有意かどうかを検定する {significance_test}
+
+システム A が B より 1 ポイント高かった。この差は偶然なのか、本当に A のほうが良いと言えるのかを確かめたい。
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(0)
+n = 1000
+gold = rng.integers(0, 2, n)
+difficulty = rng.random(n)                                  # 事例ごとの難しさ (両システムに共通)
+pred_a = np.where(difficulty + rng.normal(0, 0.15, n) < 0.86, gold, 1 - gold)
+pred_b = np.where(difficulty + rng.normal(0, 0.15, n) < 0.83, gold, 1 - gold)
+correct_a, correct_b = pred_a == gold, pred_b == gold
+print(f"A = {correct_a.mean():.3f}  B = {correct_b.mean():.3f}  差 = {correct_a.mean() - correct_b.mean():+.3f}")
+```
+
+```python
+def paired_bootstrap(a, b, n_boot=10000):
+    """対応のあるブートストラップ検定: 同じ事例を両システムについてリサンプリングし、A が B を上回らない割合を p 値とする"""
+    idx = rng.integers(0, len(a), (n_boot, len(a)))
+    diffs = a[idx].mean(axis=1) - b[idx].mean(axis=1)
+    return (diffs <= 0).mean()
+
+def approximate_randomization(a, b, n_perm=10000):
+    """近似並べ替え検定: 事例ごとに A と B の結果をランダムに入れ替え、観測された差以上の差が出る割合を p 値とする (両側)"""
+    observed = abs(a.mean() - b.mean())
+    swap = rng.random((n_perm, len(a))) < 0.5
+    diffs = np.abs(np.where(swap, b, a).mean(axis=1) - np.where(swap, a, b).mean(axis=1))
+    return (diffs >= observed).mean()
+
+print("対応のあるブートストラップ (片側) p =", paired_bootstrap(correct_a, correct_b))
+print("近似並べ替え検定 (両側) p =", approximate_randomization(correct_a, correct_b))
+```
+
+```python
+# 分類の正誤なら、McNemar 検定が使える (片方だけが正解した事例の数だけを見る)
+from statsmodels.stats.contingency_tables import mcnemar
+
+table = [[(correct_a & correct_b).sum(), (correct_a & ~correct_b).sum()],
+         [(~correct_a & correct_b).sum(), (~correct_a & ~correct_b).sum()]]
+print("A だけ正解:", table[0][1], " B だけ正解:", table[1][0], " McNemar p =", round(mcnemar(table, exact=True).pvalue, 4))
+```
+
+- 同じテストセットで 2 つのシステムを比べるときは、事例ごとの対応を使う「対応のある」検定にする。対応を無視すると検出力が大きく落ちる。
+- p < 0.05 は「差がない場合にこの結果が出る確率が 5% 未満」という意味で、差の大きさや重要さは示さない。効果量と信頼区間も併せて報告する。
+- たくさんのシステムや設定を比べると、偶然「有意」になるものが出てくる (多重比較)。Bonferroni 補正などを検討する。
+
+## 乱数シードによるばらつきを考慮して結果を報告する {seed_variance}
+
+ファインチューニングは乱数シードで結果が変わる。1 回の実行の数字ではなく、複数回の平均とばらつきで手法を比較したい。
+
+```python
+import numpy as np
+from scipy import stats
+
+# 5 つのシードで学習したときのテスト F1 (例)
+baseline = np.array([84.2, 85.1, 83.6, 84.9, 84.4])
+proposed = np.array([85.0, 85.9, 84.1, 86.2, 85.3])
+
+for name, x in [("baseline", baseline), ("proposed", proposed)]:
+    ci = stats.t.interval(0.95, len(x) - 1, loc=x.mean(), scale=stats.sem(x))
+    print(f"{name}: {x.mean():.2f} ± {x.std(ddof=1):.2f} (標準偏差)  95% 信頼区間 [{ci[0]:.2f}, {ci[1]:.2f}]  最小 {x.min()} 最大 {x.max()}")
+```
+
+```python
+t, p = stats.ttest_ind(proposed, baseline, equal_var=False)       # Welch の t 検定
+u, p_u = stats.mannwhitneyu(proposed, baseline, alternative="two-sided")   # 正規性を仮定しないノンパラメトリック検定
+d = (proposed.mean() - baseline.mean()) / np.sqrt((proposed.var(ddof=1) + baseline.var(ddof=1)) / 2)
+print(f"差 = {proposed.mean() - baseline.mean():+.2f}  Welch の t 検定 p = {p:.3f}  Mann-Whitney p = {p_u:.3f}  効果量 d = {d:.2f}")
+
+# やってはいけない比較: 提案手法の最良のシードとベースラインの 1 回の結果を比べる
+print(f"最良同士の差: {proposed.max() - baseline.max():+.1f} / 提案の最良 vs ベースラインの最悪: {proposed.max() - baseline.min():+.1f}")
+```
+
+- 小さなデータセットでの BERT のファインチューニングでは、シードだけで数ポイント変わることがある。最低でも 3〜5 シードの平均と標準偏差を報告する。
+- シード数が少ないと検定の検出力は低い。有意にならなくても「差がない」とは言えない。
+- 両手法で同じシードを使ったからといって、対応のあるデータになるわけではない (初期値やデータ順が同じでも、手法が違えば別の乱数列になる)。
