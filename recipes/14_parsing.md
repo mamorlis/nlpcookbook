@@ -753,6 +753,86 @@ Tree.fromstring(str(tree)).pretty_print()
 - 「with the telescope」が動詞句と名詞句のどちらに付くかは、パーザが 1 つの解釈を選ぶ。手書き文法のレシピのように、すべての解釈は列挙されない。
 - 依存構造と句構造は相互に変換できる情報を多く含むが、等価ではない。語と語の関係を見たいなら依存構造、句の範囲 (スパン) が欲しいなら句構造が扱いやすい。
 
+## Ckylark で日本語の句構造解析をする {ckylark}
+
+日本語の文を「名詞句」「動詞句」のような句の入れ子構造 (句構造木) に解析したい。日本語と英語の学習済みモデルが付属する PCFG-LA パーザ Ckylark を使う。日本語モデルは KyTea 方式の単語分割を前提にしているので、KyTea も一緒にビルドする。
+
+```python
+!apt-get install -y -q autoconf automake libtool libboost-iostreams-dev libboost-program-options-dev > /dev/null
+!git clone -q --depth 1 https://github.com/odashi/ckylark
+!git clone -q --depth 1 https://github.com/neubig/kytea
+!cd ckylark && autoreconf -i > /dev/null 2>&1 && ./configure -q > /dev/null && make -j4 > /dev/null 2>&1
+!cd kytea && autoreconf -i > /dev/null 2>&1 && ./configure -q > /dev/null && make -j4 > /dev/null 2>&1 && make install > /dev/null 2>&1 && ldconfig
+!pip install -q fugashi unidic-lite
+!ls ckylark/data/*.grammar.gz && echo 'This is a pen .' | ckylark/src/bin/ckylark --model ckylark/data/wsj
+```
+
+```python
+import subprocess
+from nltk import Tree
+
+CKYLARK = "ckylark/src/bin/ckylark"
+# 半角英数字・記号を全角にする(日本語モデルの語彙は全角表記)
+ZEN = str.maketrans({chr(c): chr(c + 0xFEE0) for c in range(0x21, 0x7F)})
+
+def kytea_segment(sentences):
+    text = "\n".join(s.translate(ZEN) for s in sentences) + "\n"
+    r = subprocess.run(["kytea", "-notags"], input=text, capture_output=True, text=True)
+    return r.stdout.strip().split("\n")
+
+def ckylark_parse(segmented, model="ckylark/data/jdc"):
+    # モデル読み込みに数秒かかるので、文はまとめて 1 回で渡す(1 行 1 文、空白区切り)
+    r = subprocess.run([CKYLARK, "--model", model], input="\n".join(segmented) + "\n",
+                       capture_output=True, text=True)
+    return [Tree.fromstring(line)[0] for line in r.stdout.strip().split("\n")]  # 外側の空ラベルを外す
+
+sents = ["太郎は図書館で借りた本を花子に渡した。", "私は昨日友達と映画を見に行きました。"]
+seg = kytea_segment(sents)
+trees = ckylark_parse(seg)
+for s, t in zip(seg, trees):
+    print(s)
+    print(t)
+trees[0].pretty_print()
+```
+
+```python
+# 「名詞句 + 助詞」の句(助詞をP, 助詞にP など)から、助詞の前の部分を項として取り出す
+def arguments(tree):
+    out = []
+    for st in tree.subtrees(lambda t: t.label().startswith("助詞") and t.label().endswith("P")):
+        head, particle = st[0], st[-1]
+        if isinstance(head, Tree) and head.label() in ("名詞", "名詞P", "代名詞", "接尾辞P"):
+            out.append(("".join(head.leaves()), "".join(particle.leaves())))
+    return out
+
+for t in trees:
+    print(arguments(t))
+
+# 比較: MeCab + UniDic(fugashi)で分割すると、活用語尾の切り方が違うため品詞の推定が崩れる
+import fugashi
+tagger = fugashi.Tagger()
+uni = " ".join(w.surface for w in tagger(sents[1]))
+r = subprocess.run([CKYLARK, "--model", "ckylark/data/jdc", "--output-format", "postag"],
+                   input=uni + "\n", capture_output=True, text=True)
+print(r.stdout.strip())
+```
+
+```python
+# 英語は WSJ(Penn Treebank)モデル。入力はトークン化済み(句読点も空白で区切る)
+en = ckylark_parse(["The quick brown fox jumped over the lazy dog near the river ."],
+                   model="ckylark/data/wsj")[0]
+en.pretty_print()
+print([" ".join(np.leaves()) for np in en.subtrees(lambda t: t.label() == "NP")])
+```
+
+- PCFG-LA (潜在注釈付き確率文脈自由文法) は、「NP」などの記号を自動的に細分化した文法で CKY 解析を行う手法で、Berkeley Parser と同じ方式。Ckylark は、未知語があっても解析が失敗しにくいよう工夫されている。
+- 日本語モデル (`--model ckylark/data/jdc`) は、KyTea で分割した「日本語単語依存構造コーパス」で学習されており、「渡 し た」「行 き ま し た」のように動詞の語幹と活用語尾を分ける分割を前提にしている。MeCab + UniDic の分割 (「渡し た」) を渡しても解析はできるが、品詞と構造が崩れやすいので、KyTea で分割する。語彙は全角英数字なので、半角は全角に直してから渡す。
+- 日本語モデルのラベルは「名詞」「動詞」「語尾」「助動詞」「補助記号」などの品詞と、その句である「名詞P」「動詞P」、さらに助詞ごとの「助詞はP」「助詞をP」「助詞にP」など。英語モデルは Penn Treebank の NP、VP、PP など。出力は 1 文 1 行の S 式で、一番外側にラベルのない括弧が付く (`--add-root-tag` で ROOT にできる)。
+- 係り先の誤りは普通に起きる (「太郎は図書館で借りた本を花子に渡した。」で、「図書館で」が「借りた」ではなく「渡した」に係る、など)。N-best 出力はなく、得られるのは最良の 1 つの木だけ。
+- モデルの読み込みに日本語で約 2 秒、英語で約 5 秒かかるので、文は 1 回の呼び出しにまとめて渡す。入力中の半角括弧は -LRB- / -RRB- に置き換わる。
+- 主なオプション: `--output-format postag` (品詞列だけを出す)、`--add-root-tag`、`--binarize` (二分木で出力)、`--force-generate` (解析に失敗しても平らな木を出す)、`--prune-threshold` (枝刈りの強さ。速度と精度の調整)。
+- 2015 年ごろの研究用ツールで、ビルド (Ckylark と KyTea で 2 分ほど) が必要。インストールだけで済ませたい場合や、係り受けも欲しい場合は、前のレシピの Stanza も検討する。
+
 ## 組合せ範疇文法 (CCG) で文を導出する (NLTK) {ccg_nltk}
 
 単語に「どんな項を取って何になるか」という範疇を割り当て、少数の組合せ規則だけで文を導出する CCG を試したい。

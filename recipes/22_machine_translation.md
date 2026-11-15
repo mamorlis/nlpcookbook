@@ -75,6 +75,126 @@ for tgt in ["jpn_Jpan", "zho_Hans", "kor_Hang", "fra_Latn"]:
 - 精度を上げるなら `facebook/nllb-200-1.3B` や `nllb-200-3.3B` (GPU 推奨)。NLLB のライセンスは CC-BY-NC (非商用) である点に注意。
 - 日英・英日に特化するなら、LLM に翻訳させるほうが流暢なことも多い (LLM の章を参照)。
 
+## Moses で統計的機械翻訳システムを作る {moses_smt}
+
+ニューラル以前の主流だったフレーズベース統計的機械翻訳 (SMT) を、対訳コーパスから自分で組み立てたい。単語アライメント、フレーズテーブル、言語モデル、デコードまでを一通り動かす。
+
+```python
+# Moses 本体と、単語アライメントの fast_align をビルドする (Colab で 15 分ほどかかる)
+!apt-get install -y -q build-essential cmake libboost-all-dev zlib1g-dev libbz2-dev liblzma-dev > /dev/null 2>&1
+!git clone -q --depth 1 https://github.com/moses-smt/mosesdecoder
+!cd mosesdecoder && ./bjam -j4 -q > ../bjam.log 2>&1; tail -n 1 ../bjam.log
+!git clone -q --depth 1 https://github.com/clab/fast_align
+!mkdir -p fast_align/build && cd fast_align/build && cmake .. > /dev/null 2>&1 && make -j4 > /dev/null 2>&1
+!ls mosesdecoder/bin/moses mosesdecoder/bin/lmplz fast_align/build/fast_align fast_align/build/atools
+```
+
+```python
+!pip install -q datasets fugashi unidic-lite sacremoses sacrebleu
+```
+
+```python
+import os
+from datasets import load_dataset
+from fugashi import Tagger
+from sacremoses import MosesTokenizer
+
+os.makedirs("data", exist_ok=True)
+ds = load_dataset("Helsinki-NLP/opus-100", "en-ja")       # 映画・ドラマの字幕が中心の対訳データ
+tagger, mt = Tagger("-Owakati"), MosesTokenizer(lang="en")
+
+def tok_ja(s):
+    s = s.translate(str.maketrans("|<>[]　", "｜＜＞［］ "))     # Moses は | < > [ ] を特別な文字として扱うので、全角に置き換える
+    return tagger.parse(s).strip()
+
+def tok_en(s):
+    return mt.tokenize(s.lower(), escape=True, return_str=True)    # 小文字にそろえて単語に分ける
+
+def write(split, n, prefix, max_len=40):
+    count = 0
+    with open(f"data/{prefix}.ja", "w") as f_ja, open(f"data/{prefix}.en", "w") as f_en, open(f"data/{prefix}.raw.en", "w") as f_raw:
+        for ex in ds[split]:
+            ja, en = ex["translation"]["ja"].strip(), ex["translation"]["en"].strip()
+            if not ja or not en or len(ja) > 60:
+                continue
+            tj, te = tok_ja(ja), tok_en(en)
+            if not (1 <= len(tj.split()) <= max_len and 1 <= len(te.split()) <= max_len):     # 長すぎる文はアライメントの質を下げるので除く
+                continue
+            f_ja.write(tj + "\n"); f_en.write(te + "\n"); f_raw.write(en.lower() + "\n")
+            count += 1
+            if count >= n:
+                break
+    print(prefix, count, "文対")
+
+write("train", 50000, "train")
+write("test", 500, "test")
+!head -n 3 data/train.ja data/train.en
+```
+
+```python
+# 1. 単語アライメント: 日→英と英→日の両方向で求め、grow-diag-final-and で 1 つにまとめる
+!paste -d '\t' data/train.ja data/train.en | sed 's/\t/ ||| /' > data/train.ja-en
+!fast_align/build/fast_align -i data/train.ja-en -d -o -v > data/fwd.align 2> /dev/null
+!fast_align/build/fast_align -i data/train.ja-en -d -o -v -r > data/rev.align 2> /dev/null
+!fast_align/build/atools -i data/fwd.align -j data/rev.align -c grow-diag-final-and > data/aligned.grow-diag-final-and
+!head -n 3 data/aligned.grow-diag-final-and
+
+# 2. 言語モデル: 訳文側 (英語) の 3-gram を KenLM で学習する
+!mosesdecoder/bin/lmplz -o 3 --discount_fallback < data/train.en > data/lm.arpa 2> /dev/null
+!mosesdecoder/bin/build_binary data/lm.arpa data/lm.blm > /dev/null 2>&1
+```
+
+```python
+# 3. 翻訳モデル: アライメントからフレーズ対を抽出し、翻訳確率と並べ替えモデルを推定する (手順 4〜9)
+!mkdir -p train/model && cp data/aligned.grow-diag-final-and train/model/
+!mosesdecoder/scripts/training/train-model.perl --root-dir train --corpus data/train --f ja --e en \
+    --alignment grow-diag-final-and --reordering msd-bidirectional-fe --lm 0:3:$PWD/data/lm.blm:8 \
+    --first-step 4 --last-step 9 --cores 4 > train.log 2>&1
+!ls -lh train/model/
+
+# フレーズテーブルの中身: 「原言語のフレーズ ||| 目的言語のフレーズ ||| 4 つの確率 ||| アライメント ||| 頻度」
+import gzip
+from collections import defaultdict
+
+table = defaultdict(list)
+with gzip.open("train/model/phrase-table.gz", "rt") as f:
+    for line in f:
+        src, tgt, scores = line.split(" ||| ")[:3]
+        if src in ("ありがとう", "分から ない", "お 願い"):
+            table[src].append((float(scores.split()[2]), tgt))      # 3 番目のスコアが P(英語 | 日本語)
+for src, cands in table.items():
+    print(src, "→", [(tgt, round(p, 3)) for p, tgt in sorted(cands, reverse=True)[:6]])
+```
+
+```python
+# 4. デコード: テストデータを翻訳して BLEU を測る
+!mosesdecoder/bin/moses -f train/model/moses.ini -threads 4 < data/test.ja > data/test.out 2> decode.log
+
+import sacrebleu
+from sacremoses import MosesDetokenizer
+
+md = MosesDetokenizer(lang="en")
+hyps = [md.detokenize(line.split()) for line in open("data/test.out")]
+refs = [line.strip() for line in open("data/test.raw.en")]
+print(sacrebleu.corpus_bleu(hyps, [refs]))
+for src, hyp, ref in list(zip(open("data/test.ja"), hyps, refs))[:8]:
+    print(f"{src.strip()}\n   訳: {hyp}\n   参照: {ref}")
+```
+
+```python
+# 翻訳の過程を見る: どのフレーズ対を使って訳したか (-t でフレーズの対応を出力する)
+!echo "ありがとう 。 本当 に 助かり まし た 。" | mosesdecoder/bin/moses -f train/model/moses.ini -t 2> /dev/null
+!echo "彼 は どこ に 行っ た の か 分から ない 。" | mosesdecoder/bin/moses -f train/model/moses.ini -t 2> /dev/null
+```
+
+- フレーズベース SMT は「翻訳モデル (フレーズ対とその確率)」「言語モデル (訳文の自然さ)」「並べ替えモデル」を別々に学習し、デコーダがそれらのスコアの重み付き和が最大になる訳を探す。ニューラル機械翻訳と違い、どのフレーズ対を使ったかを直接たどれる。
+- 5 万文対・チューニングなしで、字幕データでの BLEU は 5 前後 (この環境での実測は 5.5)。語順が大きく違う日英は、フレーズベースの手法が特に苦手とする言語対。
+- 学習データにない単語 (未知語) は、訳されずにそのまま出力される。データが少ないと未知語が多くなる。
+- ここでは省略したが、本来は開発データで各モデルの重みを調整する (MERT。`scripts/training/mert-moses.pl`)。BLEU が数ポイント変わるので、きちんと比較するなら必須。
+- 単語アライメントには GIZA++ が標準的に使われてきたが、fast_align のほうがはるかに速く、質も大きくは変わらない。`train-model.perl` の手順 1〜3 (GIZA++ によるアライメント) を飛ばして、手順 4 から実行している。
+- ビルドに時間がかかる (4 コアで約 6 分、Colab の 2 コアではその 2〜3 倍)。うまくいかないときは `bjam.log` と `train.log` を確認する。
+- 現在の実用システムはほぼニューラルに置き換わったが、フレーズテーブルは対訳辞書の抽出や訳語の分析に、単語アライメントは用語の対応付けや注釈の投影に、今も使われている。
+
 ## Transformer の翻訳モデルをゼロから学習する {nmt_from_scratch gpu norun}
 
 対訳データだけから、ニューラル機械翻訳モデルを自分で学習したい。サブワード分割、モデルの定義、学習、ビームサーチ、BLEU による評価までを一通り行う。

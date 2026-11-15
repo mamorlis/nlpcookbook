@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 313 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 325 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. Google Colab の小技](#1-google-colab-の小技) (11)
 - [2. データの収集と入出力](#2-データの収集と入出力) (10)
@@ -25,7 +25,7 @@
 - [11. テキスト分類](#11-テキスト分類) (16)
 - [12. Transformers の基本操作](#12-transformers-の基本操作) (15)
 - [13. 大規模言語モデル (LLM)](#13-大規模言語モデル-llm) (14)
-- [14. 構文解析](#14-構文解析) (19)
+- [14. 構文解析](#14-構文解析) (20)
 - [15. 固有表現抽出](#15-固有表現抽出) (12)
 - [16. 意味解析](#16-意味解析) (11)
 - [17. 評価指標と統計的検定](#17-評価指標と統計的検定) (12)
@@ -33,9 +33,10 @@
 - [19. 質問応答](#19-質問応答) (8)
 - [20. RAG (検索拡張生成)](#20-rag-検索拡張生成) (13)
 - [21. 対話システム](#21-対話システム) (10)
-- [22. 機械翻訳](#22-機械翻訳) (8)
+- [22. 機械翻訳](#22-機械翻訳) (9)
 - [23. 要約と平易化](#23-要約と平易化) (9)
 - [24. 文法誤り訂正と言語教育](#24-文法誤り訂正と言語教育) (10)
+- [25. 日本語入力 (かな漢字変換)](#25-日本語入力-かな漢字変換) (10)
 
 ### 1. Google Colab の小技
 
@@ -336,8 +337,9 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 14-15 | [文脈自由文法を書いて構文解析する (NLTK)](notebooks/14_parsing/cfg_parse.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/cfg_parse.ipynb) |
 | 14-16 | [構文木を括弧表記で読み書きし、操作する (NLTK Tree)](notebooks/14_parsing/tree_bracket.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/tree_bracket.ipynb) |
 | 14-17 | [学習済みモデルで句構造解析をする (Stanza)](notebooks/14_parsing/constituency_stanza.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/constituency_stanza.ipynb) |
-| 14-18 | [組合せ範疇文法 (CCG) で文を導出する (NLTK)](notebooks/14_parsing/ccg_nltk.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/ccg_nltk.ipynb) |
-| 14-19 | [spaCy で大量の文書を高速に処理する](notebooks/14_parsing/spacy_pipe.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/spacy_pipe.ipynb) |
+| 14-18 | [Ckylark で日本語の句構造解析をする](notebooks/14_parsing/ckylark.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/ckylark.ipynb) |
+| 14-19 | [組合せ範疇文法 (CCG) で文を導出する (NLTK)](notebooks/14_parsing/ccg_nltk.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/ccg_nltk.ipynb) |
+| 14-20 | [spaCy で大量の文書を高速に処理する](notebooks/14_parsing/spacy_pipe.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_parsing/spacy_pipe.ipynb) |
 
 ### 15. 固有表現抽出
 
@@ -478,12 +480,13 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 |---|---|---|
 | 22-01 | [対訳コーパスを取得して中身を確認する](notebooks/22_machine_translation/parallel_corpus.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/parallel_corpus.ipynb) |
 | 22-02 | [多言語翻訳モデル NLLB で翻訳する](notebooks/22_machine_translation/translation_nllb.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/translation_nllb.ipynb) |
-| 22-03 | [Transformer の翻訳モデルをゼロから学習する](notebooks/22_machine_translation/nmt_from_scratch.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/nmt_from_scratch.ipynb) |
-| 22-04 | [学習済みの翻訳モデルを自分の分野のデータでファインチューニングする](notebooks/22_machine_translation/mt_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/mt_finetune.ipynb) |
-| 22-05 | [言語をまたいで意味の近い文を対応付ける (対訳文の抽出)](notebooks/22_machine_translation/cross_lingual_similarity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/cross_lingual_similarity.ipynb) |
-| 22-06 | [機械翻訳を BLEU で評価する (sacreBLEU)](notebooks/22_machine_translation/bleu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/bleu.ipynb) |
-| 22-07 | [chrF と TER で翻訳を評価する](notebooks/22_machine_translation/chrf_ter.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/chrf_ter.ipynb) |
-| 22-08 | [COMET で翻訳の品質を評価する](notebooks/22_machine_translation/comet.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/comet.ipynb) |
+| 22-03 | [Moses で統計的機械翻訳システムを作る](notebooks/22_machine_translation/moses_smt.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/moses_smt.ipynb) |
+| 22-04 | [Transformer の翻訳モデルをゼロから学習する](notebooks/22_machine_translation/nmt_from_scratch.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/nmt_from_scratch.ipynb) |
+| 22-05 | [学習済みの翻訳モデルを自分の分野のデータでファインチューニングする](notebooks/22_machine_translation/mt_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/mt_finetune.ipynb) |
+| 22-06 | [言語をまたいで意味の近い文を対応付ける (対訳文の抽出)](notebooks/22_machine_translation/cross_lingual_similarity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/cross_lingual_similarity.ipynb) |
+| 22-07 | [機械翻訳を BLEU で評価する (sacreBLEU)](notebooks/22_machine_translation/bleu.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/bleu.ipynb) |
+| 22-08 | [chrF と TER で翻訳を評価する](notebooks/22_machine_translation/chrf_ter.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/chrf_ter.ipynb) |
+| 22-09 | [COMET で翻訳の品質を評価する](notebooks/22_machine_translation/comet.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/22_machine_translation/comet.ipynb) |
 
 ### 23. 要約と平易化
 
@@ -517,6 +520,23 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 24-08 | [日本語の文章の読みやすさを測る](notebooks/24_gec_education/readability_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_gec_education/readability_ja.ipynb) |
 | 24-09 | [単語の頻度から語彙の難しさを推定する (wordfreq)](notebooks/24_gec_education/word_frequency_level.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_gec_education/word_frequency_level.ipynb) |
 | 24-10 | [穴埋め問題 (クローズテスト) を自動で作る](notebooks/24_gec_education/cloze_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_gec_education/cloze_generation.ipynb) |
+
+### 25. 日本語入力 (かな漢字変換)
+
+ローマ字からかなへの変換、辞書とラティス、ビタビアルゴリズムによるかな漢字変換、候補の提示、予測入力、履歴の学習、ニューラルかな漢字変換、評価まで、日本語入力システムの部品を作る。
+
+| # | やりたいこと | Colab |
+|---|---|---|
+| 25-01 | [ローマ字をかなに変換する](notebooks/25_japanese_input/romaji_to_kana.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/romaji_to_kana.ipynb) |
+| 25-02 | [読みから表記を引く辞書をコーパスから作る](notebooks/25_japanese_input/kkc_dictionary.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_dictionary.ipynb) |
+| 25-03 | [単語の頻度だけでかな漢字変換をする (ビタビアルゴリズム)](notebooks/25_japanese_input/kkc_unigram.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_unigram.ipynb) |
+| 25-04 | [前後の単語を考慮してかな漢字変換をする (bigram 言語モデル)](notebooks/25_japanese_input/kkc_bigram.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_bigram.ipynb) |
+| 25-05 | [変換候補を複数出す (N-best)](notebooks/25_japanese_input/kkc_nbest.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_nbest.ipynb) |
+| 25-06 | [入力の途中で続きを予測する (予測入力)](notebooks/25_japanese_input/predictive_input.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/predictive_input.ipynb) |
+| 25-07 | [利用者の選択を学習して変換結果を変える](notebooks/25_japanese_input/kkc_user_history.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_user_history.ipynb) |
+| 25-08 | [学習済みのニューラルモデルでかな漢字変換をする (zenz)](notebooks/25_japanese_input/kkc_neural.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_neural.ipynb) |
+| 25-09 | [Web API でかな漢字変換をする (Google CGI API for Japanese Input)](notebooks/25_japanese_input/kkc_web_api.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_web_api.ipynb) |
+| 25-10 | [かな漢字変換の精度を評価する](notebooks/25_japanese_input/kkc_eval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_japanese_input/kkc_eval.ipynb) |
 
 ⚡ = GPU ランタイム推奨、🔑 = API キーが必要
 <!-- INDEX:END -->
