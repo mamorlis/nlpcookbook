@@ -283,7 +283,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 12. 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす方法と、Claude API を使う方法。プロンプト、構造化出力、RAG、LoRA。
+小さなオープンモデルを Colab 上で動かす方法と、Claude API を使う方法。プロンプト、構造化出力、LoRA、LLM による評価。検索と組み合わせる方法は「RAG」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
