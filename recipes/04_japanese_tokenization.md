@@ -1,6 +1,6 @@
-# 日本語の形態素解析
+# 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome で単語に区切り、品詞や原形、読みを取り出す。
+MeCab (fugashi)・Sudachi・Janome で単語に区切り、品詞や原形、読みを取り出す。文への分割、単語分割や品詞タグ付けの仕組みも扱う。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -561,3 +561,296 @@ for w in sorted(words, key=reading):
 ```
 
 - 固有名詞や専門用語は読みを誤ることがあるので、最終的には人手の確認が必要。
+
+## 日本語の文を句点で分割する (括弧内は分割しない) {sentence_split_ja}
+
+「。」「！」「？」で文に区切りたいが、鉤括弧の中の句点では切りたくない。
+
+```python
+import re
+
+def split_sentences(text):
+    sentences, buf, depth = [], "", 0
+    pairs = {"「": "」", "『": "』", "（": "）", "(": ")"}
+    closers = set(pairs.values())
+    for i, ch in enumerate(text):
+        buf += ch
+        if ch in pairs:
+            depth += 1
+        elif ch in closers:
+            depth = max(0, depth - 1)
+        elif depth == 0 and ch in "。！？!?\n":
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if nxt not in "。！？!?」』）)":  # 「！？」などの連続は最後で切る
+                sentences.append(buf.strip())
+                buf = ""
+    if buf.strip():
+        sentences.append(buf.strip())
+    return [s for s in sentences if s]
+
+text = "彼は「もう帰る。明日も早いから」と言った。本当ですか！？ はい（たぶん。）そうです。最後は句点なし"
+for s in split_sentences(text):
+    print("-", s)
+```
+
+```python
+# 括弧を気にしなくてよいなら 1 行で書ける
+print(re.findall(r"[^。！？]+[。！？]*", "今日は晴れ。明日は雨？そうかも！"))
+```
+
+## 日本語の文分割をライブラリで行って比べる {sentence_split_libs}
+
+日本語の文章を文に区切りたい。括弧の中の句点、改行、絵文字や顔文字で終わる文など、単純な規則では失敗する場合も扱いたい。
+
+```python
+!pip install -q ja-sentence-segmenter pysbd ginza ja_ginza
+```
+
+```python
+import functools
+import re
+import pysbd
+import spacy
+from ja_sentence_segmenter.common.pipeline import make_pipeline
+from ja_sentence_segmenter.concatenate.simple_concatenator import concatenate_matching
+from ja_sentence_segmenter.normalize.neologd_normalizer import normalize
+from ja_sentence_segmenter.split.simple_splitter import split_newline, split_punctuation
+
+# 1. 正規表現だけ
+def split_regex(text):
+    return [s for s in re.split(r"(?<=[。！？!?])|\n", text) if s and s.strip()]
+
+# 2. ja-sentence-segmenter: 正規化 → 改行で分割 → 句読点で分割 (括弧内は分割しない) → 分割しすぎた箇所を連結、を組み合わせる
+split_punc = functools.partial(split_punctuation, punctuations=r"。!?")
+concat_tail = functools.partial(concatenate_matching, former_matching_rule=r"^(?P<result>.+)(て)$", remove_former_matched=False)
+jss = make_pipeline(normalize, split_newline, concat_tail, split_punc)
+
+# 3. pySBD: 多言語対応の規則ベース  4. GiNZA: 係り受け解析の結果から文境界を決める
+sbd = pysbd.Segmenter(language="ja", clean=False)
+nlp = spacy.load("ja_ginza")
+
+splitters = {
+    "正規表現": split_regex,
+    "ja-sentence-segmenter": lambda t: list(jss(t)),
+    "pySBD": lambda t: [s.strip() for s in sbd.segment(t)],
+    "GiNZA": lambda t: [s.text.strip() for s in nlp(t.replace("\n", "")).sents],
+}
+
+text = ("彼は「もう帰る。明日も早いから」と言った。本当ですか！？\n"
+        "はい（たぶん。）そうです。今日は楽しかった😊また行こうね(^^)\n"
+        "値段は1.5倍になった。詳しくはhttps://example.com/a.htmlを見て\n"
+        "ください。最後は句点なし")
+for name, f in splitters.items():
+    sents = f(text)
+    print(f"[{name}] {len(sents)} 文")
+    for s in sents:
+        print("   ", s)
+```
+
+```python
+# 大量の文章を処理するときの速度
+import time
+
+long_text = "今日は良い天気です。散歩に行きましょう！どこへ行きますか？「公園がいい。近いから」と彼は言った。" * 200
+for name, f in splitters.items():
+    t = time.perf_counter()
+    n = len(f(long_text))
+    print(f"{name:22} {n:5} 文  {time.perf_counter() - t:6.2f} 秒")
+```
+
+- 単純な正規表現は、括弧内の句点で切ってしまい、絵文字や顔文字で終わる文は切れない。小数点や URL の中のピリオドは、全角の句点だけを区切りにすれば避けられる。
+- ja-sentence-segmenter は、分割と連結の規則を自分で組み替えられる。行の途中で折り返された文章 (メールや PDF 由来のテキスト) をつなぎ直す処理も書ける。
+- GiNZA は句点のない文末 (絵文字、顔文字の後ろ) も区切れるが、解析を伴うので 2 桁以上遅い。括弧内で切ってしまうこともある。
+- SNS や口コミのような崩れた文章向けには、学習ベースの bunkai がある (執筆時点では依存ライブラリ emoji の新しい版と互換性がなく、そのままでは動かなかった)。
+- 文分割の誤りは後段のすべての処理に響く。自分のデータの数十文で、どこで切れているかを必ず目で確かめる。
+
+## 単語分割を文字単位の系列ラベリングとして解く {char_segmentation}
+
+日本語の単語分割を「各文字が単語の先頭 (B) か途中 (I) か」を当てる問題として、CRF で学習したい。
+
+```python
+!pip install -q sklearn-crfsuite fugashi unidic-lite regex
+```
+
+```python
+import io, re, urllib.request, zipfile
+from fugashi import Tagger
+
+def aozora(url):
+    with urllib.request.urlopen(url) as r:
+        z = zipfile.ZipFile(io.BytesIO(r.read()))
+    text = z.read(z.namelist()[0]).decode("cp932")
+    text = re.split(r"-{50,}", text)[2].split("底本：")[0]
+    return re.sub(r"《.+?》|［＃.+?］|｜", "", text).replace("\r\n", "\n").strip()
+
+# MeCab の分割結果を正解とみなす (本来は人手で分割したコーパスを使う)
+tagger = Tagger()
+text = aozora("https://www.aozora.gr.jp/cards/000148/files/752_ruby_2438.zip")
+sents = [[w.surface for w in tagger(s)] for s in re.split(r"(?<=。)|\n", text) if s and s.strip()]
+train, test = sents[:2200], sents[2200:]
+
+def to_chars_tags(words):
+    chars = [c for w in words for c in w]
+    tags = [t for w in words for t in ["B"] + ["I"] * (len(w) - 1)]
+    return chars, tags
+```
+
+```python
+import regex
+import sklearn_crfsuite
+
+def char_type(c):
+    for name in ["Han", "Hiragana", "Katakana", "Latin", "Nd"]:
+        if regex.match(rf"\p{{{name}}}", c):
+            return name
+    return "Other"
+
+def features(chars, i):
+    f = {"bias": 1.0}
+    for d in range(-2, 3):          # 前後 2 文字の文字と文字種
+        if 0 <= i + d < len(chars):
+            f[f"c{d}"] = chars[i + d]
+            f[f"t{d}"] = char_type(chars[i + d])
+    for d in (-1, 0):               # 文字 bigram と文字種の変わり目
+        if 0 <= i + d and i + d + 1 < len(chars):
+            f[f"bi{d}"] = chars[i + d] + chars[i + d + 1]
+            f[f"tt{d}"] = char_type(chars[i + d]) + ">" + char_type(chars[i + d + 1])
+    return f
+
+def dataset(sents):
+    X, y = [], []
+    for words in sents:
+        chars, tags = to_chars_tags(words)
+        X.append([features(chars, i) for i in range(len(chars))]); y.append(tags)
+    return X, y
+
+X_train, y_train = dataset(train)
+X_test, y_test = dataset(test)
+crf = sklearn_crfsuite.CRF(c1=0.1, c2=0.1, max_iterations=60).fit(X_train, y_train)
+```
+
+```python
+def segment(sentence):
+    chars = list(sentence)
+    tags = crf.predict_single([features(chars, i) for i in range(len(chars))])
+    return "".join((" " if t == "B" and i else "") + c for i, (c, t) in enumerate(zip(chars, tags))).split()
+
+def word_f1(gold_sents, pred_sents):
+    """単語単位の F1: 開始位置と終了位置が両方一致した単語だけを正解とする"""
+    tp = n_gold = n_pred = 0
+    for gold, pred in zip(gold_sents, pred_sents):
+        spans = lambda ws: {(sum(map(len, ws[:i])), sum(map(len, ws[:i + 1]))) for i in range(len(ws))}
+        g, p = spans(gold), spans(pred)
+        tp += len(g & p); n_gold += len(g); n_pred += len(p)
+    prec, rec = tp / n_pred, tp / n_gold
+    return 2 * prec * rec / (prec + rec)
+
+pred = [segment("".join(ws)) for ws in test]
+print("単語 F1:", round(word_f1(test, pred), 4))
+print(segment("親譲りの無鉄砲で小供の時から損ばかりしている。"))
+print(segment("最新のスマートフォンで自然言語処理を勉強する。"))
+```
+
+- 辞書を使わない「点予測」に近い方式 (KyTea など) の簡易版。学習データにない分野の語 (2 文目) では誤りが増える。
+- 中国語の単語分割では、B/M/E/S (先頭・中間・末尾・単独) の 4 タグが標準的。
+
+## HMM で品詞タガーを作る {hmm_tagger}
+
+隠れマルコフモデル (HMM) による古典的な品詞タグ付けを学習・評価して、ベースラインと比べたい。
+
+```python
+import nltk
+nltk.download("treebank", quiet=True)
+nltk.download("universal_tagset", quiet=True)
+from nltk.corpus import treebank
+from nltk.tag import DefaultTagger, UnigramTagger, hmm, tnt
+
+sents = list(treebank.tagged_sents(tagset="universal"))
+train, test = sents[:3500], sents[3500:]
+print(len(train), len(test), train[0][:6])
+
+baseline = UnigramTagger(train, backoff=DefaultTagger("NOUN"))   # 各単語に最頻の品詞を付けるだけ
+trainer = hmm.HiddenMarkovModelTrainer()
+tagger = trainer.train_supervised(train, estimator=lambda fd, bins: nltk.LidstoneProbDist(fd, 0.01, bins))
+
+tnt_tagger = tnt.TnT(unk=DefaultTagger("NOUN"), Trained=True)   # trigram HMM + 未知語は名詞とみなす
+tnt_tagger.train(train)
+
+print("ユニグラム (最頻タグ):   ", round(baseline.accuracy(test), 4))
+print("HMM (bigram):            ", round(tagger.accuracy(test), 4))
+print("TnT (trigram + 未知語処理):", round(tnt_tagger.accuracy(test), 4))
+```
+
+```python
+for sent in ["They can fish .", "I saw her duck .", "Time flies like an arrow ."]:
+    print(tagger.tag(sent.split()))
+```
+
+```python
+# 未知語と既知語に分けて正解率を見る
+vocab = {w for s in train for w, _ in s}
+known = unknown = known_ok = unknown_ok = 0
+for s in test:
+    for (w, gold), (_, pred) in zip(s, tagger.tag([w for w, _ in s])):
+        if w in vocab:
+            known += 1; known_ok += gold == pred
+        else:
+            unknown += 1; unknown_ok += gold == pred
+print(f"既知語 {known_ok / known:.3f} ({known} 語) / 未知語 {unknown_ok / unknown:.3f} ({unknown} 語)")
+```
+
+- 「各単語の最頻タグ」だけで 9 割を超える。品詞タグ付けの難しさは、残りの曖昧な語と未知語にある。
+- 素朴な HMM は未知語の出力確率をうまく見積もれず、未知語でほぼ当たらない。そのせいで全体ではユニグラムのベースラインに負けることすらある。
+- HMM は単語の綴りを見ないのが弱点。接尾辞や大文字などの特徴を使える CRF やニューラルモデルが有利な理由。
+
+## ビタビアルゴリズムを実装して最適なラベル列を求める {viterbi}
+
+HMM や CRF の復号に使われるビタビアルゴリズムを、自分で実装して動きを確かめたい。
+
+```python
+import numpy as np
+
+def viterbi(emission, transition, start):
+    """emission: (系列長, ラベル数), transition: (ラベル数, ラベル数), start: (ラベル数,) の対数スコア"""
+    T, K = emission.shape
+    score = start + emission[0]
+    back = np.zeros((T, K), dtype=int)
+    for t in range(1, T):
+        cand = score[:, None] + transition      # cand[i, j] = 直前が i で今が j のときのスコア
+        back[t] = cand.argmax(axis=0)
+        score = cand.max(axis=0) + emission[t]
+    path = [int(score.argmax())]
+    for t in range(T - 1, 0, -1):               # 後ろからたどる
+        path.append(int(back[t, path[-1]]))
+    return path[::-1], float(score.max())
+
+labels = ["名詞", "動詞", "助詞"]
+words = ["猫", "が", "魚", "を", "食べる"]
+log = lambda p: np.log(np.array(p) + 1e-12)
+start = log([0.7, 0.2, 0.1])
+transition = log([[0.2, 0.2, 0.6],     # 名詞 → 名詞 / 動詞 / 助詞
+                  [0.3, 0.3, 0.4],     # 動詞 →
+                  [0.6, 0.39, 0.01]])  # 助詞 →
+emission = log([[0.9, 0.05, 0.05],     # 猫
+                [0.3, 0.1, 0.6],       # が (「蛾」かもしれない)
+                [0.9, 0.05, 0.05],     # 魚
+                [0.1, 0.1, 0.8],       # を
+                [0.1, 0.85, 0.05]])    # 食べる
+
+path, score = viterbi(emission, transition, start)
+print([f"{w}/{labels[i]}" for w, i in zip(words, path)], round(score, 3))
+```
+
+```python
+# 貪欲法 (各位置で独立に最大のラベルを選ぶ) との比較、および総当たりとの一致の確認
+from itertools import product
+
+greedy = emission.argmax(axis=1).tolist()
+def total(p):
+    return start[p[0]] + emission[0, p[0]] + sum(transition[a, b] + emission[t, b] for t, (a, b) in enumerate(zip(p, p[1:]), 1))
+brute = max(product(range(3), repeat=5), key=total)
+print("貪欲法:", [labels[i] for i in greedy], " 総当たり:", [labels[i] for i in brute], " 一致:", list(brute) == path)
+```
+
+- 計算量は O(系列長 × ラベル数²)。総当たりの O(ラベル数^系列長) を動的計画法で避けている。
+- 遷移スコアに「O → I- は −∞」のような制約を入れれば、ニューラルモデルの出力に対しても正しい BIO 系列だけを出力させられる。

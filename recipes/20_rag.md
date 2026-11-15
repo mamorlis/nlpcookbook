@@ -421,6 +421,68 @@ for q in ["カードで払いたいんだけど", "大人数で行きたい"]:
 - 書き換えは失敗もする。3 つ目の例では、前の話題 (ビーフカレー) を無関係な質問に持ち込んでしまい、書き換えないほうが正しい資料に当たっている。指示語や省略がある質問だけを書き換える、元の質問と書き換えた質問の両方で検索する、といった対策がある。
 - 書き換えの結果は必ずログに残す。回答がおかしいとき、書き換えで意味が変わっていた、ということがよくある。
 
+## RAG の評価セットを用意する {rag_eval_dataset}
+
+RAG を評価するための「質問・正解・正解が書かれた文書」の組を用意したい。既存の QA データから作る方法と、自分の文書から LLM で作る方法を知りたい。
+
+```python
+!pip install -q datasets
+```
+
+```python
+import json
+from datasets import load_dataset
+
+# 1. 既存の読解データセットから作る: JSQuAD の段落を検索対象の文書集合に、質問と答えを評価セットにする
+ds = load_dataset("sbintuitions/JSQuAD", split="validation")
+passages, pid, seen_q, eval_set = [], {}, set(), []
+for ex in ds:
+    context = ex["context"].split(" [SEP] ", 1)[-1]
+    if context not in pid:
+        pid[context] = len(passages)
+        passages.append({"id": len(passages), "title": ex["title"], "text": context})
+for ex in ds.shuffle(seed=0):
+    context = ex["context"].split(" [SEP] ", 1)[-1]
+    if pid[context] in seen_q:              # 1 つの段落から 1 問だけ使う
+        continue
+    seen_q.add(pid[context])
+    eval_set.append({"question": ex["question"], "answers": sorted(set(ex["answers"]["text"])), "gold_passage": pid[context], "answerable": True})
+    if len(eval_set) == 60:
+        break
+print(len(passages), "段落 /", len(eval_set), "問")
+print(eval_set[0], "\n ", passages[eval_set[0]["gold_passage"]]["text"][:80])
+```
+
+```python
+# 2. 文書集合に答えがない質問も入れる (「わかりません」と言えるかを測るため)
+unanswerable = ["2030 年の冬季オリンピックの開催地はどこですか。", "私の昨日の夕食は何でしたか。", "この文書集合を作った人の名前は何ですか。",
+                "来週の東京の天気はどうなりますか。", "円周率の小数第 100 位の数字は何ですか。", "現在の日本の首相の愛読書は何ですか。"]
+eval_set += [{"question": q, "answers": [], "gold_passage": None, "answerable": False} for q in unanswerable]
+
+with open("rag_passages.jsonl", "w", encoding="utf-8") as f:
+    f.writelines(json.dumps(p, ensure_ascii=False) + "\n" for p in passages)
+with open("rag_eval.jsonl", "w", encoding="utf-8") as f:
+    f.writelines(json.dumps(e, ensure_ascii=False) + "\n" for e in eval_set)
+print(len(eval_set), "問を保存 (うち答えなし", sum(not e["answerable"] for e in eval_set), "問)")
+```
+
+```python
+# 3. 評価セットの性質を確かめる: 質問と正解段落の語の重なりが大きいと、キーワード検索に有利な「易しい」評価になる
+import re
+import numpy as np
+
+chars = lambda s: set(re.findall(r"[一-龥ァ-ヶー]{2,}", s))
+overlap = [len(chars(e["question"]) & chars(passages[e["gold_passage"]]["text"])) / max(1, len(chars(e["question"]))) for e in eval_set if e["answerable"]]
+print(f"質問の語のうち正解段落にも出てくる割合: 平均 {np.mean(overlap):.2f}")
+print("答えの長さ (文字):", np.percentile([len(e["answers"][0]) for e in eval_set if e["answerable"]], [25, 50, 75]))
+```
+
+- 評価セットに必要なのは 3 つ: 質問、正解 (言い方の違う複数の正解があるとよい)、正解が書かれた文書の ID。文書 ID があると、検索の失敗と生成の失敗を分けて調べられる。
+- 既存の読解データセットの質問は、段落を見ながら作られているので、段落と同じ語を使いがち。実際のユーザーの質問より検索が易しい点に注意する。
+- 自分の文書で作るなら、(1) 実際の問い合わせログから集める、(2) 人が文書を読んで質問を書く、(3) LLM に文書から質問を作らせて人が確認する (質問応答の章の質問生成を参照)、の順に質が高い。
+- 答えのない質問を 1〜2 割入れる。入れないと「何を聞かれても答える」システムが高評価になってしまう。
+- 50〜100 問でも、設定の良し悪しの比較には使える。差が小さいときは問数を増やすか、信頼区間を付ける。
+
 ## 検索の評価セットを作って手法を比べる {rag_eval_retrieval}
 
 RAG の検索部分を改善したい。BM25、埋め込み、ハイブリッドのどれが自分のデータに合うのかを、数値で比べたい。
@@ -493,6 +555,194 @@ print("埋め込みだけ 1 位:", [queries[i] for i in np.where((rank_d == 0) &
 - タイトルを質問に使う方法は手軽だが、実際のユーザーの質問とは性質が違う (本文と同じ語を含みやすく、BM25 に有利)。実運用のログや、LLM に文書から質問を作らせた合成データも併用する。
 - Recall@k の k は、LLM に渡す件数に合わせる。5 件渡すなら Recall@5 が、そのまま「正解を読ませられた割合」になる。
 
+## RAG 全体を評価して設定を比べる {rag_eval_pipeline}
+
+RAG を「検索できたか」「正しく答えたか」「資料に基づいているか」「答えがないときに断れたか」に分けて測り、設定 (渡す文書の数など) を数値で比べたい。
+
+```python
+!pip install -q datasets
+```
+
+```python
+import re
+import unicodedata
+import numpy as np
+import pandas as pd
+import torch
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
+
+# 評価セット (「RAG の評価セットを用意する」と同じ作り方): JSQuAD の段落 + 40 問 + 答えのない質問 5 問
+ds = load_dataset("sbintuitions/JSQuAD", split="validation")
+passages, pid, seen, eval_set = [], {}, set(), []
+for ex in ds:
+    c = ex["context"].split(" [SEP] ", 1)[-1]
+    if c not in pid:
+        pid[c] = len(passages); passages.append(c)
+for ex in ds.shuffle(seed=0):
+    c = ex["context"].split(" [SEP] ", 1)[-1]
+    if pid[c] not in seen and len(eval_set) < 40:
+        seen.add(pid[c]); eval_set.append({"q": ex["question"], "answers": sorted(set(ex["answers"]["text"])), "gold": pid[c]})
+eval_set += [{"q": q, "answers": [], "gold": None} for q in ["2030 年の冬季オリンピックの開催地はどこですか。", "私の昨日の夕食は何でしたか。",
+             "来週の東京の天気はどうなりますか。", "円周率の小数第 100 位の数字は何ですか。", "この文書集合を作った人の名前は何ですか。"]]
+
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+p_emb = embedder.encode(["passage: " + p for p in passages], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
+q_emb = embedder.encode(["query: " + e["q"] for e in eval_set], normalize_embeddings=True)
+ranking = np.argsort(-(q_emb @ p_emb.T), axis=1)
+print(len(passages), "段落 /", len(eval_set), "問")
+```
+
+```python
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (CPU)
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+nli_tok = AutoTokenizer.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
+
+@torch.no_grad()
+def generate(question, contexts):
+    prompt = ("以下の資料だけに基づいて、質問に一文で短く答えてください。資料に答えが書かれていない場合は、推測せずに「わかりません」とだけ答えてください。\n\n"
+              "# 資料\n" + "\n".join(f"- {c}" for c in contexts) + f"\n\n# 質問\n{question}")
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    out = llm.generate(**inputs, max_new_tokens=60, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+@torch.no_grad()
+def faithfulness(contexts, answer):
+    """回答が、渡した資料のどれかから言えるか (資料ごとの含意確率の最大値)"""
+    enc = nli_tok(contexts, [answer] * len(contexts), return_tensors="pt", padding=True, truncation=True, max_length=512)
+    return nli(**enc).logits.softmax(-1)[:, 0].max().item()
+
+norm = lambda s: re.sub(r"[\s、。「」『』()（）]", "", unicodedata.normalize("NFKC", s))
+REFUSAL = re.compile(r"わかりません|分かりません|記載がありません|書かれていません|情報がありません")
+
+def run(k):
+    rows = []
+    for i, e in enumerate(eval_set):
+        ctx_ids = ranking[i, :k].tolist()
+        answer = generate(e["q"], [passages[j] for j in ctx_ids])
+        refused = bool(REFUSAL.search(answer))
+        rows.append({"q": e["q"], "answerable": e["gold"] is not None, "hit": e["gold"] in ctx_ids if e["gold"] is not None else None,
+                     "correct": any(norm(a) in norm(answer) for a in e["answers"]) if e["gold"] is not None else None,
+                     "refused": refused, "faithful": None if refused else faithfulness([passages[j] for j in ctx_ids], answer) > 0.5, "answer": answer})
+    return pd.DataFrame(rows)
+
+results = {k: run(k) for k in [1, 3]}
+```
+
+```python
+def summarize(df):
+    a, u = df[df["answerable"]], df[~df["answerable"]]
+    answered = df[~df["refused"]]
+    return {"検索: 正解段落が入った割合": a["hit"].mean(), "正答率 (答えのある質問)": a["correct"].mean(),
+            "正答率 (検索が当たった質問のみ)": a[a["hit"] == True]["correct"].mean(), "誤って断った割合": a["refused"].mean(),
+            "忠実性 (答えたもののうち資料で裏付けられた割合)": answered["faithful"].mean(), "正しく断った割合 (答えのない質問)": u["refused"].mean()}
+
+pd.DataFrame({f"k={k}": summarize(df) for k, df in results.items()}).round(3)
+```
+
+```python
+pd.set_option("display.max_colwidth", 60)
+results[3][["q", "hit", "correct", "refused", "faithful", "answer"]].head(8)
+```
+
+- RAG の評価は 4 つに分けて見る: 検索 (正解の文書を渡せたか)、正答 (正しく答えたか)、忠実性 (渡した資料に基づいているか)、棄却 (答えがないときに断れたか)。1 つの数字にまとめると、どこを直せばよいかが分からなくなる。
+- 「検索が当たった質問のみの正答率」が低ければ生成側の問題、全体の正答率との差が大きければ検索側の問題。
+- 渡す文書を増やすと検索の当たりは増えるが、無関係な文書も増えて、読み違いや遅延の原因になる。両方の数字を見て決める。
+- 正答の判定は「正解の文字列を含むか」という簡易なもの。言い換えた正答を誤りと数え、正解の語を含むだけの誤答を正答と数えることがある。この章の「RAG の回答の正しさを LLM に判定させる」と併用する。
+- 45 問では、数ポイントの差は誤差の範囲。設定を決めるときは問数を増やし、評価の章のブートストラップで信頼区間を付ける。
+
+## RAG の失敗を検索と生成に切り分けて分析する {rag_error_analysis}
+
+RAG の正答率が低い。検索が悪いのか、LLM の読み取りが悪いのかを 1 問ずつ切り分けて、直すべき箇所を特定したい。
+
+```python
+!pip install -q datasets rank_bm25 fugashi unidic-lite
+```
+
+```python
+import re
+import unicodedata
+import numpy as np
+import pandas as pd
+import torch
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+ds = load_dataset("sbintuitions/JSQuAD", split="validation")
+passages, pid, seen, eval_set = [], {}, set(), []
+for ex in ds:
+    c = ex["context"].split(" [SEP] ", 1)[-1]
+    if c not in pid:
+        pid[c] = len(passages); passages.append(c)
+for ex in ds.shuffle(seed=0):
+    c = ex["context"].split(" [SEP] ", 1)[-1]
+    if pid[c] not in seen and len(eval_set) < 50:
+        seen.add(pid[c]); eval_set.append({"q": ex["question"], "answers": sorted(set(ex["answers"]["text"])), "gold": pid[c]})
+
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+p_emb = embedder.encode(["passage: " + p for p in passages], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
+ranking = np.argsort(-(embedder.encode(["query: " + e["q"] for e in eval_set], normalize_embeddings=True) @ p_emb.T), axis=1)
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+
+@torch.no_grad()
+def generate(question, contexts):
+    prompt = ("以下の資料だけに基づいて、質問に一文で短く答えてください。資料に答えが書かれていない場合は「わかりません」とだけ答えてください。\n\n"
+              "# 資料\n" + "\n".join(f"- {c}" for c in contexts) + f"\n\n# 質問\n{question}")
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    out = llm.generate(**inputs, max_new_tokens=60, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+norm = lambda s: re.sub(r"[\s、。「」『』()（）]", "", unicodedata.normalize("NFKC", s))
+correct = lambda answer, golds: any(norm(g) in norm(answer) for g in golds)
+```
+
+```python
+K = 3
+rows = []
+for i, e in enumerate(eval_set):
+    ids = ranking[i, :K].tolist()
+    answer = generate(e["q"], [passages[j] for j in ids])
+    ok, hit = correct(answer, e["answers"]), e["gold"] in ids
+    if ok:
+        category = "正答"
+    elif not hit:
+        category = "検索の失敗 (正解段落を渡せていない)"
+    else:
+        # 検索は当たっている。正解段落だけを渡せば答えられるかで、さらに切り分ける
+        alone = generate(e["q"], [passages[e["gold"]]])
+        category = "生成の失敗: 他の段落に惑わされた" if correct(alone, e["answers"]) else "生成の失敗: 正解段落だけでも答えられない"
+    rows.append({"q": e["q"], "gold_rank": int(np.where(ranking[i] == e["gold"])[0][0]) + 1, "category": category, "answer": answer, "gold": e["answers"][0]})
+df = pd.DataFrame(rows)
+print(df["category"].value_counts().to_string())
+```
+
+```python
+pd.set_option("display.max_colwidth", 50)
+for cat in df["category"].unique():
+    if cat != "正答":
+        print(f"--- {cat} ---")
+        print(df[df["category"] == cat][["q", "gold_rank", "answer", "gold"]].head(3).to_string(index=False))
+```
+
+```python
+# 上限の確認: 検索が完璧だったら (正解段落だけを渡したら) 正答率はどこまで上がるか
+oracle = np.mean([correct(generate(e["q"], [passages[e["gold"]]]), e["answers"]) for e in eval_set])
+print(f"現在の正答率 {(df['category'] == '正答').mean():.2f} / 正解段落を必ず渡した場合 {oracle:.2f} / Recall@{K} = {(df['gold_rank'] <= K).mean():.2f}")
+```
+
+- 失敗を「検索の失敗」と「生成の失敗」に分けると、打ち手が決まる。検索の失敗が多ければ、ハイブリッド検索・リランキング・チャンクの見直し。生成の失敗が多ければ、プロンプト・渡す件数・モデルの見直し。
+- 「正解段落だけを渡した場合の正答率」は、検索をどれだけ改善しても超えられない上限。これが低いなら、検索より先にモデルやプロンプトを直す。
+- 正解段落の順位 (`gold_rank`) を見ると、「あと少しで入っていた」のか「まったく見当違い」なのかが分かる。前者は渡す件数を増やすかリランキングで拾える。
+- 文字列照合で「誤答」とされたものには、言い換えただけの正答が混ざる。分類の前に、誤答の一覧を目で見て確かめる。
+
 ## RAG の回答を LLM を使わずに評価する {rag_eval_answer}
 
 RAG の回答が正しいか、資料に基づいているかを自動で確かめたい。評価のたびに LLM を呼ばずに、軽い方法で回したい。
@@ -551,4 +801,79 @@ print(f"忠実性が 0.5 未満の回答 (資料にないことを述べてい�
 - 最後の例は「3 台分」は正しいが「料金は無料」は資料にない。正解を含むかだけを見ていると、この種の付け足し (ハルシネーション) を見逃す。
 - NLI は数値の取り違えに弱い。2 つ目の例 (資料は「土日は 20 時まで」、回答は「15 時まで」) は誤りなのに忠実性が高く出ている。正解との照合と必ず併用する。
 - NLI による忠実性は LLM による判定より粗いが、速くて安く、結果が安定している。変更のたびに回す回帰テストに向く。
-- 最終的な品質の確認には、人手の評価か、LLM による評価 (LLM の章の LLM-as-a-judge) を併用する。
+- 最終的な品質の確認には、人手の評価か、LLM による評価 (この章の「RAG の回答の正しさを LLM に判定させる」、評価の章の LLM-as-a-judge) を併用する。
+
+## RAG の回答の正しさを LLM に判定させる {rag_eval_llm_judge}
+
+正解の文字列を含むかどうかの判定では、言い換えた正答を誤りにしてしまう。回答が正解と同じ内容かを、LLM に判定させたい。
+
+```python
+import numpy as np
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
+
+@torch.no_grad()
+def p_yes(prompt):
+    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
+
+def judge_correct(question, gold, answer):
+    return p_yes("次の質問に対する「回答」が、「正解」と同じ内容を答えているかを判定してください。表現が違っても内容が同じなら「はい」、"
+                 "内容が違う・答えていない場合は「いいえ」と、一語だけで答えてください。\n\n"
+                 f"質問: {question}\n正解: {gold}\n回答: {answer}")
+
+# (質問, 正解, システムの回答, 人が判定した正誤)
+data = [
+    ("富士山の標高は？", "3776 メートル", "富士山の標高は 3776 メートルです。", True),
+    ("富士山の標高は？", "3776 メートル", "3,776m です。", True),
+    ("富士山の標高は？", "3776 メートル", "約 3800 メートルです。", False),
+    ("日本で一番大きい湖は？", "琵琶湖", "滋賀県にある琵琶湖です。", True),
+    ("日本で一番大きい湖は？", "琵琶湖", "霞ヶ浦です。", False),
+    ("日本で一番大きい湖は？", "琵琶湖", "琵琶湖ではなく、霞ヶ浦です。", False),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "漱石です。", True),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "わかりません。", False),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "明治時代の小説家が書きました。", False),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "昭和 20 年です。", True),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "1945 年 8 月に終わりました。", True),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "1939 年に始まりました。", False),
+]
+import re, unicodedata
+norm = lambda s: re.sub(r"[\s、。,]", "", unicodedata.normalize("NFKC", s))
+rows = [{"回答": a, "人": h, "文字列照合": norm(g) in norm(a), "LLM (はいの確率)": round(judge_correct(q, g, a), 2)} for q, g, a, h in data]
+df = pd.DataFrame(rows)
+df["LLM"] = df["LLM (はいの確率)"] > 0.5
+df
+```
+
+```python
+print(f"人の判定との一致率: 文字列照合 {(df['文字列照合'] == df['人']).mean():.2f} / LLM {(df['LLM'] == df['人']).mean():.2f}")
+print("文字列照合だけが間違えた例:", df[(df["文字列照合"] != df["人"]) & (df["LLM"] == df["人"])]["回答"].tolist())
+print("LLM だけが間違えた例:", df[(df["LLM"] != df["人"]) & (df["文字列照合"] == df["人"])]["回答"].tolist())
+```
+
+```python
+# 同じ方法で、回答が質問に答えているか (関連性) と、資料に基づいているか (忠実性) も判定できる
+def judge_relevant(question, answer):
+    return p_yes(f"次の「回答」は、「質問」で聞かれたことに直接答えていますか。「はい」か「いいえ」の一語で答えてください。\n\n質問: {question}\n回答: {answer}")
+
+def judge_faithful(context, answer):
+    return p_yes(f"次の「回答」の内容は、すべて「資料」に書かれていますか。資料にないことが含まれていれば「いいえ」です。「はい」か「いいえ」の一語で答えてください。\n\n資料: {context}\n回答: {answer}")
+
+context = "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。"
+for q, a in [("日曜日は何時まで開いていますか？", "日曜日は 20 時まで営業しています。"), ("日曜日は何時まで開いていますか？", "定休日は月曜日です。"),
+             ("日曜日は何時まで開いていますか？", "20 時までで、ラストオーダーは 19 時半です。")]:
+    print(f"関連性 {judge_relevant(q, a):.2f} / 忠実性 {judge_faithful(context, a):.2f} | {a}")
+```
+
+- 文字列照合は、表記の違い (3,776m)、言い換え (昭和 20 年)、略した答え (漱石) を誤りにする。逆に、正解の語を含むだけの誤答 (「琵琶湖ではなく…」) を正答にする。LLM による判定はこの両方に対処できる。
+- 「はい」「いいえ」の確率を直接読むと、1 回の計算で済み、あいまいな出力の解釈も要らない。確率が 0.5 付近のものは人が確認する、という運用ができる。
+- 判定役の LLM も間違える。人の判定を付けた数十〜百件で一致率を確かめてから使う (ここの 12 件は動作確認用)。
+- 正しさ・関連性・忠実性を LLM で採点する考え方をまとめたライブラリに RAGAS がある。API のモデルを使う前提だが、指標の定義は参考になる。
+- 小さなモデルは判定の精度が限られる。最終的な評価には、より大きなモデル (評価の章の LLM-as-a-judge を参照) か人手を使う。

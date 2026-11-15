@@ -93,16 +93,17 @@ for c in clusters:
 
 - `paraphrase_mining` は全ペアの総当たりを避けてチャンク単位で計算するので、数万文でも実行できる。
 
-## 文埋め込みとクラスタリングでトピックを作る (BERTopic 方式) {embedding_topics}
+## 文埋め込みを PCA・t-SNE・UMAP で 2 次元に可視化して比べる {embedding_visualization}
 
-単語の共起ではなく、文の意味に基づいてトピックを作りたい。クラスタごとに特徴的な語を取り出して名前を付けたい。
+文の埋め込みベクトルを散布図にして、データセットの全体像 (クラスの分かれ方、外れ値) を眺めたい。次元削減の手法による見え方の違いも知りたい。
 
 ```python
-!pip install -q fugashi unidic-lite umap-learn
+!pip install -q umap-learn matplotlib-fontja
 ```
 
 ```python
 import io, tarfile, urllib.request
+import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 
@@ -118,79 +119,58 @@ def load_livedoor():
             rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
     return pd.DataFrame(rows)
 
-df = load_livedoor().sample(1500, random_state=0).reset_index(drop=True)
+df = load_livedoor()
+df = df[df["label"].isin(["sports-watch", "movie-enter", "smax", "dokujo-tsushin", "kaden-channel"])]
+df = df.groupby("label").sample(200, random_state=0).reset_index(drop=True)
 model = SentenceTransformer("intfloat/multilingual-e5-small")
 emb = model.encode(["query: " + t for t in df["title"]], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
-```
-
-```python
-import numpy as np
-import umap
-from fugashi import Tagger
-from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import CountVectorizer
-
-# 1. 次元削減してからクラスタリング (高次元のままだと距離が効きにくい)
-reduced = umap.UMAP(n_neighbors=15, n_components=5, metric="cosine", random_state=0).fit_transform(emb)
-df["cluster"] = KMeans(n_clusters=12, n_init=10, random_state=0).fit_predict(reduced)
-
-# 2. クラスタごとに文書を連結して 1 つの大きな文書とみなし、クラスタ単位の TF-IDF (c-TF-IDF) で特徴語を選ぶ
-tagger = Tagger()
-tok = lambda s: [w.surface for w in tagger(s) if w.feature.pos1 == "名詞" and w.feature.pos2 in ("普通名詞", "固有名詞") and len(w.surface) > 1]
-joined = df.groupby("cluster")["title"].apply(" ".join)
-vec = CountVectorizer(tokenizer=tok, token_pattern=None, lowercase=False)
-counts = vec.fit_transform(joined).toarray()
-tf = counts / counts.sum(axis=1, keepdims=True)
-idf = np.log(1 + counts.sum(axis=1).mean() / counts.sum(axis=0))
-ctfidf = tf * idf
-vocab = vec.get_feature_names_out()
-
-for c in joined.index:
-    top = [vocab[i] for i in ctfidf[c].argsort()[::-1][:7]]
-    main = df[df.cluster == c]["label"].value_counts()
-    print(f"{c:2} ({(df.cluster == c).sum():3} 件, 最多カテゴリ {main.index[0]} {main.iloc[0] / main.sum():.0%}) {' '.join(top)}")
-```
-
-- この「埋め込み → UMAP → クラスタリング → c-TF-IDF」の流れをまとめたライブラリが BERTopic (`pip install bertopic`)。密度ベースの HDBSCAN でクラスタ数を自動で決め、どこにも属さない外れ値も扱える。
-- 短い文 (タイトル、ツイート、アンケートの回答) に特に向く。長い文書は段落に分けてから埋め込む。
-- トピックの名前付けは、特徴語と代表文書を LLM に渡して要約させると読みやすくなる。
-
-## 文埋め込みを 2 次元に可視化する (UMAP) {embedding_umap}
-
-文の埋め込みベクトルを散布図にして、データセットの全体像 (クラスの分かれ方、外れ値) を眺めたい。
-
-```python
-!pip install -q umap-learn
-```
-
-```python
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.datasets import fetch_20newsgroups
-
-cats = ["rec.sport.baseball", "sci.space", "comp.graphics", "talk.politics.mideast", "rec.autos"]
-data = fetch_20newsgroups(subset="train", categories=cats, remove=("headers", "footers", "quotes"))
-keep = [i for i, d in enumerate(data.data) if len(d) > 100][:1500]
-texts, y = [data.data[i][:1000] for i in keep], np.array([data.target[i] for i in keep])
-
-model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-emb = model.encode(texts, batch_size=64, normalize_embeddings=True, show_progress_bar=False)
 print(emb.shape)
 ```
 
 ```python
+import time
 import matplotlib.pyplot as plt
+import matplotlib_fontja
 import umap
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 
-Z = umap.UMAP(n_neighbors=15, min_dist=0.1, metric="cosine", random_state=0).fit_transform(emb)
-plt.figure(figsize=(9, 7))
-for c, name in enumerate(data.target_names):
-    plt.scatter(Z[y == c, 0], Z[y == c, 1], s=6, label=name)
-plt.legend(markerscale=3); plt.xticks([]); plt.yticks([]); plt.show()
+methods = {
+    "PCA": lambda X: PCA(n_components=2, random_state=0).fit_transform(X),
+    "t-SNE": lambda X: TSNE(n_components=2, perplexity=30, metric="cosine", init="pca", random_state=0).fit_transform(X),
+    "UMAP": lambda X: umap.UMAP(n_neighbors=15, min_dist=0.1, metric="cosine", random_state=0).fit_transform(X),
+}
+fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+coords = {}
+for ax, (name, f) in zip(axes, methods.items()):
+    t = time.perf_counter()
+    Z = coords[name] = f(emb)
+    for label in df["label"].unique():
+        m = (df["label"] == label).to_numpy()
+        ax.scatter(Z[m, 0], Z[m, 1], s=8, label=label)
+    ax.set_title(f"{name} ({time.perf_counter() - t:.1f} 秒)"); ax.set_xticks([]); ax.set_yticks([])
+axes[0].legend(markerscale=2, fontsize=9)
+plt.tight_layout(); plt.show()
 ```
 
-- UMAP は t-SNE より速く、大域的な配置も比較的保たれる。`n_neighbors` を大きくすると大域構造、小さくすると局所構造を重視する。
-- 点にマウスを載せて原文を見たいなら Plotly: `px.scatter(x=Z[:,0], y=Z[:,1], color=..., hover_name=texts)`。
+```python
+# 2 次元に落としたあとも、元の空間での近傍が保たれているかを数値で比べる (trustworthiness: 1 に近いほど良い)
+from sklearn.manifold import trustworthiness
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import cross_val_score
+
+pca = PCA(n_components=50, random_state=0).fit(emb)
+print(f"PCA: 上位 2 成分の寄与率 {pca.explained_variance_ratio_[:2].sum():.1%}、50 成分で {pca.explained_variance_ratio_.sum():.1%}")
+for name, Z in coords.items():
+    knn = cross_val_score(KNeighborsClassifier(10), Z, df["label"], cv=5).mean()
+    print(f"{name:6} trustworthiness = {trustworthiness(emb, Z, n_neighbors=10, metric='cosine'):.3f}  2 次元での kNN 正解率 = {knn:.3f}")
+```
+
+- PCA は線形の射影で、軸に意味がある (分散が最大の方向) が、2 次元では情報の大半が落ちる。全体の広がりを見るのに向く。高速で、結果が毎回同じ。
+- t-SNE は近い点同士を近くに置くことを重視する。クラスタははっきり見えるが、クラスタ間の距離や大きさには意味がない。`perplexity` (近傍の数の目安) で見え方が変わる。
+- UMAP は t-SNE に近い見え方で、より速く、大域的な配置も比較的保たれる。新しい点を後から同じ空間に射影することもできる (`transform`)。
+- どの手法でも、2 次元の図は「眺める」ためのもの。クラスタリングや類似度の計算は、元の高次元のベクトルで行う。
+- 点にマウスを載せて原文を見たいなら Plotly: `px.scatter(x=Z[:,0], y=Z[:,1], color=df["label"], hover_name=df["title"])`。
 
 ## 文の意味的類似度 (STS) でモデルを評価する {sts_eval}
 

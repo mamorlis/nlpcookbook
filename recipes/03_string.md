@@ -396,42 +396,6 @@ print("".join(item["hira"] for item in result))
 
 - 辞書ベースなので文脈による読み分け (「今日」きょう/こんにち) は苦手。精度が要るなら形態素解析器の読みを使う (形態素解析の章を参照)。
 
-## 日本語の文を句点で分割する (括弧内は分割しない) {sentence_split_ja}
-
-「。」「！」「？」で文に区切りたいが、鉤括弧の中の句点では切りたくない。
-
-```python
-import re
-
-def split_sentences(text):
-    sentences, buf, depth = [], "", 0
-    pairs = {"「": "」", "『": "』", "（": "）", "(": ")"}
-    closers = set(pairs.values())
-    for i, ch in enumerate(text):
-        buf += ch
-        if ch in pairs:
-            depth += 1
-        elif ch in closers:
-            depth = max(0, depth - 1)
-        elif depth == 0 and ch in "。！？!?\n":
-            nxt = text[i + 1] if i + 1 < len(text) else ""
-            if nxt not in "。！？!?」』）)":  # 「！？」などの連続は最後で切る
-                sentences.append(buf.strip())
-                buf = ""
-    if buf.strip():
-        sentences.append(buf.strip())
-    return [s for s in sentences if s]
-
-text = "彼は「もう帰る。明日も早いから」と言った。本当ですか！？ はい（たぶん。）そうです。最後は句点なし"
-for s in split_sentences(text):
-    print("-", s)
-```
-
-```python
-# 括弧を気にしなくてよいなら 1 行で書ける
-print(re.findall(r"[^。！？]+[。！？]*", "今日は晴れ。明日は雨？そうかも！"))
-```
-
 ## 文字 n-gram を作る {char_ngram}
 
 単語分割に頼らずに、文字 bigram / trigram を特徴量や類似度計算に使いたい。
