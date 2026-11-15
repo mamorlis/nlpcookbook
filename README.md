@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 363 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 369 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. Google Colab の小技](#1-google-colab-の小技) (11)
 - [2. データの収集と入出力](#2-データの収集と入出力) (10)
@@ -24,7 +24,7 @@
 - [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (7)
 - [11. トピックとキーワードの抽出](#11-トピックとキーワードの抽出) (7)
 - [12. テキスト分類](#12-テキスト分類) (17)
-- [13. 大規模言語モデル (LLM)](#13-大規模言語モデル-llm) (17)
+- [13. 大規模言語モデル (LLM)](#13-大規模言語モデル-llm) (23)
 - [14. 構文解析](#14-構文解析) (20)
 - [15. 固有表現抽出](#15-固有表現抽出) (13)
 - [16. 意味解析](#16-意味解析) (13)
@@ -299,7 +299,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 13. 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす方法と、Claude API を使う方法。プロンプト、構造化出力、量子化と LoRA、LLM の性質を調べる方法。LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす方法と、API で大きなモデルを使う方法 (無料で使える Gemini と、有料の Claude)。プロンプト、構造化出力、量子化と LoRA、LLM の性質を調べる方法。LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -313,13 +313,19 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 13-08 | [LLM の出力から JSON を取り出して検証する](notebooks/13_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_json_output.ipynb) |
 | 13-09 | [LLM を 4bit 量子化して少ないメモリで動かす](notebooks/13_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_4bit.ipynb) |
 | 13-10 | [LoRA で LLM を少ないメモリでファインチューニングする](notebooks/13_llm/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/lora_finetune.ipynb) |
-| 13-11 | [Claude API を呼び出す](notebooks/13_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) |
-| 13-12 | [Claude の応答をストリーミングで受け取る](notebooks/13_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) |
-| 13-13 | [Claude に決まった形式 (JSON スキーマ) で出力させる](notebooks/13_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) |
-| 13-14 | [Claude API のトークン数と料金を事前に見積もる](notebooks/13_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) |
-| 13-15 | [Claude で大量のテキストを安く処理する (Message Batches API)](notebooks/13_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) |
-| 13-16 | [言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)](notebooks/13_llm/minimal_pairs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) |
-| 13-17 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](notebooks/13_llm/llm_social_bias.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) |
+| 13-11 | [Colab の組み込み AI (google.colab.ai) で Gemini を呼び出す](notebooks/13_llm/colab_ai.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/colab_ai.ipynb) |
+| 13-12 | [Gemini API を呼び出す (無料枠)](notebooks/13_llm/gemini_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_basic.ipynb) |
+| 13-13 | [Gemini の応答をストリーミングで受け取る](notebooks/13_llm/gemini_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_streaming.ipynb) |
+| 13-14 | [Gemini に決まった形式 (JSON スキーマ) で出力させる](notebooks/13_llm/gemini_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_structured.ipynb) |
+| 13-15 | [Gemini API のトークン数と使用量を確かめる](notebooks/13_llm/gemini_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_count_tokens.ipynb) |
+| 13-16 | [Gemini で大量のテキストをまとめて処理する (Batch API)](notebooks/13_llm/gemini_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_batch.ipynb) |
+| 13-17 | [Claude API を呼び出す](notebooks/13_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) |
+| 13-18 | [Claude の応答をストリーミングで受け取る](notebooks/13_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) |
+| 13-19 | [Claude に決まった形式 (JSON スキーマ) で出力させる](notebooks/13_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) |
+| 13-20 | [Claude API のトークン数と料金を事前に見積もる](notebooks/13_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) |
+| 13-21 | [Claude で大量のテキストを安く処理する (Message Batches API)](notebooks/13_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) |
+| 13-22 | [言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)](notebooks/13_llm/minimal_pairs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) |
+| 13-23 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](notebooks/13_llm/llm_social_bias.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) |
 
 ### 14. 構文解析
 
