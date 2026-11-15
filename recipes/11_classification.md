@@ -346,6 +346,70 @@ for r in clf("値段は高いけれど、品質には満足しています。", 
 - ここで使ったのは多言語モデル (英語・日本語・中国語など 12 言語)。日本語専用なら `koheiduck/bert-japanese-finetuned-sentiment`、英語なら `cardiffnlp/twitter-roberta-base-sentiment-latest` など。
 - 喜び・悲しみ・怒りなどの感情の種類まで知りたい場合は、WRIME データセットで学習されたモデルを探す。
 
+## 有害な表現を検出する {toxicity_detection}
+
+投稿やコメントの中から、暴言や差別的な表現を含むものを自動的に見つけたい。
+
+```python
+!pip install -q sentence-transformers scikit-learn
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+url = "https://raw.githubusercontent.com/inspection-ai/japanese-toxic-dataset/main/data/subset.csv"
+df = pd.read_csv(url)
+# 複数の作業者の判定を集計する: 「Toxic」「Very Toxic」と判定した人の割合を有害度とする
+df["toxicity"] = (df["Toxic"] + df["Very Toxic"]) / df["annotation_num"]
+df["label"] = (df["toxicity"] >= 0.5).astype(int)
+print(len(df), "件 / 有害:", int(df["label"].sum()))
+print("判定が割れた (全員一致ではない) 割合:", round(((df["toxicity"] > 0) & (df["toxicity"] < 1)).mean(), 3))
+print(df[["text", "toxicity"]].sample(6, random_state=1).to_string(index=False))
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+# 方法 1: 禁止語のリスト (最も単純なベースライン)
+NG_WORDS = ["死ね", "殺", "バカ", "馬鹿", "クソ", "糞", "カス", "ゴミ", "キモ", "うざ", "消えろ", "アホ", "ブス", "デブ", "ガイジ"]
+keyword = df["text"].apply(lambda t: float(any(w in t for w in NG_WORDS)))
+
+# 方法 2: 文埋め込み + ロジスティック回帰 (5 分割交差検証)
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+X = embedder.encode(["query: " + t for t in df["text"]], normalize_embeddings=True, batch_size=64)
+cv = StratifiedKFold(5, shuffle=True, random_state=0)
+proba = cross_val_predict(LogisticRegression(C=10, max_iter=1000, class_weight="balanced"), X, df["label"], cv=cv, method="predict_proba")[:, 1]
+
+for name, score in [("禁止語リスト", keyword), ("埋め込み + 分類器", proba)]:
+    print(f"{name}: ROC-AUC {roc_auc_score(df['label'], score):.3f} / 平均適合率 {average_precision_score(df['label'], score):.3f}")
+print("禁止語リストに当たった件数:", int(keyword.sum()), "/ そのうち有害:", int(df["label"][keyword == 1].sum()))
+```
+
+```python
+# しきい値で適合率と再現率が入れ替わる。見逃しと誤検出のどちらを避けたいかで決める
+from sklearn.metrics import precision_recall_curve
+
+precision, recall, thresholds = precision_recall_curve(df["label"], proba)
+for t in [0.3, 0.5, 0.7, 0.9]:
+    i = np.searchsorted(thresholds, t)
+    print(f"しきい値 {t}: 適合率 {precision[i]:.2f} / 再現率 {recall[i]:.2f}")
+
+df["proba"] = proba
+print("\n見逃し (有害だがスコアが低い):"); print(df[df["label"] == 1].sort_values("proba").head(5)[["text", "toxicity", "proba"]].to_string(index=False))
+print("\n誤検出 (有害でないがスコアが高い):"); print(df[df["label"] == 0].sort_values("proba").tail(5)[["text", "toxicity", "proba"]].to_string(index=False))
+```
+
+- 有害かどうかの判断は人によって割れる。多数決で 0 / 1 にする前に、判定の分布を見る。割れた例を学習や評価から除くのか、有害度として連続値で扱うのかを決める。
+- 禁止語リストは説明しやすいが、遠回しな表現や文脈に依存する攻撃を見逃し、無害な用法 (「バカ売れ」) を拾う。学習した分類器と組み合わせるのが普通。
+- 有害な投稿は全体のごく一部なので、正解率ではなく適合率・再現率・平均適合率で評価する。しきい値は、運用 (自動で消すのか、人が確認するのか) に合わせて決める。
+- 「しね」のようなひらがな書きや伏せ字は、表記が変わるだけで見逃されやすい。文字の正規化 (ひらがな・カタカナの統一など) をしてから判定する、表記ゆれを含むデータで学習する、といった対策がある。
+- 分類器は、特定の集団を指す語が出てくるだけで有害と判定しがちである (差別に反対する投稿まで有害とする)。誤検出の例を読んで、そうした偏りがないか確かめる。
+- データは数百件と小さい。実際には、対象とするサービスの投稿で数千件以上の注釈データを作る。何を有害とするかの基準 (ガイドライン) を先に決めることが、モデルの選択より重要。
+
 ## BERT をファインチューニングして文書分類する (Trainer) {bert_finetune gpu norun}
 
 事前学習済みの日本語 BERT を自分の分類データでファインチューニングして、高精度な分類器を作りたい。
