@@ -1,6 +1,6 @@
 # 機械翻訳
 
-翻訳モデルを動かす、対訳データを用意する、モデルを学習・微調整する、訳文を評価する。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、モデルを学習・微調整する、訳し方を制御する。
 
 ## 対訳コーパスを取得して中身を確認する {parallel_corpus}
 
@@ -39,6 +39,35 @@ print(df[~ok].sample(5, random_state=0)[["ja", "en"]].to_string(index=False))
 - 日英の定番データ: JParaCrawl (Web、大規模)、ASPEC (科学技術論文、要申請)、KFTT (京都関連の Wikipedia)、JESC (字幕)、WMT の news タスク。
 - 長さの比によるフィルタは最低限の処理。さらに、言語判定、文埋め込みの類似度 (LaBSE など) によるフィルタが有効。
 
+## 言語をまたいで意味の近い文を対応付ける (対訳文の抽出) {cross_lingual_similarity}
+
+日本語と英語の文集合から、互いに翻訳になっている文のペアを見つけたい (対訳コーパスの構築)。
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("sentence-transformers/LaBSE")
+
+ja = ["猫がソファの上で寝ている。", "明日は雨が降るでしょう。", "この論文は新しい翻訳手法を提案する。", "駅までの道を教えてください。", "私はコーヒーより紅茶が好きだ。"]
+en = ["It will probably rain tomorrow.", "I prefer tea to coffee.", "Could you tell me the way to the station?",
+      "This paper proposes a novel translation method.", "The stock market crashed.", "A cat is sleeping on the sofa."]
+
+sim = model.similarity(model.encode(ja, normalize_embeddings=True), model.encode(en, normalize_embeddings=True)).numpy()
+for i, row in enumerate(sim):
+    j = row.argmax()
+    print(f"{row[j]:.2f}  {ja[i]}  ⇔  {en[j]}")
+```
+
+```python
+# 相互最近傍 (双方向で互いに 1 位) かつしきい値以上のペアだけを採用すると、誤対応が減る
+best_en, best_ja = sim.argmax(axis=1), sim.argmax(axis=0)
+pairs = [(ja[i], en[j], sim[i, j]) for i, j in enumerate(best_en) if best_ja[j] == i and sim[i, j] > 0.6]
+print(len(pairs), "ペア")
+```
+
+- LaBSE は 109 言語の対訳文で学習された、対訳文検索向けの文埋め込みモデル。
+- 大規模な対訳抽出では、近傍との類似度の比を使う margin-based スコアリングが標準的。
+
 ## 多言語翻訳モデル NLLB で翻訳する {translation_nllb}
 
 日本語と英語、あるいは 200 言語の任意の組み合わせで機械翻訳をしたい。API を使わず手元で動かしたい。
@@ -74,6 +103,290 @@ for tgt in ["jpn_Jpan", "zho_Hans", "kor_Hang", "fra_Latn"]:
 - 文単位で学習されたモデルなので、長い文章は文に分割してから 1 文ずつ訳す。
 - 精度を上げるなら `facebook/nllb-200-1.3B` や `nllb-200-3.3B` (GPU 推奨)。NLLB のライセンスは CC-BY-NC (非商用) である点に注意。
 - 日英・英日に特化するなら、LLM に翻訳させるほうが流暢なことも多い (LLM の章を参照)。
+
+## 機械翻訳を BLEU で評価する (sacreBLEU) {bleu}
+
+翻訳システムの出力を、参照訳との n-gram の一致度 (BLEU) で評価したい。日本語の出力も正しく評価したい。
+
+```python
+!pip install -q "sacrebleu[ja]"
+```
+
+```python
+from sacrebleu.metrics import BLEU
+
+hyps = ["猫がマットの上に座っている。", "彼は昨日東京へ行った。", "この本はとても面白いです。"]
+refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。"]
+
+bleu = BLEU(tokenize="ja-mecab")           # 日本語は MeCab で分割してから n-gram を数える
+result = bleu.corpus_score(hyps, [refs])   # 参照は「参照セットのリスト」で渡す (複数参照に対応するため)
+print(result)
+print(bleu.get_signature())                # 論文にはこの署名を載せる
+```
+
+```python
+# トークナイズの違いでスコアは大きく変わる
+for tok in ["ja-mecab", "char", "13a"]:
+    print(f"{tok:10} {BLEU(tokenize=tok).corpus_score(hyps, [refs]).score:.2f}")
+
+# 英語 (デフォルトの 13a トークナイザ)。参照訳が 2 セットある場合
+hyps_en = ["The cat sat on the mat.", "He went to Tokyo yesterday."]
+refs_en = [["The cat is sitting on the mat.", "He went to Tokyo yesterday."], ["A cat sat on the mat.", "Yesterday he traveled to Tokyo."]]
+print(BLEU().corpus_score(hyps_en, refs_en))
+```
+
+```python
+# 文単位の BLEU (平滑化が必要。コーパス単位の値とは性質が違う)
+sent_bleu = BLEU(tokenize="ja-mecab", effective_order=True)
+for h, r in zip(hyps, refs):
+    print(f"{sent_bleu.sentence_score(h, [r]).score:5.1f}  {h}")
+```
+
+- BLEU は、モデルの出力をデトークナイズした「普通の文」に対して計算する。自前で分かち書きした文字列を渡してはいけない。
+- 日本語を既定の `13a` で評価すると、文全体が 1〜数トークンになり、ほぼ意味のない値になる。必ず `ja-mecab` を指定する。
+- BLEU はコーパス全体の n-gram を集計する指標。文ごとの BLEU の平均とは一致しない。
+- 異なるトークナイズ・異なるテストセットの BLEU 同士は比較できない。署名を必ず報告する。
+
+## chrF と TER で翻訳を評価する {chrf_ter}
+
+BLEU 以外の自動評価指標も併せて報告したい。単語分割に依存しない指標が欲しい。
+
+```python
+!pip install -q "sacrebleu[ja]"
+```
+
+```python
+from sacrebleu.metrics import BLEU, CHRF, TER
+
+hyps = ["猫がマットの上に座っている。", "彼は昨日東京へ行った。", "この本はとても面白いです。"]
+refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。"]
+
+chrf = CHRF()                 # 文字 n-gram の F スコア (既定は 6-gram まで、β=2)
+chrfpp = CHRF(word_order=2)   # chrF++: 単語 1-gram, 2-gram も加える
+ter = TER(asian_support=True, normalized=True)   # 翻訳編集率: 参照に直すための編集回数 (低いほど良い)
+
+print(chrf.corpus_score(hyps, [refs]), "|", chrf.get_signature())
+print(chrfpp.corpus_score(hyps, [refs]))
+print(ter.corpus_score(hyps, [refs]))
+```
+
+```python
+# 形態が豊かな言語や表記ゆれでは、chrF のほうが BLEU より人手評価との相関が高い傾向がある
+hyp_en, ref_en = ["He goes to schools every days."], ["He goes to school every day."]
+print(BLEU().corpus_score(hyp_en, [ref_en]).score, CHRF().corpus_score(hyp_en, [ref_en]).score)
+```
+
+- chrF は文字単位なので、日本語でも単語分割の方法に左右されない。語尾だけ違う語にも部分点が入る。
+- いずれも表層の一致を見る指標で、言い換えは評価できない。意味を見るには BERTScore や COMET などの学習ベースの指標を併用する。
+
+## COMET で翻訳の品質を評価する {comet gpu norun}
+
+機械翻訳の評価で現在標準的に使われている、人手評価に基づいて学習されたニューラル評価指標を使いたい。
+
+```python
+!pip install -q unbabel-comet
+```
+
+```python
+from comet import download_model, load_from_checkpoint
+
+model = load_from_checkpoint(download_model("Unbabel/wmt22-comet-da"))   # 原文・訳文・参照訳を使うモデル (約 2.3GB)
+
+data = [
+    {"src": "吾輩は猫である。名前はまだ無い。", "mt": "I am a cat. I don't have a name yet.", "ref": "I am a cat. As yet I have no name."},
+    {"src": "吾輩は猫である。名前はまだ無い。", "mt": "I am a dog. My name is not here.", "ref": "I am a cat. As yet I have no name."},
+    {"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday.", "ref": "Yesterday he went to Tokyo."},
+]
+out = model.predict(data, batch_size=8, gpus=1)
+for d, s in zip(data, out.scores):
+    print(f"{s:.3f}  {d['mt']}")
+print("システムスコア:", round(out.system_score, 4))
+```
+
+```python
+# 参照訳なしで評価する品質推定 (QE) モデル。利用規約への同意と Hugging Face へのログインが必要
+# from huggingface_hub import login; login()
+# qe = load_from_checkpoint(download_model("Unbabel/wmt22-cometkiwi-da"))
+# print(qe.predict([{"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday."}], batch_size=8, gpus=1).scores)
+```
+
+- BLEU と違い、原文も入力に使う。意味が合っていれば表現が違っても高く評価され、人手評価との相関が高い。
+- スコアはモデルごとに尺度が違う。異なる COMET モデルの値を比べてはいけない。モデル名を必ず報告する。
+- Colab では、インストール時に依存ライブラリのバージョンが入れ替わることがある。エラーが出たらランタイムを再起動する。
+
+## 参照訳なしで翻訳の品質を推定する (品質推定) {mt_quality_estimation}
+
+正解の訳 (参照訳) がない状況で、機械翻訳の出力がどれくらい良いかを見積もりたい。
+
+```python
+!pip install -q datasets sentence-transformers
+```
+
+```python
+import numpy as np
+import pandas as pd
+from datasets import load_dataset
+from scipy.stats import kendalltau, spearmanr
+
+# WMT 2022 の人手評価 (原文、機械訳、参照訳、人が付けた品質スコア)。英日翻訳の部分を使う
+df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
+df = df[(df["lp"] == "en-ja") & (df["src"].str.len().between(20, 200))].sample(600, random_state=0).reset_index(drop=True)
+print(len(df), "件 / システム数", df["system"].nunique(), "/ スコアの分布", df["score"].describe().round(2).to_dict())
+for r in df.sort_values("score").iloc[[0, 300, -1]].itertuples():
+    print(f"[{r.score:.2f}] {r.src[:60]}\n        → {r.mt[:60]}")
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+# 方法 1: 原文と訳文の、多言語埋め込みによる類似度
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+e_src = embedder.encode(["query: " + s for s in df["src"]], normalize_embeddings=True, batch_size=32)
+e_mt = embedder.encode(["query: " + s for s in df["mt"]], normalize_embeddings=True, batch_size=32)
+df["埋め込みの類似度"] = (e_src * e_mt).sum(axis=1)
+
+# 方法 2: 長さの比 (極端に短い・長い訳は怪しい、という素朴なベースライン)
+ratio = df["mt"].str.len() / df["src"].str.len()
+df["長さの比"] = -np.abs(np.log(ratio / ratio.median()))
+```
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# 方法 3: LLM に「正確で自然な訳か」を尋ね、「はい」と答える確率をスコアにする
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
+
+@torch.no_grad()
+def p_good(src, mt):
+    prompt = ("次の「英語の原文」を日本語に翻訳した「訳文」を評価してください。原文の意味を過不足なく伝えていて、日本語として自然なら「はい」、"
+              f"誤訳・訳抜け・不自然な表現があれば「いいえ」と、一語で答えてください。\n\n英語の原文: {src}\n訳文: {mt}")
+    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
+
+sub = df.head(150).copy()                      # LLM は 1 件あたり数秒かかるので、150 件だけで比べる
+sub["LLM (はいの確率)"] = sub["llm"] = [p_good(s, m) for s, m in zip(sub["src"], sub["mt"])]
+```
+
+```python
+rows = []
+for name in ["長さの比", "埋め込みの類似度", "LLM (はいの確率)"]:
+    rows.append({"方法": name, "Spearman": spearmanr(sub["score"], sub[name]).statistic, "Kendall": kendalltau(sub["score"], sub[name]).statistic})
+print(pd.DataFrame(rows).round(3).to_string(index=False))
+print("600 件での埋め込みの類似度:", round(spearmanr(df["score"], df["埋め込みの類似度"]).statistic, 3))
+
+# LLM が低く、人が高く評価した例 / その逆
+sub["差"] = sub["LLM (はいの確率)"].rank() - sub["score"].rank()
+for r in pd.concat([sub.sort_values("差").head(2), sub.sort_values("差").tail(2)]).itertuples():
+    print(f"人 {r.score:.0f} / LLM {r.llm:.2f} | {r.src[:50]} → {r.mt[:50]}")
+```
+
+```python
+# はっきり壊れた訳なら見つけられるか: 別の文の訳にすり替えたもの、後半を切り落としたものを混ぜて、元の訳と区別できるかを調べる
+from sklearn.metrics import roc_auc_score
+
+good = sub.head(60)
+swapped = good["mt"].shift(1, fill_value=good["mt"].iloc[-1]).tolist()          # 別の原文の訳
+truncated = [m[:len(m) // 2] for m in good["mt"]]                               # 訳抜け
+def embed_score(srcs, mts):
+    a = embedder.encode(["query: " + s for s in srcs], normalize_embeddings=True)
+    b = embedder.encode(["query: " + s for s in mts], normalize_embeddings=True)
+    return (a * b).sum(axis=1)
+
+for label, corrupted in [("別の文の訳にすり替え", swapped), ("後半を切り落とす", truncated)]:
+    y = [1] * len(good) + [0] * len(good)
+    emb = np.concatenate([embed_score(good["src"], good["mt"]), embed_score(good["src"], corrupted)])
+    llm_s = list(good["llm"]) + [p_good(s, m) for s, m in zip(good["src"], corrupted)]
+    print(f"{label}: 元の訳と区別できる度合い (AUC) 埋め込み {roc_auc_score(y, emb):.3f} / LLM {roc_auc_score(y, llm_s):.3f}")
+```
+
+- 品質推定 (quality estimation, QE) は、参照訳を使わずに原文と訳文だけから品質を予測する。翻訳結果をそのまま公開してよいか、人が後編集すべきかを振り分けるのに使われる。
+- この評価データは、最近の高品質な翻訳システムの出力で、ほとんどが 80 点以上。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった。
+- 一方、別の文の訳や訳抜けのような、はっきり壊れた訳は区別できる。簡易な方法は「明らかな失敗をはじく」用途に使い、細かい品質の順位付けには使わない。
+- 大きな LLM を使った判定は、専用の品質推定モデルに匹敵することが報告されている。小さなモデルで同じ結果は期待できない。
+- 専用のモデルとしては、人手評価で学習された CometKiwi が代表的 (利用にはライセンスへの同意が必要)。大量の文を安定して評価するなら、まずこれを検討する。
+- 文単位の人手評価はそもそも雑音が大きい。相関係数は 0.3〜0.5 程度でも「使える」とされることが多く、高い値を期待しすぎない。
+
+## 文埋め込みから翻訳の評価指標を自分で学習する {mt_metric_regression}
+
+BLEU のような文字列の一致ではなく、意味の近さで翻訳を評価したい。人手評価のデータから、評価指標そのものを学習する。
+
+```python
+!pip install -q datasets sentence-transformers sacrebleu fugashi unidic-lite
+```
+
+```python
+import numpy as np
+import pandas as pd
+from datasets import load_dataset
+from scipy.stats import kendalltau
+
+df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
+df = df[(df["lp"] == "en-ja") & (df["mt"].str.len().between(10, 150))].sample(6000, random_state=0).reset_index(drop=True)
+
+# 同じ原文の訳が学習と評価の両方に入らないよう、原文単位で分ける
+sources = df["src"].drop_duplicates().sample(frac=1, random_state=0)
+test_src = set(sources[:len(sources) // 5])
+train, test = df[~df["src"].isin(test_src)].reset_index(drop=True), df[df["src"].isin(test_src)].reset_index(drop=True)
+print(len(train), "件で学習 /", len(test), "件で評価")
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+encode = lambda texts: embedder.encode(["query: " + t for t in texts], normalize_embeddings=True, batch_size=64)
+
+def features(d):
+    """訳文 h と参照訳 r の埋め込みから、[h, r, |h − r|, h × r] を特徴量にする"""
+    h, r = encode(d["mt"].tolist()), encode(d["ref"].tolist())
+    return np.hstack([h, r, np.abs(h - r), h * r]), (h * r).sum(axis=1)
+
+X_train, _ = features(train)
+X_test, cos_test = features(test)
+print(X_train.shape)
+```
+
+```python
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVR
+
+# 人手のスコアを予測する回帰モデル (RBF カーネルのサポートベクター回帰)。線形の回帰とも比べる
+regressor = make_pipeline(StandardScaler(), SVR(C=10, epsilon=1.0)).fit(X_train, train["score"])
+learned = regressor.predict(X_test)
+linear = make_pipeline(StandardScaler(), Ridge(alpha=100.0)).fit(X_train, train["score"]).predict(X_test)
+```
+
+```python
+import sacrebleu
+
+# 比較対象: 文字列の一致に基づく指標と、学習なしの埋め込み類似度
+bleu = [sacrebleu.sentence_bleu(h, [r], tokenize="ja-mecab").score for h, r in zip(test["mt"], test["ref"])]
+chrf = [sacrebleu.sentence_chrf(h, [r]).score for h, r in zip(test["mt"], test["ref"])]
+
+rows = [{"指標": name, "Kendall τ": kendalltau(test["score"], s).statistic, "Pearson": np.corrcoef(test["score"], s)[0, 1]}
+        for name, s in [("文単位の BLEU", bleu), ("chrF", chrf), ("埋め込みのコサイン類似度 (学習なし)", cos_test), ("学習した回帰モデル (線形)", linear), ("学習した回帰モデル (SVR)", learned)]]
+print(pd.DataFrame(rows).round(3).to_string(index=False))
+
+# 文字列はあまり一致しないが、学習した指標が高く評価した例
+test["chrF"], test["learned"] = chrf, learned
+for r in test[test["chrF"] < 25].sort_values("learned", ascending=False).head(3).itertuples():
+    print(f"人 {r.score:.2f} / chrF {r.chrF:.0f} / 学習 {r.learned:.2f}\n   訳: {r.mt[:70]}\n   参照: {r.ref[:70]}")
+```
+
+- 訳文と参照訳をそれぞれ文埋め込みにし、その組み合わせから人手のスコアを回帰する。RUSE という指標の考え方で、のちの BLEURT や COMET (学習型の評価指標) につながった。
+- 特徴量に差の絶対値と要素ごとの積を入れるのは、2 つの文の関係を学習するときの定番 (自然言語推論のモデルと同じ)。
+- 回帰モデルの選び方で結果が大きく変わる。この実験では、線形の回帰は学習なしのコサイン類似度にも負け、非線形の SVR にして初めて上回った。高次元の特徴量に対して学習データが数千件しかないので、過学習しやすい。
+- 相関の絶対値は低い (Kendall の τ で 0.2 前後)。最近の翻訳システムの出力は質が高くて差が小さく、文単位の人手評価の雑音も大きいため。
+- 学習型の指標は、学習データと同じ言語対・同じ年の評価では強いが、分野や翻訳システムの種類が変わると当てにならなくなることがある。原文単位で分割して、見たことのない文で評価する。
+- 文単位の BLEU は人手評価との相関が低い。文単位で比べたいときは、chrF か学習型の指標を使う。
+- 実用では、自分で学習するより公開されている COMET を使う (この章の COMET のレシピ)。ここでの目的は、学習型の指標が何をしているかを理解すること。
 
 ## Moses で統計的機械翻訳システムを作る {moses_smt}
 
@@ -866,319 +1179,6 @@ print(chat(f"次の古文を現代語に訳してください。語釈を参考�
 - 古文から現代語への翻訳は、同じ言語の中での「時代をまたぐ翻訳」。語順はほぼ同じなので、難しさは語彙 (古今異義語)、助動詞の意味、省略された主語や敬語の解釈にある。
 - LLM は有名な作品の冒頭なら訳を覚えていることが多い。知られていない文での性能は、それより低いと考える。評価には、モデルが見たことのなさそうな文を使う。
 - この実験では、例を示しても訳は良くならなかった (chrF 35.5 → 33.8)。一方、語釈を与えると「ものぐるほし」が正しく「気持ちが高ぶる」と訳された。訳文に英単語 (thoughts) が混ざる失敗も出ている。
-- 小さなモデルは、古語を現代語の似た語と取り違える (「あやし」を「怪しい」と訳す)。語釈や品詞分解の結果 (前のレシピ) をプロンプトに入れると、誤訳を減らせることがある。
-- 対訳データがあれば、機械翻訳の章のファインチューニングがそのまま使える。現代語の単語ベクトルを古文に適応させる、古文の単言語データで逆翻訳する、といった工夫が研究されている。
+- 小さなモデルは、古語を現代語の似た語と取り違える (「あやし」を「怪しい」と訳す)。語釈や品詞分解の結果 (形態素解析の章の古文のレシピ) をプロンプトに入れると、誤訳を減らせることがある。
+- 対訳データがあれば、この章のファインチューニングのレシピがそのまま使える。現代語の単語ベクトルを古文に適応させる、古文の単言語データで逆翻訳する、といった工夫が研究されている。
 - 参考訳は 1 つの解釈にすぎず、直訳か意訳かでも大きく変わる。自動評価の数値は目安にとどめる。
-
-## 言語をまたいで意味の近い文を対応付ける (対訳文の抽出) {cross_lingual_similarity}
-
-日本語と英語の文集合から、互いに翻訳になっている文のペアを見つけたい (対訳コーパスの構築)。
-
-```python
-from sentence_transformers import SentenceTransformer
-
-model = SentenceTransformer("sentence-transformers/LaBSE")
-
-ja = ["猫がソファの上で寝ている。", "明日は雨が降るでしょう。", "この論文は新しい翻訳手法を提案する。", "駅までの道を教えてください。", "私はコーヒーより紅茶が好きだ。"]
-en = ["It will probably rain tomorrow.", "I prefer tea to coffee.", "Could you tell me the way to the station?",
-      "This paper proposes a novel translation method.", "The stock market crashed.", "A cat is sleeping on the sofa."]
-
-sim = model.similarity(model.encode(ja, normalize_embeddings=True), model.encode(en, normalize_embeddings=True)).numpy()
-for i, row in enumerate(sim):
-    j = row.argmax()
-    print(f"{row[j]:.2f}  {ja[i]}  ⇔  {en[j]}")
-```
-
-```python
-# 相互最近傍 (双方向で互いに 1 位) かつしきい値以上のペアだけを採用すると、誤対応が減る
-best_en, best_ja = sim.argmax(axis=1), sim.argmax(axis=0)
-pairs = [(ja[i], en[j], sim[i, j]) for i, j in enumerate(best_en) if best_ja[j] == i and sim[i, j] > 0.6]
-print(len(pairs), "ペア")
-```
-
-- LaBSE は 109 言語の対訳文で学習された、対訳文検索向けの文埋め込みモデル。
-- 大規模な対訳抽出では、近傍との類似度の比を使う margin-based スコアリングが標準的。
-
-## 機械翻訳を BLEU で評価する (sacreBLEU) {bleu}
-
-翻訳システムの出力を、参照訳との n-gram の一致度 (BLEU) で評価したい。日本語の出力も正しく評価したい。
-
-```python
-!pip install -q "sacrebleu[ja]"
-```
-
-```python
-from sacrebleu.metrics import BLEU
-
-hyps = ["猫がマットの上に座っている。", "彼は昨日東京へ行った。", "この本はとても面白いです。"]
-refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。"]
-
-bleu = BLEU(tokenize="ja-mecab")           # 日本語は MeCab で分割してから n-gram を数える
-result = bleu.corpus_score(hyps, [refs])   # 参照は「参照セットのリスト」で渡す (複数参照に対応するため)
-print(result)
-print(bleu.get_signature())                # 論文にはこの署名を載せる
-```
-
-```python
-# トークナイズの違いでスコアは大きく変わる
-for tok in ["ja-mecab", "char", "13a"]:
-    print(f"{tok:10} {BLEU(tokenize=tok).corpus_score(hyps, [refs]).score:.2f}")
-
-# 英語 (デフォルトの 13a トークナイザ)。参照訳が 2 セットある場合
-hyps_en = ["The cat sat on the mat.", "He went to Tokyo yesterday."]
-refs_en = [["The cat is sitting on the mat.", "He went to Tokyo yesterday."], ["A cat sat on the mat.", "Yesterday he traveled to Tokyo."]]
-print(BLEU().corpus_score(hyps_en, refs_en))
-```
-
-```python
-# 文単位の BLEU (平滑化が必要。コーパス単位の値とは性質が違う)
-sent_bleu = BLEU(tokenize="ja-mecab", effective_order=True)
-for h, r in zip(hyps, refs):
-    print(f"{sent_bleu.sentence_score(h, [r]).score:5.1f}  {h}")
-```
-
-- BLEU は、モデルの出力をデトークナイズした「普通の文」に対して計算する。自前で分かち書きした文字列を渡してはいけない。
-- 日本語を既定の `13a` で評価すると、文全体が 1〜数トークンになり、ほぼ意味のない値になる。必ず `ja-mecab` を指定する。
-- BLEU はコーパス全体の n-gram を集計する指標。文ごとの BLEU の平均とは一致しない。
-- 異なるトークナイズ・異なるテストセットの BLEU 同士は比較できない。署名を必ず報告する。
-
-## chrF と TER で翻訳を評価する {chrf_ter}
-
-BLEU 以外の自動評価指標も併せて報告したい。単語分割に依存しない指標が欲しい。
-
-```python
-!pip install -q "sacrebleu[ja]"
-```
-
-```python
-from sacrebleu.metrics import BLEU, CHRF, TER
-
-hyps = ["猫がマットの上に座っている。", "彼は昨日東京へ行った。", "この本はとても面白いです。"]
-refs = ["猫はマットの上に座っています。", "彼は昨日、東京に行きました。", "この本は非常に面白い。"]
-
-chrf = CHRF()                 # 文字 n-gram の F スコア (既定は 6-gram まで、β=2)
-chrfpp = CHRF(word_order=2)   # chrF++: 単語 1-gram, 2-gram も加える
-ter = TER(asian_support=True, normalized=True)   # 翻訳編集率: 参照に直すための編集回数 (低いほど良い)
-
-print(chrf.corpus_score(hyps, [refs]), "|", chrf.get_signature())
-print(chrfpp.corpus_score(hyps, [refs]))
-print(ter.corpus_score(hyps, [refs]))
-```
-
-```python
-# 形態が豊かな言語や表記ゆれでは、chrF のほうが BLEU より人手評価との相関が高い傾向がある
-hyp_en, ref_en = ["He goes to schools every days."], ["He goes to school every day."]
-print(BLEU().corpus_score(hyp_en, [ref_en]).score, CHRF().corpus_score(hyp_en, [ref_en]).score)
-```
-
-- chrF は文字単位なので、日本語でも単語分割の方法に左右されない。語尾だけ違う語にも部分点が入る。
-- いずれも表層の一致を見る指標で、言い換えは評価できない。意味を見るには BERTScore や COMET などの学習ベースの指標を併用する。
-
-## COMET で翻訳の品質を評価する {comet gpu norun}
-
-機械翻訳の評価で現在標準的に使われている、人手評価に基づいて学習されたニューラル評価指標を使いたい。
-
-```python
-!pip install -q unbabel-comet
-```
-
-```python
-from comet import download_model, load_from_checkpoint
-
-model = load_from_checkpoint(download_model("Unbabel/wmt22-comet-da"))   # 原文・訳文・参照訳を使うモデル (約 2.3GB)
-
-data = [
-    {"src": "吾輩は猫である。名前はまだ無い。", "mt": "I am a cat. I don't have a name yet.", "ref": "I am a cat. As yet I have no name."},
-    {"src": "吾輩は猫である。名前はまだ無い。", "mt": "I am a dog. My name is not here.", "ref": "I am a cat. As yet I have no name."},
-    {"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday.", "ref": "Yesterday he went to Tokyo."},
-]
-out = model.predict(data, batch_size=8, gpus=1)
-for d, s in zip(data, out.scores):
-    print(f"{s:.3f}  {d['mt']}")
-print("システムスコア:", round(out.system_score, 4))
-```
-
-```python
-# 参照訳なしで評価する品質推定 (QE) モデル。利用規約への同意と Hugging Face へのログインが必要
-# from huggingface_hub import login; login()
-# qe = load_from_checkpoint(download_model("Unbabel/wmt22-cometkiwi-da"))
-# print(qe.predict([{"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday."}], batch_size=8, gpus=1).scores)
-```
-
-- BLEU と違い、原文も入力に使う。意味が合っていれば表現が違っても高く評価され、人手評価との相関が高い。
-- スコアはモデルごとに尺度が違う。異なる COMET モデルの値を比べてはいけない。モデル名を必ず報告する。
-- Colab では、インストール時に依存ライブラリのバージョンが入れ替わることがある。エラーが出たらランタイムを再起動する。
-
-## 参照訳なしで翻訳の品質を推定する (品質推定) {mt_quality_estimation}
-
-正解の訳 (参照訳) がない状況で、機械翻訳の出力がどれくらい良いかを見積もりたい。
-
-```python
-!pip install -q datasets sentence-transformers
-```
-
-```python
-import numpy as np
-import pandas as pd
-from datasets import load_dataset
-from scipy.stats import kendalltau, spearmanr
-
-# WMT 2022 の人手評価 (原文、機械訳、参照訳、人が付けた品質スコア)。英日翻訳の部分を使う
-df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
-df = df[(df["lp"] == "en-ja") & (df["src"].str.len().between(20, 200))].sample(600, random_state=0).reset_index(drop=True)
-print(len(df), "件 / システム数", df["system"].nunique(), "/ スコアの分布", df["score"].describe().round(2).to_dict())
-for r in df.sort_values("score").iloc[[0, 300, -1]].itertuples():
-    print(f"[{r.score:.2f}] {r.src[:60]}\n        → {r.mt[:60]}")
-```
-
-```python
-from sentence_transformers import SentenceTransformer
-
-# 方法 1: 原文と訳文の、多言語埋め込みによる類似度
-embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-e_src = embedder.encode(["query: " + s for s in df["src"]], normalize_embeddings=True, batch_size=32)
-e_mt = embedder.encode(["query: " + s for s in df["mt"]], normalize_embeddings=True, batch_size=32)
-df["埋め込みの類似度"] = (e_src * e_mt).sum(axis=1)
-
-# 方法 2: 長さの比 (極端に短い・長い訳は怪しい、という素朴なベースライン)
-ratio = df["mt"].str.len() / df["src"].str.len()
-df["長さの比"] = -np.abs(np.log(ratio / ratio.median()))
-```
-
-```python
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-# 方法 3: LLM に「正確で自然な訳か」を尋ね、「はい」と答える確率をスコアにする
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
-YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
-
-@torch.no_grad()
-def p_good(src, mt):
-    prompt = ("次の「英語の原文」を日本語に翻訳した「訳文」を評価してください。原文の意味を過不足なく伝えていて、日本語として自然なら「はい」、"
-              f"誤訳・訳抜け・不自然な表現があれば「いいえ」と、一語で答えてください。\n\n英語の原文: {src}\n訳文: {mt}")
-    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
-
-sub = df.head(150).copy()                      # LLM は 1 件あたり数秒かかるので、150 件だけで比べる
-sub["LLM (はいの確率)"] = sub["llm"] = [p_good(s, m) for s, m in zip(sub["src"], sub["mt"])]
-```
-
-```python
-rows = []
-for name in ["長さの比", "埋め込みの類似度", "LLM (はいの確率)"]:
-    rows.append({"方法": name, "Spearman": spearmanr(sub["score"], sub[name]).statistic, "Kendall": kendalltau(sub["score"], sub[name]).statistic})
-print(pd.DataFrame(rows).round(3).to_string(index=False))
-print("600 件での埋め込みの類似度:", round(spearmanr(df["score"], df["埋め込みの類似度"]).statistic, 3))
-
-# LLM が低く、人が高く評価した例 / その逆
-sub["差"] = sub["LLM (はいの確率)"].rank() - sub["score"].rank()
-for r in pd.concat([sub.sort_values("差").head(2), sub.sort_values("差").tail(2)]).itertuples():
-    print(f"人 {r.score:.0f} / LLM {r.llm:.2f} | {r.src[:50]} → {r.mt[:50]}")
-```
-
-```python
-# はっきり壊れた訳なら見つけられるか: 別の文の訳にすり替えたもの、後半を切り落としたものを混ぜて、元の訳と区別できるかを調べる
-from sklearn.metrics import roc_auc_score
-
-good = sub.head(60)
-swapped = good["mt"].shift(1, fill_value=good["mt"].iloc[-1]).tolist()          # 別の原文の訳
-truncated = [m[:len(m) // 2] for m in good["mt"]]                               # 訳抜け
-def embed_score(srcs, mts):
-    a = embedder.encode(["query: " + s for s in srcs], normalize_embeddings=True)
-    b = embedder.encode(["query: " + s for s in mts], normalize_embeddings=True)
-    return (a * b).sum(axis=1)
-
-for label, corrupted in [("別の文の訳にすり替え", swapped), ("後半を切り落とす", truncated)]:
-    y = [1] * len(good) + [0] * len(good)
-    emb = np.concatenate([embed_score(good["src"], good["mt"]), embed_score(good["src"], corrupted)])
-    llm_s = list(good["llm"]) + [p_good(s, m) for s, m in zip(good["src"], corrupted)]
-    print(f"{label}: 元の訳と区別できる度合い (AUC) 埋め込み {roc_auc_score(y, emb):.3f} / LLM {roc_auc_score(y, llm_s):.3f}")
-```
-
-- 品質推定 (quality estimation, QE) は、参照訳を使わずに原文と訳文だけから品質を予測する。翻訳結果をそのまま公開してよいか、人が後編集すべきかを振り分けるのに使われる。
-- この評価データは、最近の高品質な翻訳システムの出力で、ほとんどが 80 点以上。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった。
-- 一方、別の文の訳や訳抜けのような、はっきり壊れた訳は区別できる。簡易な方法は「明らかな失敗をはじく」用途に使い、細かい品質の順位付けには使わない。
-- 大きな LLM を使った判定は、専用の品質推定モデルに匹敵することが報告されている。小さなモデルで同じ結果は期待できない。
-- 専用のモデルとしては、人手評価で学習された CometKiwi が代表的 (利用にはライセンスへの同意が必要)。大量の文を安定して評価するなら、まずこれを検討する。
-- 文単位の人手評価はそもそも雑音が大きい。相関係数は 0.3〜0.5 程度でも「使える」とされることが多く、高い値を期待しすぎない。
-
-## 文埋め込みから翻訳の評価指標を自分で学習する {mt_metric_regression}
-
-BLEU のような文字列の一致ではなく、意味の近さで翻訳を評価したい。人手評価のデータから、評価指標そのものを学習する。
-
-```python
-!pip install -q datasets sentence-transformers sacrebleu fugashi unidic-lite
-```
-
-```python
-import numpy as np
-import pandas as pd
-from datasets import load_dataset
-from scipy.stats import kendalltau
-
-df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
-df = df[(df["lp"] == "en-ja") & (df["mt"].str.len().between(10, 150))].sample(6000, random_state=0).reset_index(drop=True)
-
-# 同じ原文の訳が学習と評価の両方に入らないよう、原文単位で分ける
-sources = df["src"].drop_duplicates().sample(frac=1, random_state=0)
-test_src = set(sources[:len(sources) // 5])
-train, test = df[~df["src"].isin(test_src)].reset_index(drop=True), df[df["src"].isin(test_src)].reset_index(drop=True)
-print(len(train), "件で学習 /", len(test), "件で評価")
-```
-
-```python
-from sentence_transformers import SentenceTransformer
-
-embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-encode = lambda texts: embedder.encode(["query: " + t for t in texts], normalize_embeddings=True, batch_size=64)
-
-def features(d):
-    """訳文 h と参照訳 r の埋め込みから、[h, r, |h − r|, h × r] を特徴量にする"""
-    h, r = encode(d["mt"].tolist()), encode(d["ref"].tolist())
-    return np.hstack([h, r, np.abs(h - r), h * r]), (h * r).sum(axis=1)
-
-X_train, _ = features(train)
-X_test, cos_test = features(test)
-print(X_train.shape)
-```
-
-```python
-from sklearn.linear_model import Ridge
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVR
-
-# 人手のスコアを予測する回帰モデル (RBF カーネルのサポートベクター回帰)。線形の回帰とも比べる
-regressor = make_pipeline(StandardScaler(), SVR(C=10, epsilon=1.0)).fit(X_train, train["score"])
-learned = regressor.predict(X_test)
-linear = make_pipeline(StandardScaler(), Ridge(alpha=100.0)).fit(X_train, train["score"]).predict(X_test)
-```
-
-```python
-import sacrebleu
-
-# 比較対象: 文字列の一致に基づく指標と、学習なしの埋め込み類似度
-bleu = [sacrebleu.sentence_bleu(h, [r], tokenize="ja-mecab").score for h, r in zip(test["mt"], test["ref"])]
-chrf = [sacrebleu.sentence_chrf(h, [r]).score for h, r in zip(test["mt"], test["ref"])]
-
-rows = [{"指標": name, "Kendall τ": kendalltau(test["score"], s).statistic, "Pearson": np.corrcoef(test["score"], s)[0, 1]}
-        for name, s in [("文単位の BLEU", bleu), ("chrF", chrf), ("埋め込みのコサイン類似度 (学習なし)", cos_test), ("学習した回帰モデル (線形)", linear), ("学習した回帰モデル (SVR)", learned)]]
-print(pd.DataFrame(rows).round(3).to_string(index=False))
-
-# 文字列はあまり一致しないが、学習した指標が高く評価した例
-test["chrF"], test["learned"] = chrf, learned
-for r in test[test["chrF"] < 25].sort_values("learned", ascending=False).head(3).itertuples():
-    print(f"人 {r.score:.2f} / chrF {r.chrF:.0f} / 学習 {r.learned:.2f}\n   訳: {r.mt[:70]}\n   参照: {r.ref[:70]}")
-```
-
-- 訳文と参照訳をそれぞれ文埋め込みにし、その組み合わせから人手のスコアを回帰する。RUSE という指標の考え方で、のちの BLEURT や COMET (学習型の評価指標) につながった。
-- 特徴量に差の絶対値と要素ごとの積を入れるのは、2 つの文の関係を学習するときの定番 (自然言語推論のモデルと同じ)。
-- 回帰モデルの選び方で結果が大きく変わる。この実験では、線形の回帰は学習なしのコサイン類似度にも負け、非線形の SVR にして初めて上回った。高次元の特徴量に対して学習データが数千件しかないので、過学習しやすい。
-- 相関の絶対値は低い (Kendall の τ で 0.2 前後)。最近の翻訳システムの出力は質が高くて差が小さく、文単位の人手評価の雑音も大きいため。
-- 学習型の指標は、学習データと同じ言語対・同じ年の評価では強いが、分野や翻訳システムの種類が変わると当てにならなくなることがある。原文単位で分割して、見たことのない文で評価する。
-- 文単位の BLEU は人手評価との相関が低い。文単位で比べたいときは、chrF か学習型の指標を使う。
-- 実用では、自分で学習するより公開されている COMET を使う (この章の COMET のレシピ)。ここでの目的は、学習型の指標が何をしているかを理解すること。

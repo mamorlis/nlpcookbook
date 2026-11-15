@@ -1,6 +1,6 @@
 # 単語ベクトル
 
-単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。
+単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を参照。
 
 ## word2vec を自分のコーパスで学習する {word2vec_train}
 
@@ -45,6 +45,88 @@ print(Word2Vec.load("w2v.model").wv["猫"][:5])
 
 - `sg=1` が skip-gram、`sg=0` が CBOW。小さいコーパスでは skip-gram + エポック多めがよい。
 - 数十万語程度のコーパスでは品質は限定的。実用には数億語規模か、学習済みベクトルを使う。
+
+## fastText で未知語にもベクトルを与える {fasttext_train}
+
+word2vec は語彙にない単語を扱えない。文字 n-gram を使う fastText なら、未知語や表記ゆれにもベクトルを与えられる。
+
+```python
+!pip install -q gensim
+```
+
+```python
+import nltk
+nltk.download("brown", quiet=True)
+from nltk.corpus import brown
+from gensim.models import FastText, Word2Vec
+
+sentences = [[w.lower() for w in s] for s in brown.sents()]
+ft = FastText(sentences, vector_size=100, window=5, min_count=5, min_n=3, max_n=6, epochs=10, workers=2, seed=0)
+w2v = Word2Vec(sentences, vector_size=100, window=5, min_count=5, epochs=10, workers=2, seed=0)
+```
+
+```python
+for w in ["governmental", "governmentally", "goverment", "unhappily"]:
+    in_vocab = w in ft.wv.key_to_index
+    print(f"{w:16} 語彙内: {in_vocab!s:6} fastText: {[x for x, _ in ft.wv.most_similar(w, topn=4)]}")
+    if w not in w2v.wv:
+        print(f"{'':16} word2vec: KeyError (語彙にない)")
+```
+
+- 単語ベクトル = 単語自身 + 文字 n-gram (`min_n`〜`max_n` 文字) のベクトルの和。綴りが似ている語は近くなる。
+- 形態が豊かな言語 (ドイツ語、トルコ語、フィンランド語など) やタイポの多いテキストで特に有効。
+- Meta 公開の学習済みモデル (157 言語、`cc.ja.300.bin` など) は `fasttext` パッケージで読める (各 4GB 以上)。
+
+## PPMI 行列の SVD で単語ベクトルを作る (カウントベース) {ppmi_svd}
+
+ニューラルネットを使わずに、共起行列から単語ベクトルを作りたい。word2vec が何をしているかの理解にも役立つ。
+
+```python
+import nltk
+nltk.download("brown", quiet=True)
+from collections import Counter
+from nltk.corpus import brown
+import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import svds
+
+sents = [[w.lower() for w in s if w.isalpha()] for s in brown.sents()]
+freq = Counter(w for s in sents for w in s)
+vocab = [w for w, c in freq.most_common(8000)]
+idx = {w: i for i, w in enumerate(vocab)}
+
+window, cooc = 4, Counter()
+for s in sents:
+    ids = [idx[w] for w in s if w in idx]
+    for i, a in enumerate(ids):
+        for b in ids[max(0, i - window):i]:
+            cooc[a, b] += 1
+            cooc[b, a] += 1
+print(len(cooc), "組の共起")
+```
+
+```python
+rows, cols = zip(*cooc.keys())
+C = csr_matrix((list(cooc.values()), (rows, cols)), shape=(len(vocab), len(vocab)), dtype=np.float64)
+total, row_sum = C.sum(), np.asarray(C.sum(axis=1)).ravel()
+
+coo = C.tocoo()
+pmi = np.log(coo.data * total / (row_sum[coo.row] * row_sum[coo.col]))
+ppmi = csr_matrix((np.maximum(pmi, 0), (coo.row, coo.col)), shape=C.shape)   # 負の値は 0 に
+
+U, S, _ = svds(ppmi, k=100)
+vecs = U * np.sqrt(S)
+vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
+
+def most_similar(word, topn=6):
+    sims = vecs @ vecs[idx[word]]
+    return [vocab[i] for i in np.argsort(-sims)[1:topn + 1]]
+
+for w in ["money", "school", "monday", "walked"]:
+    print(w, most_similar(w))
+```
+
+- skip-gram with negative sampling は、(シフトした) PMI 行列の行列分解を暗黙に行っていることが知られている (Levy & Goldberg, 2014)。
 
 ## 学習済みの英語単語ベクトルを読み込んで類似語を調べる {pretrained_vectors_en}
 
@@ -138,37 +220,6 @@ for sec in sections[:5]:
 
 - `most_similar` は入力に使った語を答えから除外する。除外しないと、多くの場合 b か c 自身が最近傍になる。
 
-## fastText で未知語にもベクトルを与える {fasttext_train}
-
-word2vec は語彙にない単語を扱えない。文字 n-gram を使う fastText なら、未知語や表記ゆれにもベクトルを与えられる。
-
-```python
-!pip install -q gensim
-```
-
-```python
-import nltk
-nltk.download("brown", quiet=True)
-from nltk.corpus import brown
-from gensim.models import FastText, Word2Vec
-
-sentences = [[w.lower() for w in s] for s in brown.sents()]
-ft = FastText(sentences, vector_size=100, window=5, min_count=5, min_n=3, max_n=6, epochs=10, workers=2, seed=0)
-w2v = Word2Vec(sentences, vector_size=100, window=5, min_count=5, epochs=10, workers=2, seed=0)
-```
-
-```python
-for w in ["governmental", "governmentally", "goverment", "unhappily"]:
-    in_vocab = w in ft.wv.key_to_index
-    print(f"{w:16} 語彙内: {in_vocab!s:6} fastText: {[x for x, _ in ft.wv.most_similar(w, topn=4)]}")
-    if w not in w2v.wv:
-        print(f"{'':16} word2vec: KeyError (語彙にない)")
-```
-
-- 単語ベクトル = 単語自身 + 文字 n-gram (`min_n`〜`max_n` 文字) のベクトルの和。綴りが似ている語は近くなる。
-- 形態が豊かな言語 (ドイツ語、トルコ語、フィンランド語など) やタイポの多いテキストで特に有効。
-- Meta 公開の学習済みモデル (157 言語、`cc.ja.300.bin` など) は `fasttext` パッケージで読める (各 4GB 以上)。
-
 ## 単語ベクトルを 2 次元に落として可視化する {word_vectors_viz}
 
 単語ベクトルの空間で、似た単語が近くに集まっている様子を散布図で見たい。
@@ -214,6 +265,65 @@ plt.show()
 - PCA は大域的な構造 (国と首都が平行に並ぶなど) を保ち、t-SNE は近傍のまとまりを強調する。t-SNE の軸や距離に意味はない。
 - 語数が多いときは t-SNE の `perplexity` を 30 前後に。数万語なら UMAP が速い。
 
+## 単語類似度データセットで単語ベクトルを評価する {wordsim_eval}
+
+単語ベクトルの良し悪しを、人間が付けた単語類似度スコアとの相関で定量的に評価したい。
+
+```python
+!pip install -q gensim
+```
+
+```python
+import gensim.downloader as api
+from gensim.test.utils import datapath
+
+for name in ["glove-wiki-gigaword-50", "glove-wiki-gigaword-100"]:
+    wv = api.load(name)
+    pearson, spearman, oov = wv.evaluate_word_pairs(datapath("wordsim353.tsv"))
+    print(f"{name:26} Spearman = {spearman.statistic:.3f}  Pearson = {pearson.statistic:.3f}  未知語率 = {oov:.1f}%")
+```
+
+```python
+# 中身を見る: 人間の評価 (0〜10) とモデルのコサイン類似度
+import pandas as pd
+
+df = pd.read_csv(datapath("wordsim353.tsv"), sep="\t", comment="#", names=["w1", "w2", "human"])
+df["model"] = [wv.similarity(a.lower(), b.lower()) if a.lower() in wv and b.lower() in wv else None for a, b in zip(df.w1, df.w2)]
+df.sample(8, random_state=0)
+```
+
+- 順位相関 (Spearman) を使うのが慣例。値のスケールが違っても、順序が合っていればよいため。
+- WordSim-353 は「類似」と「関連」(coffee-cup) が混ざっている。純粋な類似度を測るなら SimLex-999。日本語には JWSAN や日本語単語類似度データセット (JWSD) がある。
+
+## 単語ベクトルに含まれるジェンダーバイアスを測る {embedding_bias}
+
+単語ベクトルが、職業名などに社会的な偏り (ステレオタイプ) を取り込んでいるかを調べたい。
+
+```python
+!pip install -q gensim
+```
+
+```python
+import gensim.downloader as api
+import numpy as np
+
+wv = api.load("glove-wiki-gigaword-100")
+
+# 性別の方向 = (he - she), (man - woman) などの差の平均
+pairs = [("he", "she"), ("man", "woman"), ("his", "her"), ("father", "mother"), ("boy", "girl"), ("male", "female")]
+g = np.mean([wv[a] - wv[b] for a, b in pairs], axis=0)
+g /= np.linalg.norm(g)
+
+jobs = ["nurse", "engineer", "teacher", "programmer", "receptionist", "doctor", "homemaker", "scientist",
+        "librarian", "mechanic", "secretary", "professor", "dancer", "soldier", "carpenter", "hairdresser"]
+scores = sorted(((float(wv[w] @ g / np.linalg.norm(wv[w])), w) for w in jobs))
+for s, w in scores:
+    print(f"{w:14}{s:+.3f}  {'#' * int(abs(s) * 60)}{'  ← she' if s < 0 else '  → he'}")
+```
+
+- 値が負なら she 側、正なら he 側に寄っている。コーパス中の使われ方の偏りが、そのままベクトルに現れる。
+- 体系的に測るなら WEAT (Word Embedding Association Test)。バイアス除去 (debiasing) の研究も多いが、完全には除けないことが知られている。
+
 ## 単語ベクトルの平均で文ベクトルを作る {avg_word_vectors}
 
 文や文書をベクトルにする最も手軽な方法として、含まれる単語のベクトルを平均したい。
@@ -257,57 +367,6 @@ for d in sorted(docs, key=lambda d: -cos(weighted_vec(query), weighted_vec(d))):
 - 語順は無視されるが、驚くほど強いベースライン。まずこれを試し、足りなければ文埋め込みモデル (次章) に進む。
 - 単純平均は `the` `of` などの機能語に引っ張られて、どの文も似てしまう。ストップワード除去か頻度による重み付けが効く。
 
-## PPMI 行列の SVD で単語ベクトルを作る (カウントベース) {ppmi_svd}
-
-ニューラルネットを使わずに、共起行列から単語ベクトルを作りたい。word2vec が何をしているかの理解にも役立つ。
-
-```python
-import nltk
-nltk.download("brown", quiet=True)
-from collections import Counter
-from nltk.corpus import brown
-import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import svds
-
-sents = [[w.lower() for w in s if w.isalpha()] for s in brown.sents()]
-freq = Counter(w for s in sents for w in s)
-vocab = [w for w, c in freq.most_common(8000)]
-idx = {w: i for i, w in enumerate(vocab)}
-
-window, cooc = 4, Counter()
-for s in sents:
-    ids = [idx[w] for w in s if w in idx]
-    for i, a in enumerate(ids):
-        for b in ids[max(0, i - window):i]:
-            cooc[a, b] += 1
-            cooc[b, a] += 1
-print(len(cooc), "組の共起")
-```
-
-```python
-rows, cols = zip(*cooc.keys())
-C = csr_matrix((list(cooc.values()), (rows, cols)), shape=(len(vocab), len(vocab)), dtype=np.float64)
-total, row_sum = C.sum(), np.asarray(C.sum(axis=1)).ravel()
-
-coo = C.tocoo()
-pmi = np.log(coo.data * total / (row_sum[coo.row] * row_sum[coo.col]))
-ppmi = csr_matrix((np.maximum(pmi, 0), (coo.row, coo.col)), shape=C.shape)   # 負の値は 0 に
-
-U, S, _ = svds(ppmi, k=100)
-vecs = U * np.sqrt(S)
-vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
-
-def most_similar(word, topn=6):
-    sims = vecs @ vecs[idx[word]]
-    return [vocab[i] for i in np.argsort(-sims)[1:topn + 1]]
-
-for w in ["money", "school", "monday", "walked"]:
-    print(w, most_similar(w))
-```
-
-- skip-gram with negative sampling は、(シフトした) PMI 行列の行列分解を暗黙に行っていることが知られている (Levy & Goldberg, 2014)。
-
 ## Doc2Vec で文書ベクトルを学習する {doc2vec}
 
 文書そのものにベクトルを割り当てて、似た文書を探したい (word2vec の文書版)。
@@ -343,92 +402,3 @@ for n, sim in model.dv.most_similar([vec], topn=3):
 
 - `dm=1` が PV-DM (文脈語 + 文書ベクトルで予測)、`dm=0` が PV-DBOW (文書ベクトルだけで単語を予測)。
 - 現在は事前学習済みの文埋め込みモデルのほうが手軽で高精度なことが多い。ドメイン特化の大量文書がある場合の選択肢。
-
-## 単語ベクトルに含まれるジェンダーバイアスを測る {embedding_bias}
-
-単語ベクトルが、職業名などに社会的な偏り (ステレオタイプ) を取り込んでいるかを調べたい。
-
-```python
-!pip install -q gensim
-```
-
-```python
-import gensim.downloader as api
-import numpy as np
-
-wv = api.load("glove-wiki-gigaword-100")
-
-# 性別の方向 = (he - she), (man - woman) などの差の平均
-pairs = [("he", "she"), ("man", "woman"), ("his", "her"), ("father", "mother"), ("boy", "girl"), ("male", "female")]
-g = np.mean([wv[a] - wv[b] for a, b in pairs], axis=0)
-g /= np.linalg.norm(g)
-
-jobs = ["nurse", "engineer", "teacher", "programmer", "receptionist", "doctor", "homemaker", "scientist",
-        "librarian", "mechanic", "secretary", "professor", "dancer", "soldier", "carpenter", "hairdresser"]
-scores = sorted(((float(wv[w] @ g / np.linalg.norm(wv[w])), w) for w in jobs))
-for s, w in scores:
-    print(f"{w:14}{s:+.3f}  {'#' * int(abs(s) * 60)}{'  ← she' if s < 0 else '  → he'}")
-```
-
-- 値が負なら she 側、正なら he 側に寄っている。コーパス中の使われ方の偏りが、そのままベクトルに現れる。
-- 体系的に測るなら WEAT (Word Embedding Association Test)。バイアス除去 (debiasing) の研究も多いが、完全には除けないことが知られている。
-
-## BERT から文脈に応じた単語ベクトルを取り出す {contextual_word_vectors}
-
-同じ単語でも文脈によって意味が違う (bank = 銀行 / 土手)。文脈を反映した単語ベクトルを取り出して比べたい。
-
-```python
-import torch
-from transformers import AutoModel, AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-model = AutoModel.from_pretrained("bert-base-uncased").eval()
-
-def word_vector(sentence, word):
-    words = sentence.split()
-    enc = tokenizer(words, is_split_into_words=True, return_tensors="pt")
-    with torch.no_grad():
-        hidden = model(**enc).last_hidden_state[0]          # (トークン数, 768)
-    positions = [i for i, w in enumerate(enc.word_ids()) if w == words.index(word)]
-    return hidden[positions].mean(dim=0)                    # サブワードが複数なら平均
-
-sents = ["i deposited money in the bank yesterday", "the bank raised its interest rates",
-         "we sat on the bank of the river", "the boat drifted toward the muddy bank"]
-vecs = torch.stack([word_vector(s, "bank") for s in sents])
-sim = torch.nn.functional.cosine_similarity(vecs[:, None], vecs[None], dim=-1)
-for s, row in zip(sents, sim):
-    print(" ".join(f"{x:.2f}" for x in row), "|", s)
-```
-
-- 金融の bank 同士、川岸の bank 同士の類似度が高くなる。word2vec では 1 つのベクトルに混ざっていた語義が分離される。
-- どの層を使うかで性質が変わる。`output_hidden_states=True` で全層を取り出し、最後の 4 層を平均する方法もよく使われる。
-
-## 単語類似度データセットで単語ベクトルを評価する {wordsim_eval}
-
-単語ベクトルの良し悪しを、人間が付けた単語類似度スコアとの相関で定量的に評価したい。
-
-```python
-!pip install -q gensim
-```
-
-```python
-import gensim.downloader as api
-from gensim.test.utils import datapath
-
-for name in ["glove-wiki-gigaword-50", "glove-wiki-gigaword-100"]:
-    wv = api.load(name)
-    pearson, spearman, oov = wv.evaluate_word_pairs(datapath("wordsim353.tsv"))
-    print(f"{name:26} Spearman = {spearman.statistic:.3f}  Pearson = {pearson.statistic:.3f}  未知語率 = {oov:.1f}%")
-```
-
-```python
-# 中身を見る: 人間の評価 (0〜10) とモデルのコサイン類似度
-import pandas as pd
-
-df = pd.read_csv(datapath("wordsim353.tsv"), sep="\t", comment="#", names=["w1", "w2", "human"])
-df["model"] = [wv.similarity(a.lower(), b.lower()) if a.lower() in wv and b.lower() in wv else None for a, b in zip(df.w1, df.w2)]
-df.sample(8, random_state=0)
-```
-
-- 順位相関 (Spearman) を使うのが慣例。値のスケールが違っても、順序が合っていればよいため。
-- WordSim-353 は「類似」と「関連」(coffee-cup) が混ざっている。純粋な類似度を測るなら SimLex-999。日本語には JWSAN や日本語単語類似度データセット (JWSD) がある。

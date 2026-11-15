@@ -528,6 +528,116 @@ print("「の」の後ろの「かみ」:", candidates_for("かみ", left="の")
 - 実際の入力システムでは、文全体の候補を並べるより、文節ごとに候補を出して選び直せるようにするほうが使いやすい。選び直した結果は、次の文節の候補の順序にも影響する。
 - 候補の一覧には、ひらがな・カタカナのままの表記も必ず入れておく。辞書にない語を入力する手段がなくなってしまう。
 
+## かな漢字変換の精度を評価する {kkc_eval}
+
+かな漢字変換の出力が、正解の文とどれくらい合っているかを数値で測り、複数の変換器を比べたい。
+
+```python
+!pip install -q fugashi unidic-lite jaconv marisa-trie
+```
+
+```python
+import io, math, re, urllib.request, zipfile
+from collections import Counter, defaultdict
+import jaconv
+import marisa_trie
+from fugashi import Tagger
+
+def aozora(url):
+    with urllib.request.urlopen(url) as r:
+        z = zipfile.ZipFile(io.BytesIO(r.read()))
+    text = z.read(z.namelist()[0]).decode("cp932")
+    text = re.split(r"-{50,}", text)[2].split("底本：")[0]
+    return re.sub(r"《.+?》|［＃.+?］|｜", "", text).replace("\r\n", "\n").strip()
+
+tagger = Tagger()
+base = "https://www.aozora.gr.jp/cards/000148/files/"
+sentences = []
+for f in ["789_ruby_5639.zip", "752_ruby_2438.zip", "773_ruby_5968.zip"]:
+    for s in re.split(r"(?<=。)|\n", aozora(base + f)):
+        if s.strip():
+            sentences.append([(w.surface, jaconv.kata2hira(w.feature.kana or w.surface)) for w in tagger(s.strip())])
+train, test = sentences[:-200], [s for s in sentences[-200:] if 5 <= sum(len(r) for _, r in s) <= 60]
+
+dic, unigram, bigram = defaultdict(set), Counter(), Counter()
+for sent in train:
+    prev = "<s>"; unigram[prev] += 1
+    for surface, reading in sent:
+        dic[reading].add(surface); unigram[surface] += 1; bigram[prev, surface] += 1; prev = surface
+    bigram[prev, "</s>"] += 1
+total, trie = sum(unigram.values()), marisa_trie.Trie(dic.keys())
+
+def cost(prev, word, lam):
+    p = lam * (bigram.get((prev, word), 0) / unigram[prev] if unigram.get(prev) else 0.0) + (1 - lam) * unigram.get(word, 0) / total
+    return -math.log(p) if p > 0 else 20.0
+
+def convert(kana, lam=0.8):
+    best = [dict() for _ in range(len(kana) + 1)]
+    best[0]["<s>"] = (0.0, None, None)
+    for i in range(len(kana)):
+        for j, word in [(i + len(r), s) for r in trie.prefixes(kana[i:]) for s in dic[r]] + [(i + 1, kana[i])]:
+            for prev, (c, _, _) in best[i].items():
+                new = c + cost(prev, word, lam)
+                if word not in best[j] or new < best[j][word][0]:
+                    best[j][word] = (new, i, prev)
+    word = min(best[-1], key=lambda w: best[-1][w][0] + cost(w, "</s>", lam))
+    words, pos = [], len(kana)
+    while pos > 0:
+        _, prev_pos, prev = best[pos][word]
+        words.append(word); pos, word = prev_pos, prev
+    return "".join(words[::-1])
+```
+
+```python
+def lcs(a, b):
+    """最長共通部分列の長さ (文字単位)"""
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        cur = [0]
+        for j, y in enumerate(b, 1):
+            cur.append(prev[j - 1] + 1 if x == y else max(prev[j], cur[-1]))
+        prev = cur
+    return prev[-1]
+
+def evaluate(systems, data):
+    rows = {}
+    for name, f in systems.items():
+        exact = match = n_gold = n_out = 0
+        for sent in data:
+            kana, gold = "".join(r for _, r in sent), "".join(s for s, _ in sent)
+            out = f(kana)
+            exact += out == gold
+            match += lcs(out, gold); n_gold += len(gold); n_out += len(out)
+        p, r = match / n_out, match / n_gold
+        rows[name] = {"文正解率": exact / len(data), "適合率": p, "再現率": r, "F 値": 2 * p * r / (p + r)}
+    return rows
+
+import pandas as pd
+
+systems = {"変換しない (ひらがなのまま)": lambda k: k, "単語 unigram": lambda k: convert(k, 0.0), "単語 bigram": lambda k: convert(k, 0.8)}
+print(len(test), "文で評価")
+pd.DataFrame(evaluate(systems, test)).T.round(3)
+```
+
+```python
+# 誤りの中身を見る: どの読みを、どう間違えたか
+import difflib
+
+errors = Counter()
+for sent in test:
+    kana, gold = "".join(r for _, r in sent), "".join(s for s, _ in sent)
+    out = convert(kana)
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, gold, out, autojunk=False).get_opcodes():
+        if op == "replace":
+            errors[gold[i1:i2], out[j1:j2]] += 1
+print("多い誤り (正解 → 出力):", errors.most_common(12))
+```
+
+- かな漢字変換の評価には、文がまるごと合った割合 (文正解率) と、最長共通部分列に基づく文字単位の適合率・再現率・F 値がよく使われる。文正解率は厳しく、F 値は部分的な正しさも反映する。
+- 「変換しない」場合でも、ひらがなの部分は一致するので F 値はかなり高く出る。必ずこのベースラインと比べる。
+- 正解と違っても誤りとは限らない (「出来る / できる」「事 / こと」のような表記のゆれ)。誤りの一覧を見て、本当の誤りと表記のゆれを分けて考える。
+- このテストは学習データと同じ作家の文章なので、数値は高めに出る。分野の違うテキスト (現代の Web 文書など) では大きく下がる。評価データの分野は、想定する利用場面に合わせる。
+
 ## 入力の途中で続きを予測する (予測入力) {predictive_input}
 
 数文字入力しただけで、入力しようとしている単語や、次に来そうな単語を候補として出したい (スマートフォンの入力のように)。
@@ -771,7 +881,7 @@ print(convert(jaconv.hira2kata(text)), f"({time.perf_counter() - t:.2f} 秒)")
 ```
 
 - zenz は、日本語入力アプリ azooKey のために作られたモデル。読みを条件として、変換後の文を 1 文字ずつ生成する。大量のテキストから学習しているので、現代の語彙や長い文脈に強い。
-- 単語 bigram のモデル (前のレシピ) と違い、文全体を見て同音異義語を選べる (「医者に慰謝料を請求した」)。ただし万能ではなく、「きしゃのきしゃがきしゃできしゃした」のような同音異義語の言葉遊びは、すべて同じ表記になってしまう。
+- 単語 bigram のモデル (この章の bigram のレシピ) と違い、文全体を見て同音異義語を選べる (「医者に慰謝料を請求した」)。ただし万能ではなく、「きしゃのきしゃがきしゃできしゃした」のような同音異義語の言葉遊びは、すべて同じ表記になってしまう。
 - 生成モデルなので、読みと対応しない文字を出力することがある。実用のシステムでは、従来型の変換結果を候補として作り、ニューラルモデルで検証・並べ替えをする構成 (azooKey の Zenzai) がとられている。
 - 入力のたびにモデルを動かすので、応答の速さが課題になる。小さなモデル、量子化、入力途中の計算結果の再利用などで対処する。
 
@@ -812,113 +922,3 @@ print([(reading, c[:3]) for reading, c in transliterate("くる,までまつ")])
 - 手軽だが、外部のサーバーに入力を送ることになる。個人情報や機密を含む文章には使わない。利用規約と呼び出しの頻度にも注意する。
 - 評価用のデータを作る、自作の変換器と結果を比べる、といった用途に便利。
 - ネットワークにつながっていないと使えず、応答に時間もかかるので、キー入力のたびに呼ぶ用途には向かない。
-
-## かな漢字変換の精度を評価する {kkc_eval}
-
-かな漢字変換の出力が、正解の文とどれくらい合っているかを数値で測り、複数の変換器を比べたい。
-
-```python
-!pip install -q fugashi unidic-lite jaconv marisa-trie
-```
-
-```python
-import io, math, re, urllib.request, zipfile
-from collections import Counter, defaultdict
-import jaconv
-import marisa_trie
-from fugashi import Tagger
-
-def aozora(url):
-    with urllib.request.urlopen(url) as r:
-        z = zipfile.ZipFile(io.BytesIO(r.read()))
-    text = z.read(z.namelist()[0]).decode("cp932")
-    text = re.split(r"-{50,}", text)[2].split("底本：")[0]
-    return re.sub(r"《.+?》|［＃.+?］|｜", "", text).replace("\r\n", "\n").strip()
-
-tagger = Tagger()
-base = "https://www.aozora.gr.jp/cards/000148/files/"
-sentences = []
-for f in ["789_ruby_5639.zip", "752_ruby_2438.zip", "773_ruby_5968.zip"]:
-    for s in re.split(r"(?<=。)|\n", aozora(base + f)):
-        if s.strip():
-            sentences.append([(w.surface, jaconv.kata2hira(w.feature.kana or w.surface)) for w in tagger(s.strip())])
-train, test = sentences[:-200], [s for s in sentences[-200:] if 5 <= sum(len(r) for _, r in s) <= 60]
-
-dic, unigram, bigram = defaultdict(set), Counter(), Counter()
-for sent in train:
-    prev = "<s>"; unigram[prev] += 1
-    for surface, reading in sent:
-        dic[reading].add(surface); unigram[surface] += 1; bigram[prev, surface] += 1; prev = surface
-    bigram[prev, "</s>"] += 1
-total, trie = sum(unigram.values()), marisa_trie.Trie(dic.keys())
-
-def cost(prev, word, lam):
-    p = lam * (bigram.get((prev, word), 0) / unigram[prev] if unigram.get(prev) else 0.0) + (1 - lam) * unigram.get(word, 0) / total
-    return -math.log(p) if p > 0 else 20.0
-
-def convert(kana, lam=0.8):
-    best = [dict() for _ in range(len(kana) + 1)]
-    best[0]["<s>"] = (0.0, None, None)
-    for i in range(len(kana)):
-        for j, word in [(i + len(r), s) for r in trie.prefixes(kana[i:]) for s in dic[r]] + [(i + 1, kana[i])]:
-            for prev, (c, _, _) in best[i].items():
-                new = c + cost(prev, word, lam)
-                if word not in best[j] or new < best[j][word][0]:
-                    best[j][word] = (new, i, prev)
-    word = min(best[-1], key=lambda w: best[-1][w][0] + cost(w, "</s>", lam))
-    words, pos = [], len(kana)
-    while pos > 0:
-        _, prev_pos, prev = best[pos][word]
-        words.append(word); pos, word = prev_pos, prev
-    return "".join(words[::-1])
-```
-
-```python
-def lcs(a, b):
-    """最長共通部分列の長さ (文字単位)"""
-    prev = [0] * (len(b) + 1)
-    for x in a:
-        cur = [0]
-        for j, y in enumerate(b, 1):
-            cur.append(prev[j - 1] + 1 if x == y else max(prev[j], cur[-1]))
-        prev = cur
-    return prev[-1]
-
-def evaluate(systems, data):
-    rows = {}
-    for name, f in systems.items():
-        exact = match = n_gold = n_out = 0
-        for sent in data:
-            kana, gold = "".join(r for _, r in sent), "".join(s for s, _ in sent)
-            out = f(kana)
-            exact += out == gold
-            match += lcs(out, gold); n_gold += len(gold); n_out += len(out)
-        p, r = match / n_out, match / n_gold
-        rows[name] = {"文正解率": exact / len(data), "適合率": p, "再現率": r, "F 値": 2 * p * r / (p + r)}
-    return rows
-
-import pandas as pd
-
-systems = {"変換しない (ひらがなのまま)": lambda k: k, "単語 unigram": lambda k: convert(k, 0.0), "単語 bigram": lambda k: convert(k, 0.8)}
-print(len(test), "文で評価")
-pd.DataFrame(evaluate(systems, test)).T.round(3)
-```
-
-```python
-# 誤りの中身を見る: どの読みを、どう間違えたか
-import difflib
-
-errors = Counter()
-for sent in test:
-    kana, gold = "".join(r for _, r in sent), "".join(s for s, _ in sent)
-    out = convert(kana)
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, gold, out, autojunk=False).get_opcodes():
-        if op == "replace":
-            errors[gold[i1:i2], out[j1:j2]] += 1
-print("多い誤り (正解 → 出力):", errors.most_common(12))
-```
-
-- かな漢字変換の評価には、文がまるごと合った割合 (文正解率) と、最長共通部分列に基づく文字単位の適合率・再現率・F 値がよく使われる。文正解率は厳しく、F 値は部分的な正しさも反映する。
-- 「変換しない」場合でも、ひらがなの部分は一致するので F 値はかなり高く出る。必ずこのベースラインと比べる。
-- 正解と違っても誤りとは限らない (「出来る / できる」「事 / こと」のような表記のゆれ)。誤りの一覧を見て、本当の誤りと表記のゆれを分けて考える。
-- このテストは学習データと同じ作家の文章なので、数値は高めに出る。分野の違うテキスト (現代の Web 文書など) では大きく下がる。評価データの分野は、想定する利用場面に合わせる。

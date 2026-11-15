@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす方法と、Claude API を使う方法。プロンプト、構造化出力、LoRA、LLM による評価。検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす方法と、Claude API を使う方法。プロンプト、構造化出力、量子化と LoRA、LLM の性質を調べる方法。LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする (チャットテンプレート) {llm_chat_local}
 
@@ -76,6 +76,43 @@ chunks = [chunk for chunk in streamer]
 thread.join()
 print(len(chunks), "個の断片:", chunks[:8])
 ```
+
+## 複数のプロンプトをまとめてバッチ生成する {llm_batch_generation}
+
+大量の入力を LLM で処理したい。1 件ずつ `generate` すると遅いので、バッチでまとめて生成したい。
+
+```python
+import time
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name).eval()
+tokenizer.padding_side = "left"               # 生成モデルのバッチ処理では必ず左パディング
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+words = ["形態素解析", "機械翻訳", "固有表現抽出", "要約", "質問応答", "感情分析", "音声認識", "情報検索"]
+prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{w}」を一文で説明してください。"}],
+                                         add_generation_prompt=True, tokenize=False) for w in words]
+
+@torch.no_grad()
+def generate(batch):
+    enc = tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False)
+    out = model.generate(**enc, max_new_tokens=40, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+    return tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+
+t = time.perf_counter(); single = [generate([p])[0] for p in prompts]; t1 = time.perf_counter() - t
+t = time.perf_counter(); batched = generate(prompts); t2 = time.perf_counter() - t
+print(f"1 件ずつ: {t1:.1f} 秒 / バッチ: {t2:.1f} 秒")
+for w, s in zip(words, batched):
+    print(f"{w}: {s.strip()}")
+```
+
+- 右パディングのままだと、短いプロンプトの後ろにパディングが入り、その続きを生成することになって出力が壊れる。
+- バッチ内の長さを揃える (長さでソートする) とパディングが減って効率が良い。
+- 数万件以上を本格的に処理するなら、vLLM などの推論サーバー (連続バッチ処理) が桁違いに速い。
 
 ## Few-shot プロンプトでテキストを分類する {llm_few_shot}
 
@@ -167,42 +204,124 @@ for text in texts:
 - トークン数の多い選択肢は不利になる。長さで割る、あるいは選択肢を「A」「B」「C」のような 1 トークンの記号にして回避する。
 - API 経由のモデルでは対数尤度が取れないことが多い。その場合は構造化出力 (enum) で選択肢を制約する。
 
-## 複数のプロンプトをまとめてバッチ生成する {llm_batch_generation}
+## プロンプトをテンプレートで管理し、似た例を動的に選ぶ {prompt_template}
 
-大量の入力を LLM で処理したい。1 件ずつ `generate` すると遅いので、バッチでまとめて生成したい。
+プロンプトをコードに直書きせずテンプレートとして管理したい。Few-shot の例を、入力に似たものから自動で選びたい。
 
 ```python
-import time
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForCausalLM.from_pretrained(name).eval()
-tokenizer.padding_side = "left"               # 生成モデルのバッチ処理では必ず左パディング
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-words = ["形態素解析", "機械翻訳", "固有表現抽出", "要約", "質問応答", "感情分析", "音声認識", "情報検索"]
-prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{w}」を一文で説明してください。"}],
-                                         add_generation_prompt=True, tokenize=False) for w in words]
-
-@torch.no_grad()
-def generate(batch):
-    enc = tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False)
-    out = model.generate(**enc, max_new_tokens=40, do_sample=False, pad_token_id=tokenizer.pad_token_id)
-    return tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
-
-t = time.perf_counter(); single = [generate([p])[0] for p in prompts]; t1 = time.perf_counter() - t
-t = time.perf_counter(); batched = generate(prompts); t2 = time.perf_counter() - t
-print(f"1 件ずつ: {t1:.1f} 秒 / バッチ: {t2:.1f} 秒")
-for w, s in zip(words, batched):
-    print(f"{w}: {s.strip()}")
+!pip install -q jinja2
 ```
 
-- 右パディングのままだと、短いプロンプトの後ろにパディングが入り、その続きを生成することになって出力が壊れる。
-- バッチ内の長さを揃える (長さでソートする) とパディングが減って効率が良い。
-- 数万件以上を本格的に処理するなら、vLLM などの推論サーバー (連続バッチ処理) が桁違いに速い。
+```python
+from jinja2 import Template
+
+TEMPLATE = Template("""あなたは日本語学習者の作文を添削する教師です。
+誤りを訂正した文だけを出力してください。誤りがなければ、そのまま出力してください。
+{% if examples %}
+{% for ex in examples -%}
+入力: {{ ex.src }}
+出力: {{ ex.tgt }}
+
+{% endfor -%}
+{% endif %}入力: {{ text }}
+出力:""")
+
+examples = [
+    {"src": "私は学校を行きます。", "tgt": "私は学校に行きます。"},
+    {"src": "昨日は雨が降ります。", "tgt": "昨日は雨が降りました。"},
+    {"src": "この本は面白いでした。", "tgt": "この本は面白かったです。"},
+    {"src": "友達に会うために駅で行った。", "tgt": "友達に会うために駅に行った。"},
+    {"src": "日本の食べ物が美味しいと思います。", "tgt": "日本の食べ物は美味しいと思います。"},
+    {"src": "静かの部屋で勉強します。", "tgt": "静かな部屋で勉強します。"},
+]
+print(TEMPLATE.render(text="図書館を勉強しました。", examples=examples[:2]))
+```
+
+```python
+# 入力に似た例を埋め込みの類似度で選ぶ (kNN few-shot)
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("intfloat/multilingual-e5-small")
+ex_emb = model.encode(["query: " + e["src"] for e in examples], normalize_embeddings=True)
+
+def select(text, k=2):
+    sims = ex_emb @ model.encode("query: " + text, normalize_embeddings=True)
+    return [examples[i] for i in sims.argsort()[::-1][:k]][::-1]   # 最も似た例を入力の直前に置く
+
+for text in ["この映画は楽しいでした。", "公園を散歩に行きました。", "きれいの花が咲いています。"]:
+    print(text, "→ 選ばれた例:", [e["src"] for e in select(text)])
+```
+
+- テンプレートを別ファイル (`prompts/gec_v2.j2` など) にしてバージョン管理すると、実験の再現と比較がしやすい。
+- 入力に似た例を選ぶと、固定の例より精度が上がることが多い。ただし似た例の答えをそのまま真似る傾向も出る。
+
+## 指示文の言語を変えて LLM の出力がどう変わるか比べる {prompt_language}
+
+日本語のデータを LLM に処理させるとき、指示文 (プロンプト) を日本語で書くのと英語で書くのとで、結果が変わるかを確かめたい。
+
+```python
+!pip install -q datasets
+```
+
+```python
+import numpy as np
+import pandas as pd
+import torch
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+
+ds = load_dataset("sbintuitions/JCommonsenseQA", split="validation").shuffle(seed=0).select(range(150))     # 5 択の常識問題
+print(ds[0])
+
+@torch.no_grad()
+def choose(prompt, n_choices=5):
+    """選択肢の番号 (1〜5) のうち、次に出る確率が最も高いものを答えとする"""
+    digits = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, n_choices + 1)]
+    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return int(llm(ids).logits[0, -1, digits].argmax())
+```
+
+```python
+def body(ex):
+    return "\n".join(f"{i + 1}. {ex[f'choice{i}']}" for i in range(5))
+
+PROMPTS = {
+    "日本語の指示": lambda ex: f"次の質問に対して、最も適切な選択肢の番号を 1 つだけ答えてください。\n\n質問: {ex['question']}\n{body(ex)}\n\n答えの番号:",
+    "英語の指示": lambda ex: f"Answer the following question by choosing the most appropriate option. Reply with the number only.\n\nQuestion: {ex['question']}\n{body(ex)}\n\nAnswer:",
+    "日本語の指示 (言い回しを変える)": lambda ex: f"{ex['question']}\n\n選択肢:\n{body(ex)}\n\n正しいものを選び、番号だけで答えよ。",
+    "英語の指示 (言い回しを変える)": lambda ex: f"{ex['question']}\n\nOptions:\n{body(ex)}\n\nWhich option is correct? Output only its number.",
+}
+predictions = {label: [choose(make(ex)) for ex in ds] for label, make in PROMPTS.items()}
+gold = np.array(ds["label"])
+print(pd.Series({label: (np.array(p) == gold).mean() for label, p in predictions.items()}).round(3).to_string())
+```
+
+```python
+# 差は偶然の範囲か: ブートストラップで正解率の差の信頼区間を求める
+rng = np.random.default_rng(0)
+def diff_ci(a, b, n=2000):
+    a, b = np.array(predictions[a]) == gold, np.array(predictions[b]) == gold
+    idx = rng.integers(0, len(gold), (n, len(gold)))
+    d = a[idx].mean(axis=1) - b[idx].mean(axis=1)
+    return round(float(a.mean() - b.mean()), 3), np.percentile(d, [2.5, 97.5]).round(3).tolist()
+
+print("日本語 − 英語:", diff_ci("日本語の指示", "英語の指示"))
+print("日本語どうし (言い回しの違い):", diff_ci("日本語の指示", "日本語の指示 (言い回しを変える)"))
+print("英語どうし (言い回しの違い):", diff_ci("英語の指示", "英語の指示 (言い回しを変える)"))
+agree = pd.DataFrame({a: {b: (np.array(predictions[a]) == np.array(predictions[b])).mean() for b in predictions} for a in predictions})
+print("予測の一致率:"); print(agree.round(2).to_string())
+```
+
+- 多言語の LLM では「指示は英語のほうが良い」と言われることがあるが、モデルとタスクによる。日本語を中心に学習されたモデルでは、日本語の指示のほうが良いか、差がないことが多い。
+- 言語の違いによる差が、同じ言語の中での言い回しの違いによる差より大きいかどうかを見る。言い回しを変えただけで同じくらい変動するなら、「言語の効果」とは言えない。
+- 公平に比べるのは難しい。英語の指示を機械翻訳して日本語にすると、不自然な日本語 (翻訳調) になり、日本語側が不利になる。それぞれの言語で自然に書いた指示どうしを比べる。
+- 150 問程度では、数ポイントの差は誤差の範囲に入る。信頼区間が 0 をまたいでいたら、差があるとは言えない。
+- 出力の言語にも影響する。英語で指示すると、日本語の入力に対しても英語で答え始めることがある。出力の言語を明示する。
 
 ## LLM の出力から JSON を取り出して検証する {llm_json_output}
 
@@ -265,57 +384,6 @@ print(json.dumps(Review.model_json_schema(), ensure_ascii=False)[:150], "...")  
 
 - プロンプトには、スキーマ (`model_json_schema()`) と出力例を入れる。
 - 可能なら、API やライブラリの「構造化出力」機能を使うのが確実 (文法的に正しい JSON しか生成できないように制約される)。Claude API の例は後述。ローカルモデルなら `outlines` などの制約付きデコードのライブラリがある。
-
-## プロンプトをテンプレートで管理し、似た例を動的に選ぶ {prompt_template}
-
-プロンプトをコードに直書きせずテンプレートとして管理したい。Few-shot の例を、入力に似たものから自動で選びたい。
-
-```python
-!pip install -q jinja2
-```
-
-```python
-from jinja2 import Template
-
-TEMPLATE = Template("""あなたは日本語学習者の作文を添削する教師です。
-誤りを訂正した文だけを出力してください。誤りがなければ、そのまま出力してください。
-{% if examples %}
-{% for ex in examples -%}
-入力: {{ ex.src }}
-出力: {{ ex.tgt }}
-
-{% endfor -%}
-{% endif %}入力: {{ text }}
-出力:""")
-
-examples = [
-    {"src": "私は学校を行きます。", "tgt": "私は学校に行きます。"},
-    {"src": "昨日は雨が降ります。", "tgt": "昨日は雨が降りました。"},
-    {"src": "この本は面白いでした。", "tgt": "この本は面白かったです。"},
-    {"src": "友達に会うために駅で行った。", "tgt": "友達に会うために駅に行った。"},
-    {"src": "日本の食べ物が美味しいと思います。", "tgt": "日本の食べ物は美味しいと思います。"},
-    {"src": "静かの部屋で勉強します。", "tgt": "静かな部屋で勉強します。"},
-]
-print(TEMPLATE.render(text="図書館を勉強しました。", examples=examples[:2]))
-```
-
-```python
-# 入力に似た例を埋め込みの類似度で選ぶ (kNN few-shot)
-from sentence_transformers import SentenceTransformer
-
-model = SentenceTransformer("intfloat/multilingual-e5-small")
-ex_emb = model.encode(["query: " + e["src"] for e in examples], normalize_embeddings=True)
-
-def select(text, k=2):
-    sims = ex_emb @ model.encode("query: " + text, normalize_embeddings=True)
-    return [examples[i] for i in sims.argsort()[::-1][:k]][::-1]   # 最も似た例を入力の直前に置く
-
-for text in ["この映画は楽しいでした。", "公園を散歩に行きました。", "きれいの花が咲いています。"]:
-    print(text, "→ 選ばれた例:", [e["src"] for e in select(text)])
-```
-
-- テンプレートを別ファイル (`prompts/gec_v2.j2` など) にしてバージョン管理すると、実験の再現と比較がしやすい。
-- 入力に似た例を選ぶと、固定の例より精度が上がることが多い。ただし似た例の答えをそのまま真似る傾向も出る。
 
 ## LLM を 4bit 量子化して少ないメモリで動かす {llm_4bit gpu norun}
 
@@ -547,6 +615,47 @@ else:
 - 抽出した `text` が原文に実在するかは保証されない。`e.text in text` で検証するとよい。文字位置が必要なら、自分で `text.find()` する。
 - スキーマに書けない制約 (最小値・最大値など) は、Pydantic 側の検証で確認する。
 
+## Claude API のトークン数と料金を事前に見積もる {claude_count_tokens key norun}
+
+データセット全体を API に投げる前に、何トークンになり、いくらかかるのかを見積もりたい。
+
+```python
+!pip install -q anthropic
+```
+
+```python
+import anthropic
+from google.colab import userdata
+
+client = anthropic.Anthropic(api_key=userdata.get("ANTHROPIC_API_KEY"))
+MODEL = "claude-opus-5-5"
+SYSTEM = "次の文の文法誤りを訂正し、訂正後の文だけを出力してください。"
+
+def count(text):
+    return client.messages.count_tokens(model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": text}]).input_tokens
+
+for text in ["Natural language processing is fun.", "自然言語処理は楽しい。", "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。"]:
+    print(count(text), "トークン |", len(text), "文字 |", text)
+```
+
+```python
+# データセット全体の見積もり: 一部をサンプリングして平均をとり、件数を掛ける
+import random
+
+dataset = ["私は学校を行きます。", "昨日は雨が降ります。", "この本は面白いでした。"] * 1000   # 自分のデータに置き換える
+sample = random.Random(0).sample(dataset, 20)
+avg_in = sum(count(t) for t in sample) / len(sample)
+avg_out = 40                                   # 出力トークン数は、少数を実際に処理して実測する
+PRICE_IN, PRICE_OUT = 4.00, 20.00              # 100 万トークンあたりのドル。最新の料金表で確認すること
+
+cost = len(dataset) * (avg_in * PRICE_IN + avg_out * PRICE_OUT) / 1e6
+print(f"{len(dataset)} 件 × 入力 {avg_in:.0f} + 出力 {avg_out} トークン ≒ ${cost:.2f} (Batches API なら ${cost / 2:.2f})")
+```
+
+- トークン数はモデルによって違う。必ず実際に使うモデルの ID で数える。他社のトークナイザ (tiktoken など) での推定は当てにならない。
+- 出力側に思考 (thinking) のトークンも含まれて課金される点に注意。事前に数十件で実測するのが確実。
+- トークン数のカウント自体は無料 (レート制限はある)。
+
 ## Claude で大量のテキストを安く処理する (Message Batches API) {claude_batch key norun}
 
 数千〜数万件のテキストを LLM で処理したい。急がないので、できるだけ安く済ませたい。
@@ -597,47 +706,6 @@ for rid, text in reviews.items():
 - 非同期で処理される代わりに、料金が通常の半額になる。ほとんどのバッチは 1 時間以内に終わる (最大 24 時間)。
 - バッチ ID を控えておけば、Colab のセッションが切れても後から結果を取得できる (結果は 29 日間保持される)。
 - 共通の長いシステムプロンプトがあるなら、プロンプトキャッシュと併用するとさらに安くなる。
-
-## Claude API のトークン数と料金を事前に見積もる {claude_count_tokens key norun}
-
-データセット全体を API に投げる前に、何トークンになり、いくらかかるのかを見積もりたい。
-
-```python
-!pip install -q anthropic
-```
-
-```python
-import anthropic
-from google.colab import userdata
-
-client = anthropic.Anthropic(api_key=userdata.get("ANTHROPIC_API_KEY"))
-MODEL = "claude-opus-5-5"
-SYSTEM = "次の文の文法誤りを訂正し、訂正後の文だけを出力してください。"
-
-def count(text):
-    return client.messages.count_tokens(model=MODEL, system=SYSTEM, messages=[{"role": "user", "content": text}]).input_tokens
-
-for text in ["Natural language processing is fun.", "自然言語処理は楽しい。", "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。"]:
-    print(count(text), "トークン |", len(text), "文字 |", text)
-```
-
-```python
-# データセット全体の見積もり: 一部をサンプリングして平均をとり、件数を掛ける
-import random
-
-dataset = ["私は学校を行きます。", "昨日は雨が降ります。", "この本は面白いでした。"] * 1000   # 自分のデータに置き換える
-sample = random.Random(0).sample(dataset, 20)
-avg_in = sum(count(t) for t in sample) / len(sample)
-avg_out = 40                                   # 出力トークン数は、少数を実際に処理して実測する
-PRICE_IN, PRICE_OUT = 4.00, 20.00              # 100 万トークンあたりのドル。最新の料金表で確認すること
-
-cost = len(dataset) * (avg_in * PRICE_IN + avg_out * PRICE_OUT) / 1e6
-print(f"{len(dataset)} 件 × 入力 {avg_in:.0f} + 出力 {avg_out} トークン ≒ ${cost:.2f} (Batches API なら ${cost / 2:.2f})")
-```
-
-- トークン数はモデルによって違う。必ず実際に使うモデルの ID で数える。他社のトークナイザ (tiktoken など) での推定は当てにならない。
-- 出力側に思考 (thinking) のトークンも含まれて課金される点に注意。事前に数十件で実測するのが確実。
-- トークン数のカウント自体は無料 (レート制限はある)。
 
 ## 言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP) {minimal_pairs}
 
@@ -704,74 +772,6 @@ for r in pairs[~pairs["correct"]].head(5).itertuples():
 - 長さで正規化すれば解決する、とは限らない。この実験では、正規化すると今度は長い文が有利になり、偏りの向きが逆になっただけだった。トークン数が同じ組だけで評価する、長さの条件ごとに正解率を分けて報告する、といった確認が確実。
 - 正解率が高くても、その現象を「理解している」とは限らない。語の頻度や共起のような表面的な手がかりで解ける組もある。
 - 指示に従う LLM なら「どちらが自然か」を直接尋ねることもできるが、確率を比べる方法とは結果が一致しないことがある。
-
-## 指示文の言語を変えて LLM の出力がどう変わるか比べる {prompt_language}
-
-日本語のデータを LLM に処理させるとき、指示文 (プロンプト) を日本語で書くのと英語で書くのとで、結果が変わるかを確かめたい。
-
-```python
-!pip install -q datasets
-```
-
-```python
-import numpy as np
-import pandas as pd
-import torch
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
-
-ds = load_dataset("sbintuitions/JCommonsenseQA", split="validation").shuffle(seed=0).select(range(150))     # 5 択の常識問題
-print(ds[0])
-
-@torch.no_grad()
-def choose(prompt, n_choices=5):
-    """選択肢の番号 (1〜5) のうち、次に出る確率が最も高いものを答えとする"""
-    digits = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, n_choices + 1)]
-    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return int(llm(ids).logits[0, -1, digits].argmax())
-```
-
-```python
-def body(ex):
-    return "\n".join(f"{i + 1}. {ex[f'choice{i}']}" for i in range(5))
-
-PROMPTS = {
-    "日本語の指示": lambda ex: f"次の質問に対して、最も適切な選択肢の番号を 1 つだけ答えてください。\n\n質問: {ex['question']}\n{body(ex)}\n\n答えの番号:",
-    "英語の指示": lambda ex: f"Answer the following question by choosing the most appropriate option. Reply with the number only.\n\nQuestion: {ex['question']}\n{body(ex)}\n\nAnswer:",
-    "日本語の指示 (言い回しを変える)": lambda ex: f"{ex['question']}\n\n選択肢:\n{body(ex)}\n\n正しいものを選び、番号だけで答えよ。",
-    "英語の指示 (言い回しを変える)": lambda ex: f"{ex['question']}\n\nOptions:\n{body(ex)}\n\nWhich option is correct? Output only its number.",
-}
-predictions = {label: [choose(make(ex)) for ex in ds] for label, make in PROMPTS.items()}
-gold = np.array(ds["label"])
-print(pd.Series({label: (np.array(p) == gold).mean() for label, p in predictions.items()}).round(3).to_string())
-```
-
-```python
-# 差は偶然の範囲か: ブートストラップで正解率の差の信頼区間を求める
-rng = np.random.default_rng(0)
-def diff_ci(a, b, n=2000):
-    a, b = np.array(predictions[a]) == gold, np.array(predictions[b]) == gold
-    idx = rng.integers(0, len(gold), (n, len(gold)))
-    d = a[idx].mean(axis=1) - b[idx].mean(axis=1)
-    return round(float(a.mean() - b.mean()), 3), np.percentile(d, [2.5, 97.5]).round(3).tolist()
-
-print("日本語 − 英語:", diff_ci("日本語の指示", "英語の指示"))
-print("日本語どうし (言い回しの違い):", diff_ci("日本語の指示", "日本語の指示 (言い回しを変える)"))
-print("英語どうし (言い回しの違い):", diff_ci("英語の指示", "英語の指示 (言い回しを変える)"))
-agree = pd.DataFrame({a: {b: (np.array(predictions[a]) == np.array(predictions[b])).mean() for b in predictions} for a in predictions})
-print("予測の一致率:"); print(agree.round(2).to_string())
-```
-
-- 多言語の LLM では「指示は英語のほうが良い」と言われることがあるが、モデルとタスクによる。日本語を中心に学習されたモデルでは、日本語の指示のほうが良いか、差がないことが多い。
-- 言語の違いによる差が、同じ言語の中での言い回しの違いによる差より大きいかどうかを見る。言い回しを変えただけで同じくらい変動するなら、「言語の効果」とは言えない。
-- 公平に比べるのは難しい。英語の指示を機械翻訳して日本語にすると、不自然な日本語 (翻訳調) になり、日本語側が不利になる。それぞれの言語で自然に書いた指示どうしを比べる。
-- 150 問程度では、数ポイントの差は誤差の範囲に入る。信頼区間が 0 をまたいでいたら、差があるとは言えない。
-- 出力の言語にも影響する。英語で指示すると、日本語の入力に対しても英語で答え始めることがある。出力の言語を明示する。
 
 ## 名前や属性を入れ替えて LLM の判断の偏りを調べる {llm_social_bias}
 

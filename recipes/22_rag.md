@@ -220,6 +220,71 @@ print([r[3] for r in search("出張のホテル代はいくらまで？", limit=
 - 数万件までなら NumPy や FAISS で十分。ベクトル DB の利点は、永続化、メタデータでの絞り込み、文書の追加・更新・削除が簡単なこと。
 - Qdrant のほかに Chroma、LanceDB、pgvector (PostgreSQL) などがある。ローカルのファイルで動くものから始めると手軽。
 
+## 検索しやすい形に質問を書き換える (文脈の補完と HyDE) {rag_query_rewrite}
+
+対話の途中の「それはいくら？」のような質問は、そのままでは検索に当たらない。質問を検索向けに書き換えたい。
+
+```python
+import torch
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+docs = [
+    "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。",
+    "クックブック食堂の看板メニューは、3 日間煮込んだ特製ビーフカレー (950 円) です。大盛りは 100 円増しです。",
+    "クックブック食堂は 2019 年に京都市左京区で開業しました。店主の田中さんはインドで 2 年間修行しました。",
+    "駐車場は店舗の裏に 3 台分あります。満車の場合は近隣のコインパーキングをご利用ください。",
+    "予約は電話 (075-000-0000) のみ受け付けています。5 名以上の場合は前日までにご連絡ください。",
+    "支払いは現金と QR コード決済に対応しています。クレジットカードは使えません。",
+]
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=True)
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+
+def chat(messages, max_new_tokens=80):
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    with torch.no_grad():
+        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+def top(query, k=2, prefix="query: "):
+    sims = doc_emb @ embedder.encode(prefix + query, normalize_embeddings=True)
+    return [(round(float(sims[i]), 3), docs[i][:32]) for i in sims.argsort()[::-1][:k]]
+```
+
+```python
+# 1. 対話の文脈を補って、単独で意味が通じる質問にする
+def rewrite(history, question):
+    dialogue = "\n".join(f"{'ユーザー' if role == 'user' else 'アシスタント'}: {text}" for role, text in history)
+    prompt = ("次の対話の最後の質問を、対話を読んでいない人にも意味が通じる、検索用の 1 つの質問に書き換えてください。"
+              f"書き換えた質問だけを出力してください。\n\n{dialogue}\nユーザー: {question}")
+    return chat([{"role": "user", "content": prompt}]).strip("「」")
+
+history = [("user", "クックブック食堂の看板メニューは何ですか？"), ("assistant", "3 日間煮込んだ特製ビーフカレーです。")]
+for q in ["それはいくらですか？", "大盛りにできますか？", "車で行っても大丈夫？"]:
+    r = rewrite(history, q)
+    print(f"{q} → {r}\n   そのまま検索: {top(q, 1)}\n   書き換えて検索: {top(r, 1)}")
+```
+
+```python
+# 2. HyDE: 質問に対する「仮の答え」を LLM に書かせ、その文章で検索する (質問文より、答えの文のほうが文書に似ている)
+def hyde(question):
+    prompt = f"次の質問に対する答えとして、ありそうな内容を飲食店の案内文の形で 1 文だけ書いてください。事実でなくて構いません。\n\n質問: {question}"
+    return chat([{"role": "user", "content": prompt}])
+
+for q in ["カードで払いたいんだけど", "大人数で行きたい"]:
+    h = hyde(q)
+    print(f"{q}\n   仮の答え: {h}\n   そのまま検索: {top(q, 1)}\n   HyDE で検索: {top(h, 1, prefix='passage: ')}")
+```
+
+- 複数ターンの RAG では、質問の書き換えはほぼ必須。「それ」「そこ」や省略された主語を補わないと、検索が的外れになる。
+- HyDE (Hypothetical Document Embeddings) の仮の答えは内容が間違っていてよい。語彙や文体が文書に近づくことで検索が当たりやすくなる。ただし LLM の呼び出しが 1 回増える。
+- 書き換えは失敗もする。3 つ目の例では、前の話題 (ビーフカレー) を無関係な質問に持ち込んでしまい、書き換えないほうが正しい資料に当たっている。指示語や省略がある質問だけを書き換える、元の質問と書き換えた質問の両方で検索する、といった対策がある。
+- 書き換えの結果は必ずログに残す。回答がおかしいとき、書き換えで意味が変わっていた、ということがよくある。
+
 ## 回答に出典を付けさせ、その出典を検証する {rag_citation}
 
 RAG の回答がどの資料に基づいているかを示したい。LLM が付けた出典番号が本当に根拠になっているかも確かめたい。
@@ -356,71 +421,6 @@ for q in ["カレーはいくらですか？", "明日の東京の天気は？",
 - しきい値はモデルごとに違う (E5 は無関係な文でも 0.7 台後半が出る)。答えがある質問とない質問の例を用意して、分布を見て決める。
 - 「わかりません」と言わせすぎると、答えられる質問まで断るようになる。断るべき質問と答えるべき質問の両方で評価する。
 
-## 検索しやすい形に質問を書き換える (文脈の補完と HyDE) {rag_query_rewrite}
-
-対話の途中の「それはいくら？」のような質問は、そのままでは検索に当たらない。質問を検索向けに書き換えたい。
-
-```python
-import torch
-from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-docs = [
-    "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。",
-    "クックブック食堂の看板メニューは、3 日間煮込んだ特製ビーフカレー (950 円) です。大盛りは 100 円増しです。",
-    "クックブック食堂は 2019 年に京都市左京区で開業しました。店主の田中さんはインドで 2 年間修行しました。",
-    "駐車場は店舗の裏に 3 台分あります。満車の場合は近隣のコインパーキングをご利用ください。",
-    "予約は電話 (075-000-0000) のみ受け付けています。5 名以上の場合は前日までにご連絡ください。",
-    "支払いは現金と QR コード決済に対応しています。クレジットカードは使えません。",
-]
-embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=True)
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
-
-def chat(messages, max_new_tokens=80):
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
-    with torch.no_grad():
-        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-def top(query, k=2, prefix="query: "):
-    sims = doc_emb @ embedder.encode(prefix + query, normalize_embeddings=True)
-    return [(round(float(sims[i]), 3), docs[i][:32]) for i in sims.argsort()[::-1][:k]]
-```
-
-```python
-# 1. 対話の文脈を補って、単独で意味が通じる質問にする
-def rewrite(history, question):
-    dialogue = "\n".join(f"{'ユーザー' if role == 'user' else 'アシスタント'}: {text}" for role, text in history)
-    prompt = ("次の対話の最後の質問を、対話を読んでいない人にも意味が通じる、検索用の 1 つの質問に書き換えてください。"
-              f"書き換えた質問だけを出力してください。\n\n{dialogue}\nユーザー: {question}")
-    return chat([{"role": "user", "content": prompt}]).strip("「」")
-
-history = [("user", "クックブック食堂の看板メニューは何ですか？"), ("assistant", "3 日間煮込んだ特製ビーフカレーです。")]
-for q in ["それはいくらですか？", "大盛りにできますか？", "車で行っても大丈夫？"]:
-    r = rewrite(history, q)
-    print(f"{q} → {r}\n   そのまま検索: {top(q, 1)}\n   書き換えて検索: {top(r, 1)}")
-```
-
-```python
-# 2. HyDE: 質問に対する「仮の答え」を LLM に書かせ、その文章で検索する (質問文より、答えの文のほうが文書に似ている)
-def hyde(question):
-    prompt = f"次の質問に対する答えとして、ありそうな内容を飲食店の案内文の形で 1 文だけ書いてください。事実でなくて構いません。\n\n質問: {question}"
-    return chat([{"role": "user", "content": prompt}])
-
-for q in ["カードで払いたいんだけど", "大人数で行きたい"]:
-    h = hyde(q)
-    print(f"{q}\n   仮の答え: {h}\n   そのまま検索: {top(q, 1)}\n   HyDE で検索: {top(h, 1, prefix='passage: ')}")
-```
-
-- 複数ターンの RAG では、質問の書き換えはほぼ必須。「それ」「そこ」や省略された主語を補わないと、検索が的外れになる。
-- HyDE (Hypothetical Document Embeddings) の仮の答えは内容が間違っていてよい。語彙や文体が文書に近づくことで検索が当たりやすくなる。ただし LLM の呼び出しが 1 回増える。
-- 書き換えは失敗もする。3 つ目の例では、前の話題 (ビーフカレー) を無関係な質問に持ち込んでしまい、書き換えないほうが正しい資料に当たっている。指示語や省略がある質問だけを書き換える、元の質問と書き換えた質問の両方で検索する、といった対策がある。
-- 書き換えの結果は必ずログに残す。回答がおかしいとき、書き換えで意味が変わっていた、ということがよくある。
-
 ## RAG の評価セットを用意する {rag_eval_dataset}
 
 RAG を評価するための「質問・正解・正解が書かれた文書」の組を用意したい。既存の QA データから作る方法と、自分の文書から LLM で作る方法を知りたい。
@@ -554,6 +554,144 @@ print("埋め込みだけ 1 位:", [queries[i] for i in np.where((rank_d == 0) &
 - RAG の改善は、まず検索の評価セットを作るところから。50〜200 件の「質問と正解文書の組」があれば、手法やチャンク設定の比較ができる。
 - タイトルを質問に使う方法は手軽だが、実際のユーザーの質問とは性質が違う (本文と同じ語を含みやすく、BM25 に有利)。実運用のログや、LLM に文書から質問を作らせた合成データも併用する。
 - Recall@k の k は、LLM に渡す件数に合わせる。5 件渡すなら Recall@5 が、そのまま「正解を読ませられた割合」になる。
+
+## RAG の回答を LLM を使わずに評価する {rag_eval_answer}
+
+RAG の回答が正しいか、資料に基づいているかを自動で確かめたい。評価のたびに LLM を呼ばずに、軽い方法で回したい。
+
+```python
+import re
+import unicodedata
+import pandas as pd
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+# 評価データ: 質問、検索された資料、システムの回答、正解 (answerable=False は「答えられない」が正解)
+data = [
+    {"q": "カレーはいくらですか？", "context": "看板メニューは特製ビーフカレー (950 円) です。大盛りは 100 円増しです。", "answer": "特製ビーフカレーは 950 円です。", "gold": ["950 円", "950円"], "answerable": True},
+    {"q": "日曜日は何時までですか？", "context": "営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。", "answer": "日曜日は 15 時までです。", "gold": ["20 時", "20時"], "answerable": True},
+    {"q": "クレジットカードは使えますか？", "context": "支払いは現金と QR コード決済に対応しています。クレジットカードは使えません。", "answer": "はい、主要なクレジットカードがご利用いただけます。", "gold": ["使えません", "使えない"], "answerable": True},
+    {"q": "テイクアウトはできますか？", "context": "駐車場は店舗の裏に 3 台分あります。", "answer": "わかりません。", "gold": [], "answerable": False},
+    {"q": "アレルギー対応はありますか？", "context": "看板メニューは特製ビーフカレー (950 円) です。", "answer": "はい、アレルギー対応メニューをご用意しています。", "gold": [], "answerable": False},
+    {"q": "駐車場は何台分ですか？", "context": "駐車場は店舗の裏に 3 台分あります。満車の場合は近隣のコインパーキングをご利用ください。", "answer": "店舗の裏に 3 台分あり、料金は無料です。", "gold": ["3 台", "3台"], "answerable": True},
+]
+
+norm = lambda s: re.sub(r"\s", "", unicodedata.normalize("NFKC", s))
+REFUSAL = re.compile(r"わかりません|分かりません|お答えできません|記載がありません|書かれていません")
+
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+tok = AutoTokenizer.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
+
+def faithfulness(context, answer):
+    """回答の各文が資料から含意される確率の最小値 (1 文でも資料にないことを言っていれば低くなる)"""
+    sents = [s for s in re.split(r"(?<=[。！？])", answer) if s.strip()]
+    with torch.no_grad():
+        probs = nli(**tok([context] * len(sents), sents, return_tensors="pt", padding=True, truncation=True)).logits.softmax(-1)
+    return probs[:, 0].min().item()
+
+rows = []
+for d in data:
+    refused = bool(REFUSAL.search(d["answer"]))
+    rows.append({
+        "質問": d["q"], "回答": d["answer"][:18],
+        "正解を含む": any(norm(g) in norm(d["answer"]) for g in d["gold"]) if d["answerable"] else None,
+        "正しく断った": refused if not d["answerable"] else None,
+        "忠実性": None if refused else round(faithfulness(d["context"], d["answer"]), 2),
+    })
+pd.DataFrame(rows)
+```
+
+```python
+df = pd.DataFrame(rows)
+print(f"正解を含む割合 (答えられる質問): {df['正解を含む'].dropna().mean():.2f}")
+print(f"正しく断った割合 (答えられない質問): {df['正しく断った'].dropna().mean():.2f}")
+print(f"忠実性が 0.5 未満の回答 (資料にないことを述べている疑い): {(df['忠実性'].dropna() < 0.5).sum()} 件")
+```
+
+- 3 つの観点を分けて見る: 正しさ (正解を含むか)、忠実性 (資料に基づいているか)、棄却 (答えがないときに断れるか)。正しいが資料にない、資料どおりだが質問に答えていない、ということが起こる。
+- 最後の例は「3 台分」は正しいが「料金は無料」は資料にない。正解を含むかだけを見ていると、この種の付け足し (ハルシネーション) を見逃す。
+- NLI は数値の取り違えに弱い。2 つ目の例 (資料は「土日は 20 時まで」、回答は「15 時まで」) は誤りなのに忠実性が高く出ている。正解との照合と必ず併用する。
+- NLI による忠実性は LLM による判定より粗いが、速くて安く、結果が安定している。変更のたびに回す回帰テストに向く。
+- 最終的な品質の確認には、人手の評価か、LLM による評価 (この章の「RAG の回答の正しさを LLM に判定させる」、評価の章の LLM-as-a-judge) を併用する。
+
+## RAG の回答の正しさを LLM に判定させる {rag_eval_llm_judge}
+
+正解の文字列を含むかどうかの判定では、言い換えた正答を誤りにしてしまう。回答が正解と同じ内容かを、LLM に判定させたい。
+
+```python
+import numpy as np
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
+
+@torch.no_grad()
+def p_yes(prompt):
+    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
+
+def judge_correct(question, gold, answer):
+    return p_yes("次の質問に対する「回答」が、「正解」と同じ内容を答えているかを判定してください。表現が違っても内容が同じなら「はい」、"
+                 "内容が違う・答えていない場合は「いいえ」と、一語だけで答えてください。\n\n"
+                 f"質問: {question}\n正解: {gold}\n回答: {answer}")
+
+# (質問, 正解, システムの回答, 人が判定した正誤)
+data = [
+    ("富士山の標高は？", "3776 メートル", "富士山の標高は 3776 メートルです。", True),
+    ("富士山の標高は？", "3776 メートル", "3,776m です。", True),
+    ("富士山の標高は？", "3776 メートル", "約 3800 メートルです。", False),
+    ("日本で一番大きい湖は？", "琵琶湖", "滋賀県にある琵琶湖です。", True),
+    ("日本で一番大きい湖は？", "琵琶湖", "霞ヶ浦です。", False),
+    ("日本で一番大きい湖は？", "琵琶湖", "琵琶湖ではなく、霞ヶ浦です。", False),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "漱石です。", True),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "わかりません。", False),
+    ("『吾輩は猫である』の作者は？", "夏目漱石", "明治時代の小説家が書きました。", False),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "昭和 20 年です。", True),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "1945 年 8 月に終わりました。", True),
+    ("第二次世界大戦が終わったのは何年？", "1945 年", "1939 年に始まりました。", False),
+]
+import re, unicodedata
+norm = lambda s: re.sub(r"[\s、。,]", "", unicodedata.normalize("NFKC", s))
+rows = [{"回答": a, "人": h, "文字列照合": norm(g) in norm(a), "LLM (はいの確率)": round(judge_correct(q, g, a), 2)} for q, g, a, h in data]
+df = pd.DataFrame(rows)
+df["LLM"] = df["LLM (はいの確率)"] > 0.5
+df
+```
+
+```python
+print(f"人の判定との一致率: 文字列照合 {(df['文字列照合'] == df['人']).mean():.2f} / LLM {(df['LLM'] == df['人']).mean():.2f}")
+print("文字列照合だけが間違えた例:", df[(df["文字列照合"] != df["人"]) & (df["LLM"] == df["人"])]["回答"].tolist())
+print("LLM だけが間違えた例:", df[(df["LLM"] != df["人"]) & (df["文字列照合"] == df["人"])]["回答"].tolist())
+```
+
+```python
+# 同じ方法で、回答が質問に答えているか (関連性) と、資料に基づいているか (忠実性) も判定できる
+def judge_relevant(question, answer):
+    return p_yes("次の「回答」は、「質問」に対する答えになっていますか (内容が正しいかどうかは問いません)。答えになっていれば「はい」、"
+                 f"質問と関係のないことを述べていれば「いいえ」と、一語で答えてください。\n\n質問: {question}\n回答: {answer}")
+
+def judge_faithful(context, answer):
+    return p_yes("資料だけを根拠にして、次の「主張」が正しいと言えるかを判定してください。資料から正しいと分かるなら「はい」、"
+                 f"資料と食い違う、または資料からは分からない内容を含むなら「いいえ」と、一語で答えてください。\n\n資料: {context}\n主張: {answer}")
+
+context = "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。"
+q = "日曜日は何時まで開いていますか？"
+for a in ["日曜日は 20 時まで営業しています。", "定休日は月曜日です。", "20 時までで、ラストオーダーは 19 時半です。", "日曜日は 15 時までです。"]:
+    print(f"関連性 {judge_relevant(q, a):.2f} / 忠実性 {judge_faithful(context, a):.2f} | {a}")
+```
+
+- 文字列照合は、表記の違い (3,776m)、言い換え (昭和 20 年)、略した答え (漱石) を誤りにする。逆に、正解の語を含むだけの誤答 (「琵琶湖ではなく…」) を正答にする。LLM による判定はこの両方に対処できる。
+- 「はい」「いいえ」の確率を直接読むと、1 回の計算で済み、あいまいな出力の解釈も要らない。確率が 0.5 付近のものは人が確認する、という運用ができる。
+- 判定の質はプロンプトの書き方に大きく左右される。「すべて資料に書かれていますか」と聞くと正しい回答まで「いいえ」になり、「資料だけを根拠に正しいと言えるか」と聞くと安定した、というように、言い回しで結果が変わる。
+- 判定役の LLM も間違える。人の判定を付けた数十〜百件で一致率を確かめてから使う (ここの 12 件は動作確認用)。
+- 正しさ・関連性・忠実性を LLM で採点する考え方をまとめたライブラリに RAGAS がある。API のモデルを使う前提だが、指標の定義は参考になる。
+- 小さなモデルは判定の精度が限られる。最終的な評価には、より大きなモデル (評価の章の LLM-as-a-judge を参照) か人手を使う。
 
 ## RAG 全体を評価して設定を比べる {rag_eval_pipeline}
 
@@ -742,141 +880,3 @@ print(f"現在の正答率 {(df['category'] == '正答').mean():.2f} / 正解段
 - 「正解段落だけを渡した場合の正答率」は、検索をどれだけ改善しても超えられない上限。これが低いなら、検索より先にモデルやプロンプトを直す。
 - 正解段落の順位 (`gold_rank`) を見ると、「あと少しで入っていた」のか「まったく見当違い」なのかが分かる。前者は渡す件数を増やすかリランキングで拾える。
 - 文字列照合で「誤答」とされたものには、言い換えただけの正答が混ざる。分類の前に、誤答の一覧を目で見て確かめる。
-
-## RAG の回答を LLM を使わずに評価する {rag_eval_answer}
-
-RAG の回答が正しいか、資料に基づいているかを自動で確かめたい。評価のたびに LLM を呼ばずに、軽い方法で回したい。
-
-```python
-import re
-import unicodedata
-import pandas as pd
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-# 評価データ: 質問、検索された資料、システムの回答、正解 (answerable=False は「答えられない」が正解)
-data = [
-    {"q": "カレーはいくらですか？", "context": "看板メニューは特製ビーフカレー (950 円) です。大盛りは 100 円増しです。", "answer": "特製ビーフカレーは 950 円です。", "gold": ["950 円", "950円"], "answerable": True},
-    {"q": "日曜日は何時までですか？", "context": "営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。", "answer": "日曜日は 15 時までです。", "gold": ["20 時", "20時"], "answerable": True},
-    {"q": "クレジットカードは使えますか？", "context": "支払いは現金と QR コード決済に対応しています。クレジットカードは使えません。", "answer": "はい、主要なクレジットカードがご利用いただけます。", "gold": ["使えません", "使えない"], "answerable": True},
-    {"q": "テイクアウトはできますか？", "context": "駐車場は店舗の裏に 3 台分あります。", "answer": "わかりません。", "gold": [], "answerable": False},
-    {"q": "アレルギー対応はありますか？", "context": "看板メニューは特製ビーフカレー (950 円) です。", "answer": "はい、アレルギー対応メニューをご用意しています。", "gold": [], "answerable": False},
-    {"q": "駐車場は何台分ですか？", "context": "駐車場は店舗の裏に 3 台分あります。満車の場合は近隣のコインパーキングをご利用ください。", "answer": "店舗の裏に 3 台分あり、料金は無料です。", "gold": ["3 台", "3台"], "answerable": True},
-]
-
-norm = lambda s: re.sub(r"\s", "", unicodedata.normalize("NFKC", s))
-REFUSAL = re.compile(r"わかりません|分かりません|お答えできません|記載がありません|書かれていません")
-
-nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-tok = AutoTokenizer.from_pretrained(nli_name)
-nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
-
-def faithfulness(context, answer):
-    """回答の各文が資料から含意される確率の最小値 (1 文でも資料にないことを言っていれば低くなる)"""
-    sents = [s for s in re.split(r"(?<=[。！？])", answer) if s.strip()]
-    with torch.no_grad():
-        probs = nli(**tok([context] * len(sents), sents, return_tensors="pt", padding=True, truncation=True)).logits.softmax(-1)
-    return probs[:, 0].min().item()
-
-rows = []
-for d in data:
-    refused = bool(REFUSAL.search(d["answer"]))
-    rows.append({
-        "質問": d["q"], "回答": d["answer"][:18],
-        "正解を含む": any(norm(g) in norm(d["answer"]) for g in d["gold"]) if d["answerable"] else None,
-        "正しく断った": refused if not d["answerable"] else None,
-        "忠実性": None if refused else round(faithfulness(d["context"], d["answer"]), 2),
-    })
-pd.DataFrame(rows)
-```
-
-```python
-df = pd.DataFrame(rows)
-print(f"正解を含む割合 (答えられる質問): {df['正解を含む'].dropna().mean():.2f}")
-print(f"正しく断った割合 (答えられない質問): {df['正しく断った'].dropna().mean():.2f}")
-print(f"忠実性が 0.5 未満の回答 (資料にないことを述べている疑い): {(df['忠実性'].dropna() < 0.5).sum()} 件")
-```
-
-- 3 つの観点を分けて見る: 正しさ (正解を含むか)、忠実性 (資料に基づいているか)、棄却 (答えがないときに断れるか)。正しいが資料にない、資料どおりだが質問に答えていない、ということが起こる。
-- 最後の例は「3 台分」は正しいが「料金は無料」は資料にない。正解を含むかだけを見ていると、この種の付け足し (ハルシネーション) を見逃す。
-- NLI は数値の取り違えに弱い。2 つ目の例 (資料は「土日は 20 時まで」、回答は「15 時まで」) は誤りなのに忠実性が高く出ている。正解との照合と必ず併用する。
-- NLI による忠実性は LLM による判定より粗いが、速くて安く、結果が安定している。変更のたびに回す回帰テストに向く。
-- 最終的な品質の確認には、人手の評価か、LLM による評価 (この章の「RAG の回答の正しさを LLM に判定させる」、評価の章の LLM-as-a-judge) を併用する。
-
-## RAG の回答の正しさを LLM に判定させる {rag_eval_llm_judge}
-
-正解の文字列を含むかどうかの判定では、言い換えた正答を誤りにしてしまう。回答が正解と同じ内容かを、LLM に判定させたい。
-
-```python
-import numpy as np
-import pandas as pd
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
-YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
-
-@torch.no_grad()
-def p_yes(prompt):
-    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
-
-def judge_correct(question, gold, answer):
-    return p_yes("次の質問に対する「回答」が、「正解」と同じ内容を答えているかを判定してください。表現が違っても内容が同じなら「はい」、"
-                 "内容が違う・答えていない場合は「いいえ」と、一語だけで答えてください。\n\n"
-                 f"質問: {question}\n正解: {gold}\n回答: {answer}")
-
-# (質問, 正解, システムの回答, 人が判定した正誤)
-data = [
-    ("富士山の標高は？", "3776 メートル", "富士山の標高は 3776 メートルです。", True),
-    ("富士山の標高は？", "3776 メートル", "3,776m です。", True),
-    ("富士山の標高は？", "3776 メートル", "約 3800 メートルです。", False),
-    ("日本で一番大きい湖は？", "琵琶湖", "滋賀県にある琵琶湖です。", True),
-    ("日本で一番大きい湖は？", "琵琶湖", "霞ヶ浦です。", False),
-    ("日本で一番大きい湖は？", "琵琶湖", "琵琶湖ではなく、霞ヶ浦です。", False),
-    ("『吾輩は猫である』の作者は？", "夏目漱石", "漱石です。", True),
-    ("『吾輩は猫である』の作者は？", "夏目漱石", "わかりません。", False),
-    ("『吾輩は猫である』の作者は？", "夏目漱石", "明治時代の小説家が書きました。", False),
-    ("第二次世界大戦が終わったのは何年？", "1945 年", "昭和 20 年です。", True),
-    ("第二次世界大戦が終わったのは何年？", "1945 年", "1945 年 8 月に終わりました。", True),
-    ("第二次世界大戦が終わったのは何年？", "1945 年", "1939 年に始まりました。", False),
-]
-import re, unicodedata
-norm = lambda s: re.sub(r"[\s、。,]", "", unicodedata.normalize("NFKC", s))
-rows = [{"回答": a, "人": h, "文字列照合": norm(g) in norm(a), "LLM (はいの確率)": round(judge_correct(q, g, a), 2)} for q, g, a, h in data]
-df = pd.DataFrame(rows)
-df["LLM"] = df["LLM (はいの確率)"] > 0.5
-df
-```
-
-```python
-print(f"人の判定との一致率: 文字列照合 {(df['文字列照合'] == df['人']).mean():.2f} / LLM {(df['LLM'] == df['人']).mean():.2f}")
-print("文字列照合だけが間違えた例:", df[(df["文字列照合"] != df["人"]) & (df["LLM"] == df["人"])]["回答"].tolist())
-print("LLM だけが間違えた例:", df[(df["LLM"] != df["人"]) & (df["文字列照合"] == df["人"])]["回答"].tolist())
-```
-
-```python
-# 同じ方法で、回答が質問に答えているか (関連性) と、資料に基づいているか (忠実性) も判定できる
-def judge_relevant(question, answer):
-    return p_yes("次の「回答」は、「質問」に対する答えになっていますか (内容が正しいかどうかは問いません)。答えになっていれば「はい」、"
-                 f"質問と関係のないことを述べていれば「いいえ」と、一語で答えてください。\n\n質問: {question}\n回答: {answer}")
-
-def judge_faithful(context, answer):
-    return p_yes("資料だけを根拠にして、次の「主張」が正しいと言えるかを判定してください。資料から正しいと分かるなら「はい」、"
-                 f"資料と食い違う、または資料からは分からない内容を含むなら「いいえ」と、一語で答えてください。\n\n資料: {context}\n主張: {answer}")
-
-context = "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。"
-q = "日曜日は何時まで開いていますか？"
-for a in ["日曜日は 20 時まで営業しています。", "定休日は月曜日です。", "20 時までで、ラストオーダーは 19 時半です。", "日曜日は 15 時までです。"]:
-    print(f"関連性 {judge_relevant(q, a):.2f} / 忠実性 {judge_faithful(context, a):.2f} | {a}")
-```
-
-- 文字列照合は、表記の違い (3,776m)、言い換え (昭和 20 年)、略した答え (漱石) を誤りにする。逆に、正解の語を含むだけの誤答 (「琵琶湖ではなく…」) を正答にする。LLM による判定はこの両方に対処できる。
-- 「はい」「いいえ」の確率を直接読むと、1 回の計算で済み、あいまいな出力の解釈も要らない。確率が 0.5 付近のものは人が確認する、という運用ができる。
-- 判定の質はプロンプトの書き方に大きく左右される。「すべて資料に書かれていますか」と聞くと正しい回答まで「いいえ」になり、「資料だけを根拠に正しいと言えるか」と聞くと安定した、というように、言い回しで結果が変わる。
-- 判定役の LLM も間違える。人の判定を付けた数十〜百件で一致率を確かめてから使う (ここの 12 件は動作確認用)。
-- 正しさ・関連性・忠実性を LLM で採点する考え方をまとめたライブラリに RAGAS がある。API のモデルを使う前提だが、指標の定義は参考になる。
-- 小さなモデルは判定の精度が限られる。最終的な評価には、より大きなモデル (評価の章の LLM-as-a-judge を参照) か人手を使う。

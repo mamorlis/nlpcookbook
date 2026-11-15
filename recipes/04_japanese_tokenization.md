@@ -121,6 +121,122 @@ HTML(f"<p style='font-size:1.4em; line-height:2.2'>{ruby(text)}</p>")
 
 - 送り仮名ごとルビが付く (「無い」全体に「ない」)。漢字部分だけに付けたい場合は、表層と読みの末尾の共通ひらがなを削る。
 
+## 動詞・形容詞の活用型と活用形を調べる {conjugation}
+
+用言がどの活用形で出現しているかを知りたい (敬語・文体の分析、学習者作文の誤り分析など)。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from fugashi import Tagger
+
+tagger = Tagger()
+for w in tagger("食べられなかったので、早く帰りましょうと言われた。"):
+    f = w.feature
+    if f.cType and f.cType != "*":
+        print(w.surface, f.pos1, f.orthBase, f.cType, f.cForm, sep="\t")
+```
+
+```python
+# 応用: 文末が「です・ます」体かどうかの判定
+def is_polite(sentence):
+    lemmas = [w.feature.lemma for w in tagger(sentence) if w.feature.pos1 == "助動詞"]
+    return any(l in ("です", "ます") for l in lemmas)
+
+for s in ["明日は雨が降るでしょう。", "明日は雨が降るだろう。", "ご飯を食べました。", "ご飯を食べた。"]:
+    print(is_polite(s), s)
+```
+
+## トークンの文字位置 (オフセット) を取得する {token_offsets}
+
+各単語が元の文の何文字目から何文字目にあるかを知りたい (アノテーションとの対応付け、ハイライト表示など)。
+
+```python
+!pip install -q sudachipy sudachidict_core fugashi unidic-lite
+```
+
+```python
+from sudachipy import Dictionary, SplitMode
+
+tokenizer = Dictionary().create()
+text = "東京都の 小池知事が会見した。"
+for m in tokenizer.tokenize(text, SplitMode.C):
+    print(m.begin(), m.end(), repr(m.surface()), repr(text[m.begin():m.end()]))
+```
+
+```python
+# MeCab (fugashi) はオフセットを返さないので、表層形を前から順に探して復元する
+from fugashi import Tagger
+
+tagger = Tagger()
+
+def with_offsets(text):
+    pos, out = 0, []
+    for w in tagger(text):
+        start = text.index(w.surface, pos)
+        pos = start + len(w.surface)
+        out.append((start, pos, w.surface))
+    return out
+
+print(with_offsets(text))
+```
+
+- Sudachi は空白もトークンとして返すので、足し合わせると元の文に戻る。MeCab は空白を捨てる。
+- 正規化をかけてから解析するとオフセットがずれる。先に正規化するなら、正規化後の文字列を「原文」として扱う。
+
+## MeCab の N-best 解を得る {mecab_nbest}
+
+曖昧な文に対して、最も確からしい分割だけでなく 2 位以下の候補も見たい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from fugashi import Tagger
+
+tagger = Tagger("-Owakati")
+
+def nbest(text, n=20):
+    # 品詞だけが違う解は分かち書きでは同じになるので、重複を除く
+    return list(dict.fromkeys(s.strip() for s in tagger.nbest(text, n).split("\n")))
+
+for text in ["くるまでまつ", "ここではきものを脱ぐ"]:
+    for i, cand in enumerate(nbest(text), 1):
+        print(i, cand)
+```
+
+- 「車で待つ / 来るまで待つ」「ここで履物を / ここでは着物を」のような曖昧性の例を作るのにも使える。
+
+## 辞書にない未知語を見つける {unknown_words}
+
+コーパス中の未知語 (辞書に載っていない語) を洗い出して、辞書追加の候補にしたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+texts = ["ChatGPTでバズった投稿をリポストした。", "推し活でエモい写真をインスタにあげた。", "ググってもわからんかった。"]
+
+unk = Counter()
+for text in texts:
+    for w in tagger(text):
+        if w.is_unk:
+            unk[w.surface] += 1
+        print(f"{w.surface}{'*' if w.is_unk else ''}", end=" ")
+    print()
+print(unk.most_common())
+```
+
+- `*` が未知語。未知語でなくても誤って細かく分割されている語 (「バズった」「エモい」「インスタ」) は検出できない点に注意。
+
 ## IPA 辞書で MeCab を使う {mecab_ipadic}
 
 過去の研究や既存のコードと合わせるため、UniDic ではなく IPA 辞書で解析したい。
@@ -142,6 +258,65 @@ for w in tagger("国境の長いトンネルを抜けると雪国であった。
 
 - `GenericTagger` は素性に名前が付かないので添字でアクセスする。未知語は読みがなく素性が 7 個になる点に注意。
 - IPA 辞書は 2007 年で更新が止まっている。新しく始めるなら UniDic か Sudachi がおすすめ。
+
+## 古文を形態素解析する (中古和文 UniDic) {classical_japanese}
+
+源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
+
+```python
+!pip install -q fugashi unidic-lite
+!wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
+!find chuko -name "dicrc" | head -n 1
+```
+
+```python
+import glob, os
+from fugashi import GenericTagger, Tagger
+
+dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
+classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
+modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
+
+text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
+print("中古和文 UniDic:", " | ".join(w.surface for w in classical(text)))
+print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
+```
+
+```python
+# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
+for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
+    f = w.feature
+    print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
+```
+
+```python
+# 助動詞を取り出して、意味を調べる手がかりにする
+def auxiliaries(text):
+    return [(w.surface, w.feature[7], w.feature[5]) for w in classical(text) if w.feature[0] == "助動詞"]
+
+for s in ["竹取の翁といふ者ありけり。", "花の色は移りにけりないたづらに", "男もすなる日記といふものを、女もしてみむとてするなり。", "行く河の流れは絶えずして、しかももとの水にあらず。"]:
+    print(s, "→", auxiliaries(s))
+```
+
+```python
+# 現代語の辞書で解析すると、どこが違ってくるか
+import difflib
+
+s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに"
+a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
+print("中古和文:", a); print("現代語  :", b)
+print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
+# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
+s2 = "男もすなる日記といふものを"
+print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
+print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])
+```
+
+- 古文は、語彙も活用も仮名遣いも現代語と違う。現代語用の辞書では、助動詞 (けり、なり、む) や歴史的仮名遣い (いふ、やうやう) を正しく扱えない。
+- 国立国語研究所が、時代・文体別の UniDic を公開している。平安時代の仮名文学には「中古和文」、明治の文語文には「近代文語」、ほかに上代語、中世の説話や狂言、近世の洒落本向けなどがある。対象のテキストに合うものを選ぶ。
+- 辞書の形式は現代語の UniDic と共通なので、MeCab (fugashi) の辞書を差し替えるだけで使える。語彙素 (辞書の見出し) でまとめれば、表記のゆれをそろえて数えられる。
+- 活用形や助動詞の語彙素が分かるので、古文の学習支援 (品詞分解)、文体の計量的な分析、時代による語の変化の調査に使える。
+- 辞書と違う時代・文体のテキスト (漢文訓読体、和漢混交文、近世の口語) では精度が落ちる。解析結果を抜き取って確かめる。
 
 ## Sudachi で分割の粒度 (A/B/C) を切り替える {sudachi_split}
 
@@ -252,6 +427,41 @@ print(list(t.tokenize(text, wakati=True)))
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
 - 辞書を作らずに済ませるなら、次の「複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
+## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
+
+MeCab (UniDic / IPA 辞書)、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
+
+```python
+!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
+```
+
+```python
+from fugashi import Tagger, GenericTagger
+import ipadic
+from sudachipy import Dictionary, SplitMode
+from janome.tokenizer import Tokenizer
+
+unidic = Tagger()
+ipa = GenericTagger(ipadic.MECAB_ARGS)
+sudachi = Dictionary().create()
+janome = Tokenizer()
+
+tokenizers = {
+    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
+    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
+    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
+    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
+    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
+}
+
+for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
+    print(s)
+    for name, f in tokenizers.items():
+        print(f"  {name:13}", " | ".join(f(s)))
+```
+
+- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
+
 ## 連続する名詞をつなげて複合名詞を抽出する {compound_noun}
 
 「自然/言語/処理」のように分割された専門用語を、名詞の連続としてまとめて取り出したい。
@@ -347,70 +557,31 @@ print(sent_ngrams("名前はまだ無い。"))
 
 - NLTK にも `nltk.ngrams(tokens, n)` や `nltk.lm.preprocessing.pad_both_ends` がある。
 
-## 動詞・形容詞の活用型と活用形を調べる {conjugation}
+## 日本語の単語を読みの五十音順に並べる {sort_by_reading}
 
-用言がどの活用形で出現しているかを知りたい (敬語・文体の分析、学習者作文の誤り分析など)。
+漢字を含む単語リストを、文字コード順ではなく読みの五十音順でソートしたい (索引や用語集の作成)。
 
 ```python
-!pip install -q fugashi unidic-lite
+!pip install -q fugashi unidic-lite jaconv
 ```
 
 ```python
 from fugashi import Tagger
-
-tagger = Tagger()
-for w in tagger("食べられなかったので、早く帰りましょうと言われた。"):
-    f = w.feature
-    if f.cType and f.cType != "*":
-        print(w.surface, f.pos1, f.orthBase, f.cType, f.cForm, sep="\t")
-```
-
-```python
-# 応用: 文末が「です・ます」体かどうかの判定
-def is_polite(sentence):
-    lemmas = [w.feature.lemma for w in tagger(sentence) if w.feature.pos1 == "助動詞"]
-    return any(l in ("です", "ます") for l in lemmas)
-
-for s in ["明日は雨が降るでしょう。", "明日は雨が降るだろう。", "ご飯を食べました。", "ご飯を食べた。"]:
-    print(is_polite(s), s)
-```
-
-## トークンの文字位置 (オフセット) を取得する {token_offsets}
-
-各単語が元の文の何文字目から何文字目にあるかを知りたい (アノテーションとの対応付け、ハイライト表示など)。
-
-```python
-!pip install -q sudachipy sudachidict_core fugashi unidic-lite
-```
-
-```python
-from sudachipy import Dictionary, SplitMode
-
-tokenizer = Dictionary().create()
-text = "東京都の 小池知事が会見した。"
-for m in tokenizer.tokenize(text, SplitMode.C):
-    print(m.begin(), m.end(), repr(m.surface()), repr(text[m.begin():m.end()]))
-```
-
-```python
-# MeCab (fugashi) はオフセットを返さないので、表層形を前から順に探して復元する
-from fugashi import Tagger
+import jaconv
 
 tagger = Tagger()
 
-def with_offsets(text):
-    pos, out = 0, []
-    for w in tagger(text):
-        start = text.index(w.surface, pos)
-        pos = start + len(w.surface)
-        out.append((start, pos, w.surface))
-    return out
+def reading(word):
+    kana = "".join(w.feature.kana or w.surface for w in tagger(word))
+    return jaconv.kata2hira(kana)
 
-print(with_offsets(text))
+words = ["機械翻訳", "形態素解析", "言語モデル", "アテンション", "構文解析", "埋め込み", "要約", "分かち書き"]
+print(sorted(words))  # 文字コード順 (漢字が読みと無関係に並ぶ)
+for w in sorted(words, key=reading):
+    print(reading(w), w, sep="\t")
 ```
 
-- Sudachi は空白もトークンとして返すので、足し合わせると元の文に戻る。MeCab は空白を捨てる。
-- 正規化をかけてから解析するとオフセットがずれる。先に正規化するなら、正規化後の文字列を「原文」として扱う。
+- 固有名詞や専門用語は読みを誤ることがあるので、最終的には人手の確認が必要。
 
 ## DataFrame の大量テキストをまとめて分かち書きする {tokenize_pandas}
 
@@ -449,177 +620,6 @@ print((df["wakati"] == df["wakati2"]).all())
 ```
 
 - Colab の無料枠は 2 コアなので並列化の効果は 2 倍弱。MeCab は 1 コアでも毎秒数万文は処理できる。
-
-## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
-
-MeCab (UniDic / IPA 辞書)、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
-
-```python
-!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
-```
-
-```python
-from fugashi import Tagger, GenericTagger
-import ipadic
-from sudachipy import Dictionary, SplitMode
-from janome.tokenizer import Tokenizer
-
-unidic = Tagger()
-ipa = GenericTagger(ipadic.MECAB_ARGS)
-sudachi = Dictionary().create()
-janome = Tokenizer()
-
-tokenizers = {
-    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
-    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
-    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
-    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
-    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
-}
-
-for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
-    print(s)
-    for name, f in tokenizers.items():
-        print(f"  {name:13}", " | ".join(f(s)))
-```
-
-- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
-
-## MeCab の N-best 解を得る {mecab_nbest}
-
-曖昧な文に対して、最も確からしい分割だけでなく 2 位以下の候補も見たい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from fugashi import Tagger
-
-tagger = Tagger("-Owakati")
-
-def nbest(text, n=20):
-    # 品詞だけが違う解は分かち書きでは同じになるので、重複を除く
-    return list(dict.fromkeys(s.strip() for s in tagger.nbest(text, n).split("\n")))
-
-for text in ["くるまでまつ", "ここではきものを脱ぐ"]:
-    for i, cand in enumerate(nbest(text), 1):
-        print(i, cand)
-```
-
-- 「車で待つ / 来るまで待つ」「ここで履物を / ここでは着物を」のような曖昧性の例を作るのにも使える。
-
-## 辞書にない未知語を見つける {unknown_words}
-
-コーパス中の未知語 (辞書に載っていない語) を洗い出して、辞書追加の候補にしたい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from collections import Counter
-from fugashi import Tagger
-
-tagger = Tagger()
-texts = ["ChatGPTでバズった投稿をリポストした。", "推し活でエモい写真をインスタにあげた。", "ググってもわからんかった。"]
-
-unk = Counter()
-for text in texts:
-    for w in tagger(text):
-        if w.is_unk:
-            unk[w.surface] += 1
-        print(f"{w.surface}{'*' if w.is_unk else ''}", end=" ")
-    print()
-print(unk.most_common())
-```
-
-- `*` が未知語。未知語でなくても誤って細かく分割されている語 (「バズった」「エモい」「インスタ」) は検出できない点に注意。
-
-## 古文を形態素解析する (中古和文 UniDic) {classical_japanese}
-
-源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
-
-```python
-!pip install -q fugashi unidic-lite
-!wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
-!find chuko -name "dicrc" | head -n 1
-```
-
-```python
-import glob, os
-from fugashi import GenericTagger, Tagger
-
-dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
-classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
-modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
-
-text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
-print("中古和文 UniDic:", " | ".join(w.surface for w in classical(text)))
-print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
-```
-
-```python
-# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
-for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
-    f = w.feature
-    print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
-```
-
-```python
-# 助動詞を取り出して、意味を調べる手がかりにする
-def auxiliaries(text):
-    return [(w.surface, w.feature[7], w.feature[5]) for w in classical(text) if w.feature[0] == "助動詞"]
-
-for s in ["竹取の翁といふ者ありけり。", "花の色は移りにけりないたづらに", "男もすなる日記といふものを、女もしてみむとてするなり。", "行く河の流れは絶えずして、しかももとの水にあらず。"]:
-    print(s, "→", auxiliaries(s))
-```
-
-```python
-# 現代語の辞書で解析すると、どこが違ってくるか
-import difflib
-
-s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに"
-a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
-print("中古和文:", a); print("現代語  :", b)
-print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
-# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
-s2 = "男もすなる日記といふものを"
-print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
-print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])
-```
-
-- 古文は、語彙も活用も仮名遣いも現代語と違う。現代語用の辞書では、助動詞 (けり、なり、む) や歴史的仮名遣い (いふ、やうやう) を正しく扱えない。
-- 国立国語研究所が、時代・文体別の UniDic を公開している。平安時代の仮名文学には「中古和文」、明治の文語文には「近代文語」、ほかに上代語、中世の説話や狂言、近世の洒落本向けなどがある。対象のテキストに合うものを選ぶ。
-- 辞書の形式は現代語の UniDic と共通なので、MeCab (fugashi) の辞書を差し替えるだけで使える。語彙素 (辞書の見出し) でまとめれば、表記のゆれをそろえて数えられる。
-- 活用形や助動詞の語彙素が分かるので、古文の学習支援 (品詞分解)、文体の計量的な分析、時代による語の変化の調査に使える。
-- 辞書と違う時代・文体のテキスト (漢文訓読体、和漢混交文、近世の口語) では精度が落ちる。解析結果を抜き取って確かめる。
-
-## 日本語の単語を読みの五十音順に並べる {sort_by_reading}
-
-漢字を含む単語リストを、文字コード順ではなく読みの五十音順でソートしたい (索引や用語集の作成)。
-
-```python
-!pip install -q fugashi unidic-lite jaconv
-```
-
-```python
-from fugashi import Tagger
-import jaconv
-
-tagger = Tagger()
-
-def reading(word):
-    kana = "".join(w.feature.kana or w.surface for w in tagger(word))
-    return jaconv.kata2hira(kana)
-
-words = ["機械翻訳", "形態素解析", "言語モデル", "アテンション", "構文解析", "埋め込み", "要約", "分かち書き"]
-print(sorted(words))  # 文字コード順 (漢字が読みと無関係に並ぶ)
-for w in sorted(words, key=reading):
-    print(reading(w), w, sep="\t")
-```
-
-- 固有名詞や専門用語は読みを誤ることがあるので、最終的には人手の確認が必要。
 
 ## 日本語の文を句点で分割する (括弧内は分割しない) {sentence_split_ja}
 
