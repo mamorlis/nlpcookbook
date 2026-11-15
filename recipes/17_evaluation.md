@@ -1,6 +1,6 @@
 # 評価指標と統計的検定
 
-分類・抽出・検索・生成の出力を数値で評価し、その差が偶然でないかを確かめる。翻訳・要約・質問応答に固有の指標は、それぞれの章を参照。
+分類・抽出・生成の出力を数値で評価し、その差が偶然でないかを確かめる。LLM による評価も扱う。翻訳・要約・質問応答・検索に固有の指標は、それぞれの章を参照。
 
 ## BERTScore で意味的な近さを評価する {bertscore}
 
@@ -324,54 +324,6 @@ print("Spearman の 95% 信頼区間:", np.percentile(boots, [2.5, 97.5]).round(
 - 同点の多い離散的な評価 (1〜5 の評点) には Kendall の τ がよく使われる。
 - システム単位の相関は、システム数が少ないと不安定。数個のシステムでの高い相関は当てにならない。
 
-## 検索・ランキングを評価する (Recall@k、MRR、nDCG) {ranking_metrics}
-
-検索システムやリランカーが、正解の文書をどれくらい上位に出せているかを測りたい。
-
-```python
-import numpy as np
-
-def recall_at_k(ranked, relevant, k):
-    return len(set(ranked[:k]) & relevant) / len(relevant)
-
-def reciprocal_rank(ranked, relevant):
-    for i, doc in enumerate(ranked, 1):
-        if doc in relevant:
-            return 1 / i
-    return 0.0
-
-def average_precision(ranked, relevant):
-    hits, total = 0, 0.0
-    for i, doc in enumerate(ranked, 1):
-        if doc in relevant:
-            hits += 1
-            total += hits / i            # 正解が出た位置での適合率
-    return total / len(relevant)
-
-def ndcg_at_k(ranked, gains, k):
-    """gains: {文書 ID: 関連度 (0, 1, 2, ...)}。上位ほど大きい重みで関連度を足し、理想的な順位での値で割る"""
-    dcg = sum(gains.get(doc, 0) / np.log2(i + 1) for i, doc in enumerate(ranked[:k], 1))
-    ideal = sum(g / np.log2(i + 1) for i, g in enumerate(sorted(gains.values(), reverse=True)[:k], 1))
-    return float(dcg / ideal) if ideal else 0.0
-
-# クエリごとの (システムの出力順位, 関連度付きの正解)
-runs = {
-    "q1": (["d3", "d1", "d7", "d2", "d9"], {"d1": 2, "d2": 1}),
-    "q2": (["d5", "d4", "d8", "d6", "d1"], {"d5": 2}),
-    "q3": (["d2", "d9", "d4", "d3", "d6"], {"d7": 2, "d6": 1}),
-}
-rows = []
-for q, (ranked, gains) in runs.items():
-    rel = set(gains)
-    rows.append([recall_at_k(ranked, rel, 1), recall_at_k(ranked, rel, 5), reciprocal_rank(ranked, rel), average_precision(ranked, rel), ndcg_at_k(ranked, gains, 5)])
-    print(q, [round(x, 3) for x in rows[-1]])
-print("平均: Recall@1 {:.3f}  Recall@5 {:.3f}  MRR {:.3f}  MAP {:.3f}  nDCG@5 {:.3f}".format(*np.mean(rows, axis=0)))
-```
-
-- RAG の検索段階なら Recall@k (正解が上位 k 件に入っているか)、最終的な順位付けなら MRR や nDCG を見る。
-- MRR は最初の正解の順位だけを見る。正解が複数あって段階的な関連度が付いているなら nDCG。
-- 標準的な実装は `pytrec_eval` や `ranx`。論文で報告するなら、それらを使うのが安全。
-
 ## 生成テキストの多様性と繰り返しを測る (distinct-n) {distinct_n}
 
 対話システムや生成モデルの出力が、単調で似た文ばかりになっていないか、同じ語句を繰り返していないかを数値化したい。
@@ -468,3 +420,157 @@ plt.xlabel("confidence"); plt.ylabel("accuracy"); plt.legend(); plt.show()
 - 対角線より下は自信過剰 (確信度のほうが正解率より高い)、上は自信不足。この例では、較正した SVM のほうが自信不足気味で ECE が大きい。較正の良し悪しはモデルとデータの組み合わせ次第なので、思い込みで決めずに測る。
 - ニューラルモデルの較正には、検証データでソフトマックスの温度を 1 つだけ調整する temperature scaling が簡単で効果的。
 - 正解率が同じでも、較正の良し悪しは違いうる。確信度でしきい値を設けて人手に回すような運用では、較正が重要になる。
+
+## CPU で動く LLM に生成文を採点させる (LLM-as-a-judge) {llm_judge_local}
+
+要約や応答の品質を LLM に採点させたい。API を使わずに手元の小さなモデルで行い、その採点がどれくらい信用できるかも確かめたい。
+
+```python
+import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (CPU で 1 件あたり 1〜2 秒)
+tokenizer = AutoTokenizer.from_pretrained(name)
+llm = AutoModelForCausalLM.from_pretrained(name).eval()
+DIGITS = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, 6)]
+
+@torch.no_grad()
+def next_token_probs(prompt, token_ids):
+    text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    return llm(ids).logits[0, -1, token_ids].softmax(-1)
+
+RUBRIC = ("あなたは要約の評価者です。「元の文章」と「要約」を読み、要約の忠実性を 1〜5 の整数で採点してください。\n"
+          "5: 要約の内容はすべて元の文章に書かれている\n3: おおむね正しいが、元の文章にない情報や不正確な点が少しある\n1: 元の文章と矛盾する、または無関係である\n"
+          "数字だけを答えてください。")
+
+def score(source, summary):
+    """1〜5 の各数字が次に出る確率から、期待値をスコアとする (生成させるより細かく、安定した値になる)"""
+    probs = next_token_probs(f"{RUBRIC}\n\n# 元の文章\n{source}\n\n# 要約\n{summary}", DIGITS)
+    return float((probs * torch.arange(1, 6)).sum())
+
+source = ("市は 14 日、来年 4 月から市内の全小中学校で給食費を無償化すると発表した。対象は約 1 万 2 千人で、年間の費用は約 6 億円を見込む。"
+          "財源には、ふるさと納税の寄付金と、公共施設の統廃合で生じる削減分を充てる。一方、市議会の一部からは「恒久的な財源の裏付けが弱い」との指摘が出ている。")
+items = [  # (要約, 人間が付けた忠実性の評点)
+    ("市は来年 4 月から小中学校の給食費を無償化する。費用は年間約 6 億円を見込む。", 5),
+    ("市は給食費の無償化を発表した。市議会の一部からは財源を不安視する声がある。", 5),
+    ("市は来年 4 月から給食費を無償化する。対象は約 1 万 2 千人である。", 5),
+    ("市は給食費を無償化する。財源は国の補助金でまかなう。", 2),
+    ("市は来年 4 月から給食費を無償化する。保護者の 9 割が賛成している。", 3),
+    ("市は給食費の無償化を発表した。市議会は全会一致で賛成した。", 1),
+    ("市は来年 4 月から給食費を値上げすると発表した。", 1),
+    ("市は高校の授業料を無償化する。費用は年間約 60 億円である。", 1),
+    ("県は来月から新しい図書館を開館する。", 1),
+    ("市は給食費を無償化する。費用は約 6 億円で、寄付金などを充てる。", 5),
+]
+scores = [score(source, s) for s, _ in items]
+for (s, human), llm_score in zip(items, scores):
+    print(f"人 {human} / LLM {llm_score:.2f} | {s}")
+```
+
+```python
+# 採点そのものを検証する: 人間の評点との相関
+from scipy.stats import pearsonr, spearmanr
+
+human = [h for _, h in items]
+print(f"Spearman = {spearmanr(human, scores).statistic:.3f}  Pearson = {pearsonr(human, scores).statistic:.3f}")
+print("良い要約 (人 4 以上) の平均:", round(np.mean([s for s, h in zip(scores, human) if h >= 4]), 2),
+      "/ 悪い要約 (人 2 以下) の平均:", round(np.mean([s for s, h in zip(scores, human) if h <= 2]), 2))
+```
+
+```python
+# 点数ではなく「はい / いいえ」で答えられる問いにして、「はい」の確率をスコアにする
+YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
+
+def p_faithful(source, summary):
+    prompt = ("資料だけを根拠にして、次の「主張」が正しいと言えるかを判定してください。資料から正しいと分かるなら「はい」、"
+              f"資料と食い違う、または資料からは分からない内容を含むなら「いいえ」と、一語で答えてください。\n\n資料: {source}\n主張: {summary}")
+    return float(next_token_probs(prompt, YES_NO)[0])
+
+yes_scores = [p_faithful(source, s) for s, _ in items]
+for (s, h), y in zip(items, yes_scores):
+    print(f"人 {h} / はいの確率 {y:.2f} | {s}")
+print(f"Spearman = {spearmanr(human, yes_scores).statistic:.3f}")
+```
+
+```python
+# 2 つの出力のどちらが良いかを選ばせる (一対比較)。提示順を入れ替えて 2 回聞き、順序による偏りを打ち消す
+AB = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["A", "B"]]
+
+def prefer_first(source, x, y):
+    prompt = ("次の「元の文章」に対する 2 つの要約 A と B のうち、元の文章の内容をより正確に伝えているほうを選び、A か B の 1 文字だけで答えてください。\n\n"
+              f"# 元の文章\n{source}\n\n# 要約 A\n{x}\n\n# 要約 B\n{y}")
+    return float(next_token_probs(prompt, AB)[0])
+
+def compare(source, x, y):
+    forward, backward = prefer_first(source, x, y), 1 - prefer_first(source, y, x)
+    return (forward + backward) / 2, forward, backward
+
+pairs = [(0, 3), (1, 5), (2, 4), (9, 7), (0, 2)]      # (良いはずの要約, 比べる相手) の番号
+for i, j in pairs:
+    p, fwd, bwd = compare(source, items[i][0], items[j][0])
+    print(f"前者が良い確率 {p:.2f} (前者を A に置く {fwd:.2f} / B に置く {bwd:.2f}) | 人の評点 {items[i][1]} vs {items[j][1]}")
+```
+
+- 採点基準 (ルーブリック) は、各点数が何を意味するかまで具体的に書く。観点 (忠実性、流暢性、網羅性) ごとに別々に採点させる。
+- 数字を生成させる代わりに、数字のトークンの確率から期待値をとると、同点が減り、細かい差が見える。
+- ただし、この 3B のモデルは 1〜5 の採点ではほぼすべてに「3」を付けてしまい、人の評点とほとんど相関しない。小さなモデルでは、段階評価より「はい / いいえ」で答えられる問いに分解するほうがはるかに安定する (同じ 10 件で、人の評点との相関が大きく上がる)。
+- LLM の評価には偏りがある: 提示順 (先に出たほうを選びやすいなど)、長い出力を好む、自分と同系統のモデルの出力に甘い。一対比較では必ず順序を入れ替える。
+- 人手の評点との相関を確かめていない LLM 評価は、評価として使ってはいけない。ここの 10 件は動作確認用で、実際には 100 件以上で確かめる。
+- 小さなモデルは、数値の誤りや細かい矛盾を見逃しやすい。重要な評価には、より大きなモデル (次項の API を使う方法) や、NLI・文字列照合などの機械的な検査を併用する。
+
+## LLM に生成文の品質を採点させる (LLM-as-a-judge) {llm_judge key norun}
+
+要約や翻訳、対話応答の品質を、参照訳との一致ではなく、LLM に評価基準を与えて採点させたい。
+
+```python
+!pip install -q anthropic pydantic scipy
+```
+
+```python
+from typing import Literal
+import anthropic
+from google.colab import userdata
+from pydantic import BaseModel
+
+client = anthropic.Anthropic(api_key=userdata.get("ANTHROPIC_API_KEY"))
+
+class Judgment(BaseModel):
+    reasoning: str                    # 先に根拠を書かせてから点数を付けさせる
+    faithfulness: Literal[1, 2, 3, 4, 5]
+    fluency: Literal[1, 2, 3, 4, 5]
+
+RUBRIC = """あなたは要約の評価者です。元の文章と要約を読み、次の 2 つの観点を 1〜5 の整数で採点してください。
+- faithfulness (忠実性): 要約の内容が元の文章と矛盾せず、書かれていない情報を含まないか。5 = 完全に忠実、1 = 重大な誤りがある。
+- fluency (流暢性): 日本語として自然で読みやすいか。5 = 完全に自然、1 = 意味が取れない。
+要約が短いことや情報が少ないことは減点しないでください。"""
+
+def judge(source, summary):
+    r = client.messages.parse(
+        model="claude-opus-5-5", max_tokens=16000, system=RUBRIC,
+        messages=[{"role": "user", "content": f"# 元の文章\n{source}\n\n# 要約\n{summary}"}],
+        output_format=Judgment,
+    )
+    return r.parsed_output
+
+source = "同社の 2023 年度の売上高は前年比 5% 増の 120 億円だった。一方、原材料費の高騰により営業利益は 8 億円と、前年の 10 億円から減少した。"
+for summary in ["売上高は 5% 増の 120 億円だったが、営業利益は 8 億円に減少した。", "売上高、営業利益ともに前年を上回り、好調だった。",
+                "売上高 120 億円は 5% 増で営業利益が 8 億円の減少を原材料費だった。"]:
+    j = judge(source, summary)
+    print(f"忠実性 {j.faithfulness} / 流暢性 {j.fluency} | {summary}\n   {j.reasoning[:80]}")
+```
+
+```python
+# 評価器そのものを検証する: 人手の評価との相関を必ず確認する
+from scipy.stats import spearmanr
+
+human = [5, 1, 3]                      # 人間が付けた忠実性スコア (実際には 100 件以上で確認する)
+llm = [5, 1, 4]                        # judge() の faithfulness
+print("Spearman:", round(spearmanr(human, llm).statistic, 3))
+```
+
+- 採点基準 (ルーブリック) を具体的に書く。観点ごとに分けて採点させ、点数の前に根拠を書かせると安定する。
+- LLM の評価には偏りがある (長い出力を好む、自分と同系統のモデルの出力に甘い、提示順に影響される)。2 つの出力を比べさせる場合は、順序を入れ替えて 2 回評価する。
+- 人手評価との一致を確認していない LLM 評価は、評価として使ってはいけない。
+- 評価されるモデルと評価するモデルは、できれば別系統のものにする。
