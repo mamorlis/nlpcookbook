@@ -93,6 +93,100 @@ print("主辞句:", [(s.text, s.label_) for s in ginza.bunsetu_phrase_spans(doc)
 
 - 文節 = 自立語 (+ 付属語)。UD の単語単位の係り受けより粗いが、日本語の直感に合いやすく、係り受けの交差も少ない。
 
+## CaboCha で文節単位の係り受けを解析する {cabocha}
+
+日本語の係り受け解析器として長く使われてきた CaboCha で、文を文節に区切り、どの文節がどの文節に係るかを解析したい。前のレシピの GiNZA の結果とも比べる。
+
+```python
+# Colab で 5 分ほど (CRF++ と CaboCha をソースからビルドする。CaboCha の make の中で、IPA・JUMAN・UniDic 用のモデルファイルも作られる)
+!apt-get install -y -q automake mecab libmecab-dev mecab-ipadic-utf8 > /dev/null
+!git clone -q --depth 1 https://github.com/taku910/crfpp
+!git clone -q --depth 1 https://github.com/taku910/cabocha
+# CRF++: git 版には winmain.h がないので、それを読み込む行を消してからビルドする
+!cd crfpp && sed -i '/winmain.h/d' crf_learn.cpp crf_test.cpp && ./configure -q > /dev/null 2>&1 && make -j4 > /dev/null 2>&1 && make install > /dev/null && ldconfig
+# CaboCha: git 版にない install-sh などを automake から補い、文字コードを UTF-8 にしてビルドする
+!cd cabocha && cp /usr/share/automake-*/install-sh /usr/share/automake-*/missing /usr/share/automake-*/depcomp . && ./configure -q --with-charset=UTF8 --enable-utf8-only > /dev/null 2>&1 && make -j4 > /dev/null 2>&1 && make install > /dev/null && ldconfig
+# Python バインディング: 付属の CaboCha.py は Python 3.12 で廃止された imp を使うので、そこを通らないようにしてから入れる
+!sed -i 's/(2,6,0)/(9,0,0)/' cabocha/python/CaboCha.py && pip install -q ./cabocha/python
+!pip install -q ginza ja_ginza
+!cabocha --version
+```
+
+```python
+# 木の表示 (-f0、既定)。各文節の右の D から線をたどった先が係り先
+!echo "太郎は図書館で花子に借りた本を昨日返した。" | cabocha -f0
+# 格子形式 (-f1)。「* 文節番号 係り先D 主辞/機能語 スコア」の行の下に、MeCab (IPA 辞書) の解析結果が続く
+!echo "太郎は図書館で花子に借りた本を昨日返した。" | cabocha -f1
+```
+
+```python
+import CaboCha
+
+parser = CaboCha.Parser()  # コマンドと同じオプションを文字列で渡せる (例: CaboCha.Parser("-n 1"))
+
+def cabocha_chunks(text):
+    """文節ごとに (文節の文字列, 係り先の文節番号, 主辞の形態素, 機能語の形態素) を返す。係り先 -1 は文末"""
+    tree = parser.parse(text)
+    out = []
+    for i in range(tree.chunk_size()):
+        c = tree.chunk(i)
+        toks = [tree.token(c.token_pos + j) for j in range(c.token_size)]
+        out.append(("".join(t.surface for t in toks), c.link,
+                    toks[c.head_pos].surface, toks[c.func_pos].surface))
+    return out
+
+text = "太郎は図書館で花子に借りた本を昨日返した。"
+chunks = cabocha_chunks(text)
+for i, (surface, link, head, func) in enumerate(chunks):
+    target = chunks[link][0] if link >= 0 else "(文末)"
+    # 「昨日」のように付属語がない文節では、機能語の位置 (func_pos) が主辞と同じになる
+    print(f"{i} {surface:　<6} → {target:　<6} 主辞: {head}  機能語: {func}")
+```
+
+```python
+import ginza
+import spacy
+
+nlp = spacy.load("ja_ginza")
+
+def ginza_pairs(text):
+    """前のレシピと同じ方法で、GiNZA の文節と係り先の組を返す"""
+    pairs = []
+    for span in ginza.bunsetu_spans(nlp(text)):
+        head = ginza.bunsetu_span(span.root.head)
+        pairs.append((span.text, "(文末)" if head.start == span.start else head.text))
+    return pairs
+
+def cabocha_pairs(text):
+    chunks = cabocha_chunks(text)
+    return [(s, chunks[link][0] if link >= 0 else "(文末)") for s, link, _, _ in chunks]
+
+for t in [text, "彼は赤い帽子をかぶった女の子に道を教えてあげた。", "吾輩は猫である。名前はまだ無い。"]:
+    print(t)
+    for name, pairs in [("CaboCha", cabocha_pairs(t)), ("GiNZA", ginza_pairs(t))]:
+        print(f"  {name:8}", "  ".join(f"{s}→{h}" for s, h in pairs))
+```
+
+```python
+# 固有表現 (-n 1)。IREX の定義の固有表現が、木の表示では <PERSON> などのタグで、形態素ごとには IOB2 形式のタグで得られる
+!echo "昨日、山田太郎さんは東京大学でトヨタ自動車の社長と会った。" | cabocha -n 1
+ne_parser = CaboCha.Parser("-n 1")  # parse の結果はパーザの中にあるので、パーザを変数に入れておく
+ne_tree = ne_parser.parse("昨日、山田太郎さんは東京大学でトヨタ自動車の社長と会った。")
+print([(ne_tree.token(i).surface, ne_tree.token(i).ne) for i in range(ne_tree.token_size())
+       if ne_tree.token(i).ne != "O"])
+```
+
+- CaboCha は工藤拓 (奈良先端大・松本研究室) による、Support Vector Machines (SVM) に基づく日本語係り受け解析器。方式は論文「チャンキングの段階適用による日本語係り受け解析」(Cascaded Chunking、工藤・松本 2002)。付属のモデルでは、係り受けは 2 次の多項式カーネルの SVM、文節の区切りと固有表現は CRF++ の CRF で解析する (CRF++ が必要なのはこのため)。最後のリリースは 0.69 (2015 年 1 月)。GitHub (taku910/cabocha) では、2015 年 1 月より後にソースは変わっておらず、説明のページ (index.html など) が追加・修正されただけ。
+- 形態素解析には MeCab を使い、品詞体系と辞書 (IPA・JUMAN・UniDic) に合ったモデルが必要。ここでは既定の IPA 辞書 (mecab-ipadic-utf8) と IPA モデルを使う。ドキュメントによると、IPA モデルは京都大学テキストコーパス 4.0 の形態素の部分を MeCab で自動解析し直したものから学習していて、コーパスから直接学習した JUMAN モデルより精度が落ちる。
+- 付属のモデルは毎日新聞の記事から学習されていて、そのまま使えるのは研究目的・個人利用に限られる (プログラム自体は LGPL か BSD ライセンス)。自分のコーパスで `cabocha-learn` を使って学習し直したモデルにはこの制限はない。
+- configure の文字コードの既定は EUC-JP で、モデル (`/usr/local/lib/cabocha/model/*.model`) は make の中でテキスト形式からその文字コードで作られる。ここではドキュメントに従い、UTF-8 の IPA 辞書に合わせて `--with-charset=UTF8 --enable-utf8-only` を指定した。使うモデルや既定の設定は `/usr/local/etc/cabocharc` に書かれる。
+- 最初の文では「太郎は」の係り先だけが違い、CaboCha は文末の「返した。」、GiNZA は「借りた」になった。主題の「は」は連体修飾節 (ここでは「借りた本」の「借りた」) の中には入りにくいので、文末の述語に係るとする CaboCha の解析が普通の基準に合う。「借りた」の動作主も太郎であることは、係り受けではなく格解析や省略解析で扱う問題になる (この章の「Juman++ と KNP で係り受けと格関係を解析する」を参照)。
+- 文節の単位も少し違う。「教えてあげた。」は CaboCha では 1 文節だが、GiNZA では「教えて」と「あげた。」の 2 文節になり、ほかの文節は「あげた。」や「教えて」に係る。GiNZA は単語単位の係り受け (UD) を解析してから文節をまとめていて、補助動詞の「あげる」が述語の中心 (ROOT) になるため。
+- CaboCha は渡された文字列 (1 行) を 1 文として扱う。「吾輩は猫である。名前はまだ無い。」をそのまま渡すと、「猫である。」が次の文の「無い。」に係ってしまう。文が複数あるときは、先に文に分割してから 1 文ずつ渡す。
+- Python バインディングがビルドできない環境では、`subprocess.run(["cabocha", "-f1"], input=text, ...)` の出力を読めばよい。`*` で始まる行が文節の区切りで、2 列目が文節番号、3 列目が係り先 (末尾の D を除く) になる。
+- Python バインディングの `parse` が返す木はパーザの中のデータを指す。パーザを変数に入れずに `CaboCha.Parser("-n 1").parse(...)` と書くと、パーザが消えた後に木を読むことになり、カーネルが落ちた。
+- 格子形式の最後の数値は係りやすさのスコアで、ドキュメントでは大きいほど係りやすいとされるが、実際の精度との関係は調べられていないとも書かれている。最初の文では、文末の「返した。」に係る「太郎は」「本を」「昨日」のスコアがどれも -1.474801 で、正しい係り先なのに負になった。文末の文節への係りは同じ値になることがあるので、スコアを確信度として使うのは避ける。
+
 ## KWJA で文節・基本句の係り受けと並列構造を解析する {kwja_dependency}
 
 京大コーパスの基準 (KNP 形式) で、文節単位・基本句単位の係り受けを得たい。並列や同格の関係も区別したい。
@@ -130,6 +224,112 @@ print([(m.text, m.reading, m.lemma, m.pos, m.subpos) for m in doc.morphemes][:6]
 - 解析結果は KNP 形式。`rhoknp` で文 → 文節 → 基本句 → 形態素の階層をたどれる。
 - 形態素は JUMAN の品詞体系・辞書に基づく。MeCab + UniDic とは単語の区切りも品詞名も違う点に注意。
 - インストール時に Transformers のバージョンが入れ替わることがある。import でエラーになったらランタイムを再起動する。
+
+## Juman++ と KNP で係り受けと格関係を解析する {knp}
+
+京大の構文・格解析システム KNP で、文節・基本句の係り受けに加えて、述語ごとの格関係 (誰が・何を・誰に) を得たい。KNP は形態素解析器 Juman++ の出力を入力にとるので、両方をソースからビルドする。
+
+```python
+# Colab で 10〜20 分ほどかかる (KNP 辞書 2.8GB のダウンロードと展開、Juman++ と KNP のビルド。ダウンロード速度で変わる)
+!apt-get install -y -q libtool > /dev/null
+!wget -q https://github.com/ku-nlp/jumanpp/releases/download/v2.0.0-rc4/jumanpp-2.0.0-rc4.tar.xz
+!tar xf jumanpp-2.0.0-rc4.tar.xz && mkdir -p jumanpp-2.0.0-rc4/bld
+# テストなどを省き、jumanpp 本体だけをビルドしてインストールする
+!cd jumanpp-2.0.0-rc4/bld && cmake .. -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1 && make -j2 jumanpp_v2 > /dev/null 2>&1 && cmake --install . > /dev/null
+!git clone -q --depth 1 https://github.com/ku-nlp/knp
+!wget -q http://lotus.kuee.kyoto-u.ac.jp/nl-resource/knp/dict/latest/knp-dict-latest-bin.zip
+!unzip -q knp-dict-latest-bin.zip && cp -ars `pwd`/dict-bin/* knp/dict
+!cd knp && ./autogen.sh > /dev/null 2>&1 && ./configure > /dev/null && make -j2 > /dev/null 2>&1 && make install > /dev/null 2>&1
+# 辞書はインストール先にコピーされるので、ダウンロードと展開したもの (約 10GB) は消してよい
+!rm -rf knp-dict-latest-bin.zip dict-bin jumanpp-2.0.0-rc4.tar.xz
+!pip install -q rhoknp kwja
+!jumanpp -v && du -sh /usr/local/share/knp/dict
+!echo "太郎は花子に本を渡した。" | jumanpp | knp  # 既定は木構造の表示
+```
+
+```python
+from rhoknp import KNP, Jumanpp
+
+# executable="/path/to/jumanpp" のようにバイナリの場所も指定できる。
+# rhoknp は起動確認で空行を送るが、Juman++ rc4 は先頭が空行だと異常終了することがあり、そのとき警告が出るので、確認は省く
+jumanpp = Jumanpp(skip_sanity_check=True)
+knp = KNP(jumanpp=jumanpp)      # KNP(executable=...) も同様。既定のオプションは ["-tab"] (KNP 形式で出力)
+sent = knp.apply_to_sentence("太郎と花子は、昨日京都で買った抹茶とお菓子を先生に渡した。")
+
+DEP = {"D": "係り受け", "P": "並列", "A": "同格", "I": "部分並列"}
+print("文節:")
+for p in sent.phrases:
+    print(f"  {p.text:　<8} → {p.parent.text if p.parent else '(文末)':　<8} {DEP[p.dep_type.value]}")
+print([(m.text, m.reading, m.lemma, m.pos, m.subpos) for m in sent.morphemes][:6])
+```
+
+```python
+# 格解析の結果: 述語の基本句ごとに、格フレームの ID と、各格に割り当てられた項
+ARG = {"C": "表層の形から格が決まる (格助詞・時間表現など)", "N": "格が表層に現れない (提題・連体修飾など)",
+       "O": "省略", "E": "外界"}
+
+def arg_text(a):
+    """項の表記 (文中の基本句なら その表記、「不特定:人」のような外界の項なら その名前)"""
+    return a.base_phrase.text if hasattr(a, "base_phrase") else str(a)
+
+for pas in sent.pas_list:
+    print(f"{pas.predicate.text}  (格フレーム {pas.predicate.cfid})")
+    print("  素性:", pas.predicate.base_phrase.features["格解析結果"])
+    for case, args in pas.get_all_arguments(relax=False).items():
+        for a in args:
+            print(f"  {case}格: {arg_text(a):　<6} {a.type.value}: {ARG.get(a.type.value, '')}")
+
+# 基本句の素性 (feature)。KNP が付けた情報は辞書として取り出せる
+for bp in sent.base_phrases:
+    keys = [k for k in ("用言", "体言", "係", "解析格", "時制", "SM-人") if k in bp.features]
+    print(f"  {bp.text:　<6}", {k: bp.features[k] for k in keys})
+
+import time
+t = time.time()
+for _ in range(20):
+    knp.apply_to_sentence(sent.text)
+print(f"1 文あたり {(time.time() - t) / 20 * 1000:.0f} ミリ秒 (Juman++ と KNP の合計)")
+```
+
+```python
+# 同じ文を KWJA (前のレシピ) で解析して比べる。出力はどちらも KNP 形式なので rhoknp で同じように扱える
+import subprocess
+from rhoknp import Document
+
+out = subprocess.run(["kwja", "--text", sent.text, "--tasks", "char,word", "--model-size", "base"],
+                     capture_output=True, text=True, check=True).stdout
+kw = Document.from_knp(out).sentences[0]
+
+# 文節の区切りが両者で同じであることを前提に、文節を順に並べて比べる
+assert [p.text for p in sent.phrases] == [q.text for q in kw.phrases]
+print(f"{'文節':　<8} {'KNP':　<10} {'KWJA':　<10}")
+for p, q in zip(sent.phrases, kw.phrases):
+    a = (p.parent.text if p.parent else "(文末)") + p.dep_type.value
+    b = (q.parent.text if q.parent else "(文末)") + q.dep_type.value
+    print(f"{p.text:　<8} {a:　<10} {b:　<10}", "" if a == b else "← 違う")
+
+def args_of(pas):
+    return {case: [arg_text(a) for a in v] for case, v in pas.get_all_arguments(relax=False).items()}
+
+# 述語は基本句の番号で対応づける (基本句の区切りも同じであることを確かめておく)
+assert [bp.text for bp in sent.base_phrases] == [bp.text for bp in kw.base_phrases]
+knp_pas = {pas.predicate.base_phrase.index: pas for pas in sent.pas_list}
+kw_pas = {pas.predicate.base_phrase.index: pas for pas in kw.pas_list}
+for i in sorted(knp_pas.keys() | kw_pas.keys()):
+    print(sent.base_phrases[i].text)
+    print("  KNP :", args_of(knp_pas[i]) if i in knp_pas else "-")
+    print("  KWJA:", args_of(kw_pas[i]) if i in kw_pas else "-")
+```
+
+- KNP は、Juman++ (または JUMAN) の形態素解析結果を入力にとり、文節・基本句の係り受け、格関係、照応関係を出力する。人手で書いたルール (`rule/` の下) で形態素・文節に素性を付けて係り受けの候補を作り、並列構造は前後の文節列の類似度で検出する。候補は、ウェブテキストから自動構築した大規模な格フレームに基づく確率で評価する (README とマニュアル `doc/manual.pdf` による)。マニュアルによると、出力するのは最もよい 1 つの解だけである。
+- この文では、文節の係り先と種類 (D/P) は KNP と KWJA で全く同じになった。「太郎と → 花子は」「抹茶と → お菓子を」が並列 (P)、「京都で」「昨日」は「買った」に係る。
+- 格解析の違い: KNP は並列の両方 (「渡した」のガ格に「太郎と」「花子は、」、ヲ格に「抹茶と」「お菓子を」) を項に入れるが、KWJA は並列の一方だけを項にした (「渡した」のガ格は「太郎と」、ヲ格は「抹茶と」、「買った」のヲ格は「お菓子を」)。また「買った」のガ格は、ガ格になる文節が「買った」に係っていないため KNP では空き (`格解析結果` の `ガ/U/-`) だが、KWJA は係り受けのない「花子は、」をガ格として出した。KNP の照応解析 (`-anaphora`) は試していない。
+- `格解析結果` の各項は `格/種類/表記/基本句番号/...` の形。種類は、C が「述語に係る格要素で、表層の形から格が決まるもの」(格助詞の付いた「先生に」のほか、時間格の「昨日」も C)、N が「格が表層に現れないもの」(提題の「花子は、」や、連体修飾で係る「お菓子を」(「買った」のヲ格) など)、U が「割り当てなし」。並列の前の要素 (「太郎と」「抹茶と」) は後ろの要素と同じ種類になっている。rhoknp は U 以外を `BasePhrase.pas` (`Sentence.pas_list`) に読み込む。格フレームの ID (`渡す/わたす:動1`) は、1 つの述語に用法ごとに複数ある格フレームのどれを選んだかを表す。
+- 基本句の素性には、係りの形 (`係:未格` など)、格解析で決まった格 (`解析格:ガ`)、意味素性 (`SM-人`)、時制などが入る。素性の一覧は KNP の `doc/knp_feature.pdf` にある。
+- 出力は KWJA と同じ KNP 形式で、rhoknp で同じように読める。形態素は JUMAN の品詞体系 (「名詞/人名」「助詞/副助詞」「特殊/読点」など)。コマンドラインの `knp` は既定で木構造を表示し、rhoknp は `-tab` (表形式) で呼ぶ。
+- 速さ: rhoknp は Juman++ と KNP のプロセスを起動したまま使い回すので、この文では 1 文あたり 0.15〜0.2 秒ほどだった (上の計測。CPU 2 コアで 2 回計って 152 ミリ秒と 184 ミリ秒)。KWJA はコマンドを呼ぶたびにモデルを読み込み、GPU なし (CPU 2 コア) では初回 (モデルのダウンロードを含む) に 50 秒ほどかかった。
+- `pip install kwja` で、ほかのパッケージとの依存関係の衝突の警告 (ERROR: pip's dependency resolver ...) が出るが、ここでは無視してよい。KWJA はコマンドとして別プロセスで動かしているので、ノートブックの再起動も要らない (KWJA を Python から import して使う場合は、前のレシピの注意のとおり再起動が必要になることがある)。
+- ビルドの手間: KNP は GitHub にリリースがなく、git から autogen.sh (libtool が必要) でビルドする。辞書 (格フレームなど) は別配布の 2.8GB の zip で、インストール先に 7GB ほどを使う。Juman++ rc4 は、先頭の入力が空行だと異常終了することがある (毎回ではない)。rhoknp の起動確認は空行を送るので、そのとき「failed to start Juman++」の警告が出る。これを避けるため `skip_sanity_check=True` を付ける。
 
 ## Stanza で多言語の形態素・依存構造解析をする {stanza}
 
