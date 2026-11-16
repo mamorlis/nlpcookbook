@@ -10,7 +10,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 382 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 396 レシピ。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. Google Colab の小技](#1-google-colab-の小技) (11)
 - [2. データの収集と入出力](#2-データの収集と入出力) (10)
@@ -18,13 +18,13 @@
 - [4. 日本語の形態素解析と文分割](#4-日本語の形態素解析と文分割) (28)
 - [5. 英語・多言語の前処理](#5-英語多言語の前処理) (20)
 - [6. サブワードとトークナイザ](#6-サブワードとトークナイザ) (14)
-- [7. コーパスの統計と可視化](#7-コーパスの統計と可視化) (12)
+- [7. コーパスの統計と可視化](#7-コーパスの統計と可視化) (13)
 - [8. 単語ベクトル](#8-単語ベクトル) (11)
-- [9. Transformers の基本操作](#9-transformers-の基本操作) (15)
-- [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (7)
+- [9. Transformers の基本操作](#9-transformers-の基本操作) (16)
+- [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (8)
 - [11. トピックとキーワードの抽出](#11-トピックとキーワードの抽出) (7)
-- [12. テキスト分類](#12-テキスト分類) (17)
-- [13. 大規模言語モデル (LLM)](#13-大規模言語モデル-llm) (23)
+- [12. テキスト分類](#12-テキスト分類) (24)
+- [13. 大規模言語モデル (LLM)](#13-大規模言語モデル-llm) (26)
 - [14. 構文解析](#14-構文解析) (22)
 - [15. 固有表現抽出](#15-固有表現抽出) (13)
 - [16. 意味解析](#16-意味解析) (13)
@@ -34,7 +34,7 @@
 - [20. 検索](#20-検索) (18)
 - [21. 質問応答](#21-質問応答) (8)
 - [22. RAG (検索拡張生成)](#22-rag-検索拡張生成) (13)
-- [23. 対話システム](#23-対話システム) (11)
+- [23. 対話システム](#23-対話システム) (12)
 - [24. 機械翻訳](#24-機械翻訳) (17)
 - [25. 要約と平易化](#25-要約と平易化) (9)
 - [26. 文法誤り訂正と言語教育](#26-文法誤り訂正と言語教育) (18)
@@ -192,7 +192,7 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 
 ### 7. コーパスの統計と可視化
 
-単語を数える、共起や特徴語を調べる、分布を図にする。コーパスを手に入れたらまずやること。
+単語を数える、共起や特徴語を調べる、分布を図にする、文体から書き手を推定する。コーパスを手に入れたらまずやること。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -207,7 +207,8 @@ SentencePiece や Hugging Face のトークナイザを学習・利用し、モ�
 | 07-09 | [単語の共起を数えて PMI で結びつきの強さを測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/pmi.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/pmi.ipynb) |
 | 07-10 | [よく使われる言い回し (コロケーション) を抽出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/collocations.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/collocations.ipynb) |
 | 07-11 | [2 つのコーパスを比べて特徴語を見つける (対数尤度比)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/keyness.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/keyness.ipynb) |
-| 07-12 | [n-gram 言語モデルを作ってパープレキシティを測り、文を生成する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/ngram_lm.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/ngram_lm.ipynb) |
+| 07-12 | [文体の特徴から文章の書き手を推定する (計量文体学)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/authorship_attribution.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/authorship_attribution.ipynb) |
+| 07-13 | [n-gram 言語モデルを作ってパープレキシティを測り、文を生成する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/ngram_lm.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/07_corpus_statistics/ngram_lm.ipynb) |
 
 ### 8. 単語ベクトル
 
@@ -238,20 +239,21 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 09-03 | [BERT から文脈に応じた単語ベクトルを取り出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/contextual_word_vectors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/contextual_word_vectors.ipynb) |
 | 09-04 | [2 つの文の含意関係を判定する (NLI)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/nli.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/nli.ipynb) |
 | 09-05 | [アテンションの重みをヒートマップで可視化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/attention_viz.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/attention_viz.ipynb) |
-| 09-06 | [次に来るトークンの確率分布を見る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/next_token_probs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/next_token_probs.ipynb) |
-| 09-07 | [言語モデルで文の自然さ (パープレキシティ) を測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/lm_perplexity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/lm_perplexity.ipynb) |
-| 09-08 | [トークンごとのサプライザルを色で可視化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/surprisal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/surprisal.ipynb) |
-| 09-09 | [テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/generation_decoding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/generation_decoding.ipynb) |
-| 09-10 | [バッチ処理と GPU で推論を高速化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/batch_inference.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/batch_inference.ipynb) |
-| 09-11 | [モデルのパラメータ数とメモリ使用量を調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/model_size.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/model_size.ipynb) |
-| 09-12 | [モデルを保存・読み込みする、Hub にアップロードする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/save_load_model.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/save_load_model.ipynb) |
-| 09-13 | [Hub のモデルのキャッシュ場所を確認・変更する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/hf_cache.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/hf_cache.ipynb) |
-| 09-14 | [Datasets でデータを読み込む・加工する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_basics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_basics.ipynb) |
-| 09-15 | [巨大なデータセットをダウンロードせずにストリーミングで読む](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_streaming.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_streaming.ipynb) |
+| 09-06 | [BERT の各層に品詞や構文の情報がどれくらい入っているかを調べる (プロービング)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/probing.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/probing.ipynb) |
+| 09-07 | [次に来るトークンの確率分布を見る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/next_token_probs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/next_token_probs.ipynb) |
+| 09-08 | [言語モデルで文の自然さ (パープレキシティ) を測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/lm_perplexity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/lm_perplexity.ipynb) |
+| 09-09 | [トークンごとのサプライザルを色で可視化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/surprisal.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/surprisal.ipynb) |
+| 09-10 | [テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/generation_decoding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/generation_decoding.ipynb) |
+| 09-11 | [バッチ処理と GPU で推論を高速化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/batch_inference.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/batch_inference.ipynb) |
+| 09-12 | [モデルのパラメータ数とメモリ使用量を調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/model_size.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/model_size.ipynb) |
+| 09-13 | [モデルを保存・読み込みする、Hub にアップロードする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/save_load_model.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/save_load_model.ipynb) |
+| 09-14 | [Hub のモデルのキャッシュ場所を確認・変更する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/hf_cache.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/hf_cache.ipynb) |
+| 09-15 | [Datasets でデータを読み込む・加工する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_basics.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_basics.ipynb) |
+| 09-16 | [巨大なデータセットをダウンロードせずにストリーミングで読む](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_streaming.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/09_transformers/datasets_streaming.ipynb) |
 
 ### 10. 文埋め込みとクラスタリング
 
-文をベクトルにして意味の近さを測る。言い換えの検出、クラスタリング、可視化。検索への応用は「検索」の章を参照。
+文をベクトルにして意味の近さを測る。言い換えの検出、クラスタリング、可視化、対照学習による文埋め込みモデルの学習。検索への応用は「検索」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -261,7 +263,8 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 10-04 | [文をクラスタリングして話題ごとにまとめる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/sentence_clustering.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/sentence_clustering.ipynb) |
 | 10-05 | [文埋め込みを PCA・t-SNE・UMAP で 2 次元に可視化して比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_visualization.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_visualization.ipynb) |
 | 10-06 | [文の意味的類似度 (STS) でモデルを評価する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/sts_eval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/sts_eval.ipynb) |
-| 10-07 | [埋め込みを量子化・次元削減して省メモリ化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_quantization.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_quantization.ipynb) |
+| 10-07 | [対照学習 (SimCSE) で素の BERT から文埋め込みモデルを作る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/simcse.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/simcse.ipynb) |
+| 10-08 | [埋め込みを量子化・次元削減して省メモリ化する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_quantization.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/10_sentence_embeddings/embedding_quantization.ipynb) |
 
 ### 11. トピックとキーワードの抽出
 
@@ -279,7 +282,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 12. テキスト分類
 
-文書にラベルを付ける。古典的な TF-IDF から BERT のファインチューニング、ゼロショットまで。
+文書にラベルを付ける。古典的な TF-IDF から BERT のファインチューニング、ゼロショットまで。少ないラベルで学習する方法 (データ拡張、能動学習、弱教師あり学習、ラベル誤りの検出)、言語間転移、感情分析。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -295,15 +298,22 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 12-10 | [1 つの文書に複数のラベルを付ける (マルチラベル分類)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/multilabel.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/multilabel.ipynb) |
 | 12-11 | [学習した分類器を保存・読み込みする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/save_sklearn_model.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/save_sklearn_model.ipynb) |
 | 12-12 | [文埋め込みを特徴量にして少ない学習データで分類する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/embedding_classifier.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/embedding_classifier.ipynb) |
-| 12-13 | [ラベル付きデータなしで分類する (ゼロショット分類、NLI)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_nli.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_nli.ipynb) |
-| 12-14 | [ラベルの説明文との類似度でゼロショット分類する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_embedding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_embedding.ipynb) |
-| 12-15 | [BERT をファインチューニングして文書分類する (Trainer)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/bert_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/bert_finetune.ipynb) |
-| 12-16 | [日本語の感情分析 (ポジネガ判定) をする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/sentiment_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/sentiment_ja.ipynb) |
-| 12-17 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/toxicity_detection.ipynb) |
+| 12-13 | [言い換えたデータを足して少ない学習データを補う (データ拡張)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/data_augmentation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/data_augmentation.ipynb) |
+| 12-14 | [ラベルを付ける文書を賢く選んで、少ないラベルで精度を上げる (能動学習)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/active_learning.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/active_learning.ipynb) |
+| 12-15 | [ルールでラベルを付けて分類器を学習する (弱教師あり学習、Snorkel)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/weak_supervision.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/weak_supervision.ipynb) |
+| 12-16 | [学習データの中の付け間違えたラベルを見つける (Confident Learning)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/label_noise.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/label_noise.ipynb) |
+| 12-17 | [ラベル付きデータなしで分類する (ゼロショット分類、NLI)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_nli.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_nli.ipynb) |
+| 12-18 | [ラベルの説明文との類似度でゼロショット分類する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_embedding.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/zero_shot_embedding.ipynb) |
+| 12-19 | [BERT をファインチューニングして文書分類する (Trainer)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/bert_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/bert_finetune.ipynb) |
+| 12-20 | [英語のデータだけで学習して日本語を分類する (ゼロショットの言語間転移)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/crosslingual_transfer.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/crosslingual_transfer.ipynb) |
+| 12-21 | [日本語の感情分析 (ポジネガ判定) をする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/sentiment_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/sentiment_ja.ipynb) |
+| 12-22 | [喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/emotion_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/emotion_ja.ipynb) |
+| 12-23 | [観点ごとにポジティブ・ネガティブを判定する (アスペクトベース感情分析)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/absa_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/absa_ja.ipynb) |
+| 12-24 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/12_classification/toxicity_detection.ipynb) |
 
 ### 13. 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす方法と、API で大きなモデルを使う方法 (無料で使える Gemini と、有料の Claude)。プロンプト、構造化出力、量子化と LoRA、LLM の性質を調べる方法。LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす方法と、API で大きなモデルを使う方法 (無料で使える Gemini と、有料の Claude)。プロンプト、ベンチマークでの比較、構造化出力、量子化と LoRA、LLM の性質を調べる方法、LLM が生成した文章の検出と透かし。LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -314,22 +324,25 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 13-05 | [選択肢の尤度を比べて LLM に分類させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_choice_scoring.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_choice_scoring.ipynb) |
 | 13-06 | [プロンプトをテンプレートで管理し、似た例を動的に選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/prompt_template.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/prompt_template.ipynb) |
 | 13-07 | [指示文の言語を変えて LLM の出力がどう変わるか比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/prompt_language.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/prompt_language.ipynb) |
-| 13-08 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_json_output.ipynb) |
-| 13-09 | [LLM を 4bit 量子化して少ないメモリで動かす](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_4bit.ipynb) |
-| 13-10 | [LoRA で LLM を少ないメモリでファインチューニングする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/lora_finetune.ipynb) |
-| 13-11 | [Colab の組み込み AI (google.colab.ai) で Gemini を呼び出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/colab_ai.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/colab_ai.ipynb) |
-| 13-12 | [Gemini API を呼び出す (無料枠)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_basic.ipynb) |
-| 13-13 | [Gemini の応答をストリーミングで受け取る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_streaming.ipynb) |
-| 13-14 | [Gemini に決まった形式 (JSON スキーマ) で出力させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_structured.ipynb) |
-| 13-15 | [Gemini API のトークン数と使用量を確かめる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_count_tokens.ipynb) |
-| 13-16 | [Gemini で大量のテキストをまとめて処理する (Batch API)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_batch.ipynb) |
-| 13-17 | [Claude API を呼び出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) |
-| 13-18 | [Claude の応答をストリーミングで受け取る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) |
-| 13-19 | [Claude に決まった形式 (JSON スキーマ) で出力させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) |
-| 13-20 | [Claude API のトークン数と料金を事前に見積もる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) |
-| 13-21 | [Claude で大量のテキストを安く処理する (Message Batches API)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) |
-| 13-22 | [言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) |
-| 13-23 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) |
+| 13-08 | [日本語のベンチマークで複数の LLM を同じ条件で比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_benchmark.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_benchmark.ipynb) |
+| 13-09 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_json_output.ipynb) |
+| 13-10 | [LLM を 4bit 量子化して少ないメモリで動かす](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_4bit.ipynb) |
+| 13-11 | [LoRA で LLM を少ないメモリでファインチューニングする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/lora_finetune.ipynb) |
+| 13-12 | [Colab の組み込み AI (google.colab.ai) で Gemini を呼び出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/colab_ai.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/colab_ai.ipynb) |
+| 13-13 | [Gemini API を呼び出す (無料枠)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_basic.ipynb) |
+| 13-14 | [Gemini の応答をストリーミングで受け取る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_streaming.ipynb) |
+| 13-15 | [Gemini に決まった形式 (JSON スキーマ) で出力させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_structured.ipynb) |
+| 13-16 | [Gemini API のトークン数と使用量を確かめる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_count_tokens.ipynb) |
+| 13-17 | [Gemini で大量のテキストをまとめて処理する (Batch API)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/gemini_batch.ipynb) |
+| 13-18 | [Claude API を呼び出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_basic.ipynb) |
+| 13-19 | [Claude の応答をストリーミングで受け取る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_streaming.ipynb) |
+| 13-20 | [Claude に決まった形式 (JSON スキーマ) で出力させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_structured.ipynb) |
+| 13-21 | [Claude API のトークン数と料金を事前に見積もる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_count_tokens.ipynb) |
+| 13-22 | [Claude で大量のテキストを安く処理する (Message Batches API)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/claude_batch.ipynb) |
+| 13-23 | [言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/minimal_pairs.ipynb) |
+| 13-24 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_social_bias.ipynb) |
+| 13-25 | [LLM が生成した文章を見分ける (パープレキシティ、Binoculars、分類器)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/ai_text_detection.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/ai_text_detection.ipynb) |
+| 13-26 | [LLM の出力に透かしを入れ、あとから統計的に検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_watermark.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_llm/llm_watermark.ipynb) |
 
 ### 14. 構文解析
 
@@ -507,7 +520,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 23. 対話システム
 
-規則ベース、FAQ 検索、タスク指向、LLM による雑談まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で (3B の LLM で何度も生成するレシピは GPU を使う)。
+規則ベース、FAQ 検索、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で (3B の LLM で何度も生成するレシピは GPU を使う)。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -521,7 +534,8 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 23-08 | [資料を調べて答えるチャットボットを作る (複数ターンの RAG)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/chat_rag.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/chat_rag.ipynb) |
 | 23-09 | [入力と出力に安全策を入れる (ガードレール)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/dialogue_guardrail.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/dialogue_guardrail.ipynb) |
 | 23-10 | [攻撃的な投稿に対して落ち着いた返答を作る (カウンタースピーチ)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/counter_speech.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/counter_speech.ipynb) |
-| 23-11 | [ブラウザで使えるチャット画面を作る (Gradio)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/gradio_chat.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/gradio_chat.ipynb) |
+| 23-11 | [対話システムの応答を評価する (参照あり・参照なしの指標と LLM による判定)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/dialogue_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/dialogue_eval.ipynb) |
+| 23-12 | [ブラウザで使えるチャット画面を作る (Gradio)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/gradio_chat.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_dialogue/gradio_chat.ipynb) |
 
 ### 24. 機械翻訳
 
