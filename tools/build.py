@@ -50,6 +50,11 @@ class Recipe:
         return f"notebooks/{self.chapter_dir}/{self.slug}.ipynb"
 
     @property
+    def github_url(self) -> str:
+        # README の表は絶対 URL にする (相対リンクは、開いている URL によっては github.com/<owner>/notebooks/... に解決されて切れる)
+        return f"https://github.com/{REPO}/blob/{BRANCH}/{self.relpath}"
+
+    @property
     def colab_url(self) -> str:
         return f"https://colab.research.google.com/github/{REPO}/blob/{BRANCH}/{self.relpath}"
 
@@ -273,7 +278,7 @@ def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
         for r in rs:
             mark = "".join(m for t, m in (("gpu", " ⚡"), ("key", " 🔑")) if t in r.tags)
             badge = f"[![Colab](https://colab.research.google.com/assets/colab-badge.svg)]({r.colab_url})"
-            lines.append(f"| {r.ident} | [{r.title}]({r.relpath}){mark} | {badge} |")
+            lines.append(f"| {r.ident} | [{r.title}]({r.github_url}){mark} | {badge} |")
     lines += ["", "⚡ = GPU ランタイム推奨、🔑 = API キーが必要"]
     block = "\n".join(lines)
     readme = ROOT / "README.md"
