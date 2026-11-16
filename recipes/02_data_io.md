@@ -69,7 +69,7 @@ print(search("機械翻訳 ニューラル"))
 ```
 
 - 数件〜数百件ならこの方法で。連続して呼ぶときは間隔を空ける (`time.sleep(1)`)。短時間に大量に呼ぶと 429 (Too Many Requests) で拒否される。
-- 全記事が必要なら API を叩かずに、ダンプか Hugging Face の `wikimedia/wikipedia` データセットを使う (Transformers の章のストリーミングのレシピを参照)。
+- 全記事が必要なら API を叩かずに、ダンプか Hugging Face の `wikimedia/wikipedia` データセットを使う (Transformers の基本操作の章のストリーミングのレシピを参照)。
 - 本文のライセンスは CC BY-SA。再配布するときは出典の表示と同一ライセンスでの公開が必要。
 
 ## Web ページから本文だけを抽出する (trafilatura) {web_extract}
@@ -364,7 +364,7 @@ df[df["reason"] == ""]["text"].tolist()
 
 - 何を何件捨てたかを理由ごとに記録しておく。フィルタのバグでデータの大半を捨てていた、という事故に気づける。
 - 学習データと評価データの間の重複 (リーク) も必ず確認する: `set(train_keys) & set(test_keys)`。
-- ほぼ同じ内容の文書 (ニアデュプリケート) は、文字列処理の章の MinHash のレシピで検出する。
+- ほぼ同じ内容の文書 (ニアデュプリケート) は、文字列処理と正規化の章の MinHash のレシピで検出する。
 
 ## データを学習・開発・評価に正しく分割する {data_split}
 

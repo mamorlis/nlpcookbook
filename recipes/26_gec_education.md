@@ -1,6 +1,6 @@
 # 文法誤り訂正と言語教育
 
-学習者の作文を訂正する、訂正箇所を取り出して分類・評価する、教材づくりに使う。
+学習者の作文を訂正する、訂正箇所を取り出して分類・評価する、スペルミスを直す、文章の読みやすさや語彙の難しさを測る、教材づくりに使う。
 
 ## 2 つの文の違いを色付きで表示する {diff_highlight}
 
@@ -213,6 +213,133 @@ for name, hyp in systems.items():
 - 正しい訂正は 1 通りではない。参照が 1 つだけだと、妥当な別解 (「very much → a lot」) が誤りとして数えられる。複数参照の場合は、文ごとに最も F 値が高くなる参照を選ぶ。
 - 流暢性まで含めた訂正の評価には GLEU や、参照なしの指標 (IMPARA、SOME など) が使われる。
 
+## 学習済みモデルで英語の文法誤りを訂正する {gec_model_en}
+
+英語の文法誤り訂正を、公開されているファインチューニング済みモデルですぐに試したい。
+
+```python
+import torch
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+name = "vennify/t5-base-grammar-correction"   # JFLEG で学習した T5
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForSeq2SeqLM.from_pretrained(name).eval()
+
+def correct(sentences, num_beams=5):
+    batch = tokenizer(["grammar: " + s for s in sentences], return_tensors="pt", padding=True, truncation=True, max_length=128)
+    with torch.no_grad():
+        out = model.generate(**batch, num_beams=num_beams, max_new_tokens=128)
+    return tokenizer.batch_decode(out, skip_special_tokens=True)
+
+sentences = ["I has went to school yesterday and buyed a apple.", "She don't likes swimming in the see.",
+             "Despite of the rain, we enjoyed.", "This sentence is already correct.", "He suggested me to go there."]
+for s, c in zip(sentences, correct(sentences)):
+    print(f"{s}\n  → {c}")
+```
+
+```python
+# 上位 3 つの訂正候補を見る
+batch = tokenizer(["grammar: He suggested me to go there."], return_tensors="pt")
+with torch.no_grad():
+    out = model.generate(**batch, num_beams=5, num_return_sequences=3, max_new_tokens=64)
+print(tokenizer.batch_decode(out, skip_special_tokens=True))
+```
+
+- T5 は入力の先頭にタスクを表す接頭辞 (`grammar: `) を付ける約束で学習されている。付け忘れると訂正されない。
+- 系列変換型は書き換えすぎる (正しい文まで変える) ことがある。編集タグを予測する方式 (GECToR) は高速で、過剰訂正が少ない。
+- 現在は LLM による訂正が流暢性の面で強いが、必要以上に書き換える傾向がある。「最小限の訂正」を求める評価 (CoNLL-2014、BEA-2019) では専用モデルが有利なことも多い。
+
+## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
+
+日本語学習者の書いた文の誤りを訂正したい。LLM (GPU を使う) に訂正させ、参照訂正と比べて評価する。
+
+```python
+!pip install -q datasets
+```
+
+```python
+import difflib, re
+import sentencepiece as spm
+import torch
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+@torch.no_grad()
+def chat(prompt, max_new_tokens=80):
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
+
+def clean(text):
+    """LLM が付け足しがちな「訂正後の文:」のような見出しや、末尾の注釈 (「（誤りはありません）」) を取り除く"""
+    text = re.sub(r"^(訂正後の文|訂正文|書き直した文|文)\s*[:：]\s*", "", text.strip())
+    return re.sub(r"[（(][^（）()]*[）)]$", "", text).strip().strip("「」")
+
+MINIMAL = ("次の文は日本語学習者が書いたものです。文法の誤りだけを、できるだけ少ない変更で訂正してください。"
+           "誤りがなければそのまま出力してください。訂正後の文だけを 1 行で出力し、説明は書かないでください。\n\n文: {}")
+FLUENT = "次の文は日本語学習者が書いたものです。自然で流暢な日本語に書き直してください。書き直した文だけを 1 行で出力してください。\n\n文: {}"
+
+for s in ["図書館で本が借りました。", "私は毎日学校を行きます。", "昨日は友達と映画を見ます。", "この料理はとてもおいしいでした。", "私は東京に住んでいます。"]:
+    print(f"{s}\n   最小限の訂正: {clean(chat(MINIMAL.format(s)))}\n   流暢な書き直し: {clean(chat(FLUENT.format(s)))}")
+```
+
+```python
+# 訂正を編集 (どこをどう変えたか) の集合にして、参照訂正と比べる
+def edits(source, target):
+    """文字単位の差分から (開始位置, 終了位置, 置き換える文字列) の集合を作る"""
+    ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
+    return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
+
+def evaluate(system, n=100):
+    ds = load_dataset("ronantakizawa/jfleg-japanese", split="validation").select(range(n))
+    tp = fp = fn = exact = unchanged = 0
+    examples = []
+    for ex in ds:
+        hyp = system(ex["sentence"])
+        hyp_edits = edits(ex["sentence"], hyp)
+        # 参照訂正が複数あるので、最も F0.5 が高くなるものと比べる
+        best = max((edits(ex["sentence"], ref) for ref in ex["corrections"]),
+                   key=lambda ref: (1.25 * len(hyp_edits & ref) / (len(hyp_edits) + 0.25 * len(ref) + 1e-9), -len(ref)))
+        tp += len(hyp_edits & best); fp += len(hyp_edits - best); fn += len(best - hyp_edits)
+        exact += hyp in ex["corrections"]; unchanged += hyp == ex["sentence"]
+        examples.append((ex["sentence"], hyp, ex["corrections"][0]))
+    p, r = tp / (tp + fp + 1e-9), tp / (tp + fn + 1e-9)
+    return {"適合率": p, "再現率": r, "F0.5": 1.25 * p * r / (0.25 * p + r + 1e-9), "参照と完全一致": exact / n, "変更なし": unchanged / n}, examples
+
+import pandas as pd
+
+# 100 文 × 2 通りの指示で生成する。T4 で 5 分ほど
+results, outputs = {}, {}
+for label, system in [("何もしない", lambda s: s), ("LLM (最小限の訂正)", lambda s: clean(chat(MINIMAL.format(s)))), ("LLM (流暢な書き直し)", lambda s: clean(chat(FLUENT.format(s))))]:
+    results[label], outputs[label] = evaluate(system)
+pd.DataFrame(results).T.round(3)
+```
+
+```python
+for src, hyp, ref in outputs["LLM (最小限の訂正)"][:8]:
+    print(f"{'○' if hyp == ref else '　'} {src}\n     → {hyp}\n     参照: {ref}")
+```
+
+- 「誤りだけを最小限に直す」のか「自然な文に書き直す」のかで、出力も評価も大きく変わる。指示で明確にする。学習者へのフィードバックには前者、文章の清書には後者が向く。
+- 出力の整形が評価を左右する。小さな LLM は「訂正後の文:」のような見出しや「（誤りはありません）」のような注釈を付けたり、助詞を重ねて (「駅のの近く」) 新しい誤りを作ったりする。見出しや注釈は機械的に取り除き、新しい誤りはそのまま評価に反映させる。訂正文に続けて説明を書き出す出力 (「…見に行きました。」が正しい文です。…」) は `clean` では取り除けないので、必要なら規則を足す。
+- 意味を変えてしまう訂正も出る (「レストランが夕食を食べました」→「レストランは夕食を食べませんでした」)。
+- LLM は直しすぎる傾向がある (正しい部分まで言い換える)。編集単位の適合率が下がるので、F0.5 のように適合率を重視する指標では不利になる。この実験では、流暢な書き直しは再現率が高い (0.519) が適合率が低く (0.418)、F0.5 は 0.435 で、最小限の訂正の 0.441 をわずかに下回った (T4 と同じ float16 で実行した値。100 文なので、この程度の差は誤差の範囲)。逆に、最小限の訂正は直すべき文を変えずに残すことがある (「公園に友達と遊びました。」)。
+- 参照訂正は 1 つとは限らない。複数の参照と比べないと、正しい訂正を誤りと数えてしまう。それでも参照にない正しい訂正は残る。
+- ここでは文字単位の差分で編集を作った。きちんと評価するなら、形態素単位で編集を取り出す (この章の ERRANT のレシピの日本語版にあたる処理)。
+- このデータは JFLEG にならって作られた公開データで、文が短く誤りも単純。実際の学習者の作文 (Lang-8 コーパス、TEC-JL など) はもっと難しい。
+
 ## 参照訂正なしで訂正文の質を評価する {gec_reference_free}
 
 参照訂正 (正解) がなくても、訂正システムの出力が「文法的か」「流暢か」「元の意味を保っているか」を自動で評価したい。
@@ -373,133 +500,6 @@ print("システム単位の Spearman:", round(spearmanr(-llm_mean, human_mean).
 - 人手評価のデータそのものにも設計上の問題がありうる (評価した時代のシステムが古い、文単位と編集単位の評価が混ざる)。メタ評価用のデータとして SEEDA が公開されている。
 - ここの 6 文は手作りの動作確認用。指標を採用するかどうかは、実際のシステム出力と人手評価の組 (数百文以上) で判断する。
 
-## 学習済みモデルで英語の文法誤りを訂正する {gec_model_en}
-
-英語の文法誤り訂正を、公開されているファインチューニング済みモデルですぐに試したい。
-
-```python
-import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
-name = "vennify/t5-base-grammar-correction"   # JFLEG で学習した T5
-tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForSeq2SeqLM.from_pretrained(name).eval()
-
-def correct(sentences, num_beams=5):
-    batch = tokenizer(["grammar: " + s for s in sentences], return_tensors="pt", padding=True, truncation=True, max_length=128)
-    with torch.no_grad():
-        out = model.generate(**batch, num_beams=num_beams, max_new_tokens=128)
-    return tokenizer.batch_decode(out, skip_special_tokens=True)
-
-sentences = ["I has went to school yesterday and buyed a apple.", "She don't likes swimming in the see.",
-             "Despite of the rain, we enjoyed.", "This sentence is already correct.", "He suggested me to go there."]
-for s, c in zip(sentences, correct(sentences)):
-    print(f"{s}\n  → {c}")
-```
-
-```python
-# 上位 3 つの訂正候補を見る
-batch = tokenizer(["grammar: He suggested me to go there."], return_tensors="pt")
-with torch.no_grad():
-    out = model.generate(**batch, num_beams=5, num_return_sequences=3, max_new_tokens=64)
-print(tokenizer.batch_decode(out, skip_special_tokens=True))
-```
-
-- T5 は入力の先頭にタスクを表す接頭辞 (`grammar: `) を付ける約束で学習されている。付け忘れると訂正されない。
-- 系列変換型は書き換えすぎる (正しい文まで変える) ことがある。編集タグを予測する方式 (GECToR) は高速で、過剰訂正が少ない。
-- 現在は LLM による訂正が流暢性の面で強いが、必要以上に書き換える傾向がある。「最小限の訂正」を求める評価 (CoNLL-2014、BEA-2019) では専用モデルが有利なことも多い。
-
-## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
-
-日本語学習者の書いた文の誤りを訂正したい。LLM (GPU を使う) に訂正させ、参照訂正と比べて評価する。
-
-```python
-!pip install -q datasets
-```
-
-```python
-import difflib, re
-import sentencepiece as spm
-import torch
-from datasets import load_dataset
-from huggingface_hub import hf_hub_download
-from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
-
-@torch.no_grad()
-def chat(prompt, max_new_tokens=80):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
-    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
-
-def clean(text):
-    """LLM が付け足しがちな「訂正後の文:」のような見出しや、末尾の注釈 (「（誤りはありません）」) を取り除く"""
-    text = re.sub(r"^(訂正後の文|訂正文|書き直した文|文)\s*[:：]\s*", "", text.strip())
-    return re.sub(r"[（(][^（）()]*[）)]$", "", text).strip().strip("「」")
-
-MINIMAL = ("次の文は日本語学習者が書いたものです。文法の誤りだけを、できるだけ少ない変更で訂正してください。"
-           "誤りがなければそのまま出力してください。訂正後の文だけを 1 行で出力し、説明は書かないでください。\n\n文: {}")
-FLUENT = "次の文は日本語学習者が書いたものです。自然で流暢な日本語に書き直してください。書き直した文だけを 1 行で出力してください。\n\n文: {}"
-
-for s in ["図書館で本が借りました。", "私は毎日学校を行きます。", "昨日は友達と映画を見ます。", "この料理はとてもおいしいでした。", "私は東京に住んでいます。"]:
-    print(f"{s}\n   最小限の訂正: {clean(chat(MINIMAL.format(s)))}\n   流暢な書き直し: {clean(chat(FLUENT.format(s)))}")
-```
-
-```python
-# 訂正を編集 (どこをどう変えたか) の集合にして、参照訂正と比べる
-def edits(source, target):
-    """文字単位の差分から (開始位置, 終了位置, 置き換える文字列) の集合を作る"""
-    ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
-    return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
-
-def evaluate(system, n=100):
-    ds = load_dataset("ronantakizawa/jfleg-japanese", split="validation").select(range(n))
-    tp = fp = fn = exact = unchanged = 0
-    examples = []
-    for ex in ds:
-        hyp = system(ex["sentence"])
-        hyp_edits = edits(ex["sentence"], hyp)
-        # 参照訂正が複数あるので、最も F0.5 が高くなるものと比べる
-        best = max((edits(ex["sentence"], ref) for ref in ex["corrections"]),
-                   key=lambda ref: (1.25 * len(hyp_edits & ref) / (len(hyp_edits) + 0.25 * len(ref) + 1e-9), -len(ref)))
-        tp += len(hyp_edits & best); fp += len(hyp_edits - best); fn += len(best - hyp_edits)
-        exact += hyp in ex["corrections"]; unchanged += hyp == ex["sentence"]
-        examples.append((ex["sentence"], hyp, ex["corrections"][0]))
-    p, r = tp / (tp + fp + 1e-9), tp / (tp + fn + 1e-9)
-    return {"適合率": p, "再現率": r, "F0.5": 1.25 * p * r / (0.25 * p + r + 1e-9), "参照と完全一致": exact / n, "変更なし": unchanged / n}, examples
-
-import pandas as pd
-
-# 100 文 × 2 通りの指示で生成する。T4 で 5 分ほど
-results, outputs = {}, {}
-for label, system in [("何もしない", lambda s: s), ("LLM (最小限の訂正)", lambda s: clean(chat(MINIMAL.format(s)))), ("LLM (流暢な書き直し)", lambda s: clean(chat(FLUENT.format(s))))]:
-    results[label], outputs[label] = evaluate(system)
-pd.DataFrame(results).T.round(3)
-```
-
-```python
-for src, hyp, ref in outputs["LLM (最小限の訂正)"][:8]:
-    print(f"{'○' if hyp == ref else '　'} {src}\n     → {hyp}\n     参照: {ref}")
-```
-
-- 「誤りだけを最小限に直す」のか「自然な文に書き直す」のかで、出力も評価も大きく変わる。指示で明確にする。学習者へのフィードバックには前者、文章の清書には後者が向く。
-- 出力の整形が評価を左右する。小さな LLM は「訂正後の文:」のような見出しや「（誤りはありません）」のような注釈を付けたり、助詞を重ねて (「駅のの近く」) 新しい誤りを作ったりする。見出しや注釈は機械的に取り除き、新しい誤りはそのまま評価に反映させる。訂正文に続けて説明を書き出す出力 (「…見に行きました。」が正しい文です。…」) は `clean` では取り除けないので、必要なら規則を足す。
-- 意味を変えてしまう訂正も出る (「レストランが夕食を食べました」→「レストランは夕食を食べませんでした」)。
-- LLM は直しすぎる傾向がある (正しい部分まで言い換える)。編集単位の適合率が下がるので、F0.5 のように適合率を重視する指標では不利になる。この実験では、流暢な書き直しは再現率が高い (0.519) が適合率が低く (0.418)、F0.5 は 0.435 で、最小限の訂正の 0.441 をわずかに下回った (T4 と同じ float16 で実行した値。100 文なので、この程度の差は誤差の範囲)。逆に、最小限の訂正は直すべき文を変えずに残すことがある (「公園に友達と遊びました。」)。
-- 参照訂正は 1 つとは限らない。複数の参照と比べないと、正しい訂正を誤りと数えてしまう。それでも参照にない正しい訂正は残る。
-- ここでは文字単位の差分で編集を作った。きちんと評価するなら、形態素単位で編集を取り出す (この章の ERRANT のレシピの日本語版にあたる処理)。
-- このデータは JFLEG にならって作られた公開データで、文が短く誤りも単純。実際の学習者の作文 (Lang-8 コーパス、TEC-JL など) はもっと難しい。
-
 ## マスク言語モデルで誤りのありそうな箇所を見つける (文法誤り検出) {ged_mlm}
 
 訂正まではしなくてよいので、文のどこに誤りがありそうかを指摘したい。誤りの注釈付きデータを使わずに、学習済みの言語モデルだけで行う。
@@ -571,9 +571,39 @@ for threshold in [0.001, 0.01, 0.05]:
 - 誤りの位置を正確に指すとは限らない (誤った助詞ではなく、その後ろの動詞の確率が下がることがある)。「このあたりが怪しい」という手がかりとして使う。
 - 高い精度が必要なら、誤りの注釈付きデータで系列ラベリング (各トークンが正しいか誤りか) を学習する。固有表現抽出の章の BERT のファインチューニングと同じ方法が使える。
 
+## 英語のスペルミスをライブラリで直す (pyspellchecker) {spellcheck}
+
+タイプミスを含む英文から誤りを見つけ、修正候補を出したい。
+
+```python
+!pip install -q pyspellchecker
+```
+
+```python
+import re
+from spellchecker import SpellChecker
+
+spell = SpellChecker()
+text = "I recieved a wonderfull mesage from my freind yestarday about langauge procesing"
+words = re.findall(r"[a-z']+", text.lower())
+for w in spell.unknown(words):
+    print(w, "→", spell.correction(w), sorted(spell.candidates(w) or [])[:5])
+```
+
+```python
+def correct(text):
+    return re.sub(r"[A-Za-z']+", lambda m: spell.correction(m.group()) or m.group() if m.group().lower() in spell.unknown([m.group()]) else m.group(), text)
+
+print(correct(text))
+spell.word_frequency.load_words(["nlp", "tokenizer"])  # 専門用語を辞書に追加
+print(spell.unknown(["nlp", "tokenizer", "transformr"]))
+```
+
+- 編集距離と単語頻度に基づく Norvig 方式。文脈は見ないので `their/there` のような実在語の誤りは直せない。文脈を見る方法は、この章の「英語のスペル誤りを訂正する」を参照。
+
 ## 英語のスペル誤りを訂正する {spelling_correction}
 
-英語のつづりの誤りを見つけて訂正したい。編集距離と単語の頻度による古典的な方法を作り、文脈を使う方法と比べる。
+英語のつづりの誤りを見つけて訂正したい。編集距離と単語の頻度による古典的な方法を作り、文脈を使う方法と比べる (ライブラリで手軽に直すだけなら、この章の「英語のスペルミスをライブラリで直す (pyspellchecker)」)。
 
 ```python
 !pip install -q symspellpy
@@ -801,6 +831,31 @@ print(check(s, c, comment))
 - 誤りの種類が分かっていれば (助詞の選択、時制、活用など)、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
 - 学習者のレベルに合わせて説明の言葉を変える (初級者には母語で、など) ことも、LLM への指示で行える。
 
+## 英文の読みやすさ (リーダビリティ) を測る {readability_en}
+
+英文の難易度を、学年レベルなどの指標で数値化したい (教材の選定、平易化の評価)。
+
+```python
+!pip install -q textstat
+```
+
+```python
+import textstat
+
+easy = "The cat sat on the mat. It was a sunny day. The cat was happy."
+hard = ("The proliferation of large-scale pretrained language models has precipitated a fundamental "
+        "reconsideration of evaluation methodologies within computational linguistics.")
+
+for name, text in [("easy", easy), ("hard", hard)]:
+    print(name)
+    print("  Flesch Reading Ease  :", round(textstat.flesch_reading_ease(text), 1), "(高いほど易しい)")
+    print("  Flesch-Kincaid Grade :", round(textstat.flesch_kincaid_grade(text), 1), "(米国の学年)")
+    print("  Gunning Fog          :", round(textstat.gunning_fog(text), 1))
+    print("  音節数 / 単語数 / 文数:", textstat.syllable_count(text), textstat.lexicon_count(text), textstat.sentence_count(text))
+```
+
+- どの指標も「文の長さ」と「単語の長さ (音節数)」の組み合わせ。短い文章では値が不安定になる。
+
 ## 日本語の文章の読みやすさを測る {readability_ja}
 
 日本語の文章の難しさを、文の長さ・漢字の割合・語種などの簡単な指標で数値化したい (教材選び、やさしい日本語の確認)。
@@ -842,7 +897,7 @@ pd.DataFrame({k: readability(v) for k, v in texts.items()})
 
 - 文が長く、漢語 (音読みの語) が多いほど難しく感じられる。UniDic の語種 (`goshu`) で和語・漢語・外来語を区別できる。
 - 学習者向けには、語彙の難易度 (日本語能力試験の級別語彙など) や、係り受けの距離も重要な手がかりになる。
-- 英語の Flesch-Kincaid のような定番の式は日本語にはない。日本語の公開ツールとしては jReadability などがある。
+- 英語の Flesch-Kincaid (この章の「英文の読みやすさ (リーダビリティ) を測る」) のような定番の式は日本語にはない。日本語の公開ツールとしては jReadability などがある。
 
 ## 単語の頻度から語彙の難しさを推定する (wordfreq) {word_frequency_level}
 

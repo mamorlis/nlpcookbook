@@ -223,7 +223,7 @@ print(html.unescape("A &amp; B &lt; C &#12354; &hearts;"))
 ```
 
 - 正規表現 `<[^>]+>` で消す方法は `<script>` の中身が残るなど事故が多い。パーサを使う。
-- ニュース記事などの「本文だけ」が欲しい場合は、データ収集の章の trafilatura を参照。
+- ニュース記事などの「本文だけ」が欲しい場合は、データの収集と入出力の章の「Web ページから本文だけを抽出する (trafilatura)」を参照。
 
 ## URL・メンション・ハッシュタグを除去する {remove_url}
 
@@ -247,6 +247,39 @@ print(re.sub(r"\s+", " ", HASHTAG.sub(r"\1", t)).strip())  # 余分な空白も�
 
 - 日本語は URL の直後に空白なしで本文が続くことがあるので、URL のパターンは ASCII 文字に限定しておく。
 - 消す代わりに `<URL>` `<USER>` のような特殊トークンに置換すると、情報を残せる。
+
+## 電話番号・郵便番号・メールアドレスを正規表現で抜き出す {regex_patterns}
+
+テキストから定型的な文字列を抽出したり、個人情報としてマスクしたりしたい。
+
+```python
+import re
+import unicodedata
+
+PATTERNS = {
+    "郵便番号": r"(?<![\d-])\d{3}-\d{4}(?![\d-])",
+    "電話番号": r"(?<!\d)0\d{1,4}-\d{1,4}-\d{4}(?!\d)",
+    "メール": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
+    "金額": r"(?:¥|￥)?\d{1,3}(?:,\d{3})+円?|\d+円",
+}
+
+text = "〒１９１-００６５ 東京都日野市。電話 042-585-0000、携帯 090-1234-5678、連絡先 taro.yamada+nlp@example.ac.jp、参加費 3,000円"
+text = unicodedata.normalize("NFKC", text)  # 先に全角を半角へ
+for name, pat in PATTERNS.items():
+    print(name, re.findall(pat, text))
+```
+
+```python
+def mask(text):
+    for name, pat in PATTERNS.items():
+        if name != "金額":
+            text = re.sub(pat, f"<{name}>", text)
+    return text
+
+print(mask(text))
+```
+
+- 氏名や住所は正規表現では取れない。固有表現抽出の章を参照。
 
 ## 絵文字を検出・除去・テキスト化する {emoji}
 
@@ -480,40 +513,7 @@ print(" ".join(item["hepburn"] for item in result))
 print("".join(item["hira"] for item in result))
 ```
 
-- 辞書ベースなので文脈による読み分け (「今日」きょう/こんにち) は苦手。精度が要るなら形態素解析器の読みを使う (形態素解析の章を参照)。
-
-## 電話番号・郵便番号・メールアドレスを正規表現で抜き出す {regex_patterns}
-
-テキストから定型的な文字列を抽出したり、個人情報としてマスクしたりしたい。
-
-```python
-import re
-import unicodedata
-
-PATTERNS = {
-    "郵便番号": r"(?<![\d-])\d{3}-\d{4}(?![\d-])",
-    "電話番号": r"(?<!\d)0\d{1,4}-\d{1,4}-\d{4}(?!\d)",
-    "メール": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
-    "金額": r"(?:¥|￥)?\d{1,3}(?:,\d{3})+円?|\d+円",
-}
-
-text = "〒１９１-００６５ 東京都日野市。電話 042-585-0000、携帯 090-1234-5678、連絡先 taro.yamada+nlp@example.ac.jp、参加費 3,000円"
-text = unicodedata.normalize("NFKC", text)  # 先に全角を半角へ
-for name, pat in PATTERNS.items():
-    print(name, re.findall(pat, text))
-```
-
-```python
-def mask(text):
-    for name, pat in PATTERNS.items():
-        if name != "金額":
-            text = re.sub(pat, f"<{name}>", text)
-    return text
-
-print(mask(text))
-```
-
-- 氏名や住所は正規表現では取れない。固有表現抽出の章を参照。
+- 辞書ベースなので文脈による読み分け (「今日」きょう/こんにち) は苦手。精度が要るなら形態素解析器の読みを使う (日本語の形態素解析と文分割の章を参照)。
 
 ## 文字 n-gram を作る {char_ngram}
 

@@ -237,6 +237,165 @@ print(unk.most_common())
 
 - `*` が未知語。未知語でなくても誤って細かく分割されている語 (「バズった」「エモい」「インスタ」) は検出できない点に注意。
 
+## 連続する名詞をつなげて複合名詞を抽出する {compound_noun}
+
+「自然/言語/処理」のように分割された専門用語を、名詞の連続としてまとめて取り出したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+
+def compound_nouns(text, min_len=2):
+    result, buf = [], []
+    for w in list(tagger(text)) + [None]:
+        is_noun = w is not None and (w.feature.pos1 in ("名詞", "接頭辞", "接尾辞")) and w.feature.pos2 != "数詞"
+        if is_noun:
+            buf.append(w.surface)
+        else:
+            if len(buf) >= min_len:
+                result.append("".join(buf))
+            buf = []
+    return result
+
+text = "深層学習に基づく自然言語処理では、大規模言語モデルの事前学習と文法誤り訂正への応用が研究されている。自然言語処理の応用は広い。"
+print(Counter(compound_nouns(text)).most_common())
+```
+
+- 専門用語抽出の最も単純なベースライン。頻度や連接の多様性でスコア付けすると用語抽出らしくなる。
+
+## 日本語のストップワードを除去する {stopwords_ja}
+
+「これ」「する」「ある」のように、どの文書にも出てきて特徴にならない語を取り除きたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from fugashi import Tagger
+from spacy.lang.ja.stop_words import STOP_WORDS  # spaCy 同梱のリスト (モデル不要)
+
+print(len(STOP_WORDS), sorted(STOP_WORDS)[:30])
+```
+
+```python
+tagger = Tagger()
+MY_STOP = STOP_WORDS | {"思う", "言う", "行う"}  # タスクに合わせて追加
+
+def tokenize(text):
+    words = [w.feature.orthBase or w.surface for w in tagger(text) if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
+    return [w for w in words if w not in MY_STOP]
+
+print(tokenize("これは私が昨日行った実験の結果であると思います。"))
+```
+
+- 品詞フィルタ (助詞・助動詞・記号を落とす) とストップワードリストの併用が基本。
+- コーパスから自動で作る方法もある: 文書頻度が極端に高い語を落とす (`TfidfVectorizer(max_df=0.8)`)。
+
+## 単語 n-gram を作る {word_ngram}
+
+単語 bigram / trigram を数えて、よく出る言い回しを調べたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+
+def ngrams(tokens, n):
+    return list(zip(*[tokens[i:] for i in range(n)]))
+
+text = "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。吾輩はここで始めて人間というものを見た。"
+tokens = [w.surface for w in tagger(text)]
+print(ngrams(tokens, 2)[:5])
+print(Counter(ngrams(tokens, 2)).most_common(3))
+```
+
+```python
+# 文をまたがないようにし、文頭・文末記号を付ける
+def sent_ngrams(sentence, n=2):
+    tokens = ["<s>"] * (n - 1) + [w.surface for w in tagger(sentence)] + ["</s>"]
+    return ngrams(tokens, n)
+
+print(sent_ngrams("名前はまだ無い。"))
+```
+
+- NLTK にも `nltk.ngrams(tokens, n)` や `nltk.lm.preprocessing.pad_both_ends` がある。
+
+## 日本語の単語を読みの五十音順に並べる {sort_by_reading}
+
+漢字を含む単語リストを、文字コード順ではなく読みの五十音順でソートしたい (索引や用語集の作成)。
+
+```python
+!pip install -q fugashi unidic-lite jaconv
+```
+
+```python
+from fugashi import Tagger
+import jaconv
+
+tagger = Tagger()
+
+def reading(word):
+    kana = "".join(w.feature.kana or w.surface for w in tagger(word))
+    return jaconv.kata2hira(kana)
+
+words = ["機械翻訳", "形態素解析", "言語モデル", "アテンション", "構文解析", "埋め込み", "要約", "分かち書き"]
+print(sorted(words))  # 文字コード順 (漢字が読みと無関係に並ぶ)
+for w in sorted(words, key=reading):
+    print(reading(w), w, sep="\t")
+```
+
+- 固有名詞や専門用語は読みを誤ることがあるので、最終的には人手の確認が必要。
+
+## DataFrame の大量テキストをまとめて分かち書きする {tokenize_pandas}
+
+数万件のテキスト列を持つ DataFrame を、進捗を見ながら効率よくトークン化したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import pandas as pd
+from fugashi import Tagger
+from tqdm.auto import tqdm
+
+df = pd.DataFrame({"text": ["今日は良い天気ですね。", "自然言語処理を勉強しています。", "明日は雨が降るらしい。"] * 10000})
+tagger = Tagger("-Owakati")  # Tagger は 1 回だけ作って使い回す (毎回作ると非常に遅い)
+
+tqdm.pandas()
+df["wakati"] = df["text"].progress_apply(lambda s: tagger.parse(s).strip())
+df.head(3)
+```
+
+```python
+# 複数コアで並列化 (プロセスごとに Tagger を作る)
+from joblib import Parallel, delayed
+import numpy as np
+
+def work(texts):
+    t = Tagger("-Owakati")
+    return [t.parse(s).strip() for s in texts]
+
+chunks = np.array_split(df["text"].to_numpy(), 8)
+results = Parallel(n_jobs=2)(delayed(work)(c) for c in chunks)
+df["wakati2"] = [s for chunk in results for s in chunk]
+print((df["wakati"] == df["wakati2"]).all())
+```
+
+- Colab の無料枠は 2 コアなので並列化の効果は 2 倍弱。MeCab は 1 コアでも毎秒数万文は処理できる。
+
 ## IPA 辞書で MeCab を使う {mecab_ipadic}
 
 過去の研究や既存のコードと合わせるため、UniDic ではなく IPA 辞書で解析したい。
@@ -340,7 +499,7 @@ for q in ["東京大学", "コロナ", "新型コロナウイルス感染症"]:
 
 - mecab-ipadic-NEologd は、はてなキーワード・郵便番号データ・駅名・ニュース記事・ウェブの文書などから集めた新語・固有表現を IPA 辞書 (mecab-ipadic-2.7.0-20070801) に追加したシステム辞書 (佐藤敏紀氏ら、Apache License 2.0)。IPA 辞書と同じ素性の並びで読みも付く。apt の mecab-ipadic-utf8 と pip の `ipadic` (前のレシピ「IPA 辞書で MeCab を使う」) は同じ版の IPA 辞書。NEologd は IPA 辞書の語の読みや生起コストにもパッチを当てるので、IPA 辞書との差がすべて新語によるものとは限らない。
 - **更新は止まっている。** README には「少なくとも毎週 2 回更新」とあるが、master の最後のコミットは 2020 年 9 月 14 日 (シードのデータは 2020-09-10 版) で、それ以降の語は入っていない (2026 年 11 月時点で、リポジトリはアーカイブされていない)。上の例では、収録されていない「推しの子」が「推し / の子」に切れて「の子」が人名になり、「ChatGPT」は読みのない未知語になる。
-- 固有名詞の細分類は粗く、誤りもある (上の例では「ほぼ日刊イトイ新聞」が「人名」)。README の「欠点」にも、分類が不十分なこと、固有表現ではない語も固有表現として登録されていること、読みの誤りがあることが書かれている。入力は、NEologd の正規化ルールを実装した neologdn (3 章「文字列処理と正規化」の「neologdn で日本語の表記ゆれを正規化する」) で正規化してから解析するとよい。
+- 固有名詞の細分類は粗く、誤りもある (上の例では「ほぼ日刊イトイ新聞」が「人名」)。README の「欠点」にも、分類が不十分なこと、固有表現ではない語も固有表現として登録されていること、読みの誤りがあることが書かれている。入力は、NEologd の正規化ルールを実装した neologdn (文字列処理と正規化の章の「neologdn で日本語の表記ゆれを正規化する」) で正規化してから解析するとよい。
 - 長い固有名詞が 1 語になるので、トークン単位で「東京大学」「コロナ」と検索しても「東京大学大学院情報理工学系研究科」「新型コロナウイルス感染症」は見つからない。README も、ウェブの文書の解析では標準の IPA 辞書との併用を勧めている。単語の単位を評価データや学習済みモデルに合わせる必要がある場合は使わない。
 - インストーラーは元の IPA 辞書の tar.gz を自分でダウンロードし (SHA-1 で照合)、パッチを当ててビルドする。最初のダウンロード先 osdn.net は検証時 (2026 年 11 月) 名前解決できず、SourceForge から取得された。`-n` は GitHub の最新版に更新してからインストール、`-y` はテスト結果の確認を省略、`-u` はインストール先が自分のディレクトリでなくても sudo を使わずに `make install` する (付けないと Colab では `sudo make install` を通る)。インストール先は `mecab-config --dicdir` の下 (Colab では `/usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd`) で、`-p ディレクトリ` で変えられる。
 - README の目安では、標準のインストールに空きメモリが最低 2GB (推奨 6GB) 必要。手元の検証では、ビルド中の最大のプロセスのメモリ使用量 (最大常駐サイズ) は約 1.6GB、できた `sys.dic` は `ls -lh` で 866M (README では約 910MB) だった。`--ignore_adverb` などの `--ignore_*` で一部の辞書を外すと小さくなり (README によれば全部指定して約 300MB 減る)、`-a` では標準では入らない低頻度の日時・数量表現などもすべて入る。Colab のランタイムを作り直すとインストールはやり直しになる。
@@ -511,7 +670,7 @@ print(list(t.tokenize(text, wakati=True)))
 ```
 
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
-- 辞書を作らずに済ませるなら、次の「複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
+- 辞書を作らずに済ませるなら、この章の「連続する名詞をつなげて複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
 ## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
 
@@ -624,165 +783,6 @@ for s in ["外国人参政権について話し合った。", "東京都立大�
 - 生の出力の `@` で始まる行は、読みも品詞も同じで代表表記だけが違う候補 (同形異義語)。「スマホ」のような自動獲得語は代表表記がなく (`canon` が None)、意味情報に「Wikipediaリダイレクト:スマートフォン」が入った。
 - Juman++ (v2.0.0-rc4) は、最初の入力行が空行だと異常終了 (セグメンテーション違反) することがある (毎回ではない)。rhoknp (1.8.2) の `Jumanpp()` は起動時の確認で空の文を送るので、異常終了した回は「failed to start Juman++」という警告が出る (解析は再起動したプロセスで行われる)。`skip_sanity_check=True` で確認を省いたときは、最初に空文字列を渡さない。subprocess で直接渡すときも先頭に空行を置かない。
 - 配布物 (約 300MB) に学習済みのモデルが含まれるので、GitHub のソースではなくリリースの tar.xz を使う。ライセンスは Apache 2.0。最新版は 2023 年の v2.0.0-rc4。
-
-## 連続する名詞をつなげて複合名詞を抽出する {compound_noun}
-
-「自然/言語/処理」のように分割された専門用語を、名詞の連続としてまとめて取り出したい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from collections import Counter
-from fugashi import Tagger
-
-tagger = Tagger()
-
-def compound_nouns(text, min_len=2):
-    result, buf = [], []
-    for w in list(tagger(text)) + [None]:
-        is_noun = w is not None and (w.feature.pos1 in ("名詞", "接頭辞", "接尾辞")) and w.feature.pos2 != "数詞"
-        if is_noun:
-            buf.append(w.surface)
-        else:
-            if len(buf) >= min_len:
-                result.append("".join(buf))
-            buf = []
-    return result
-
-text = "深層学習に基づく自然言語処理では、大規模言語モデルの事前学習と文法誤り訂正への応用が研究されている。自然言語処理の応用は広い。"
-print(Counter(compound_nouns(text)).most_common())
-```
-
-- 専門用語抽出の最も単純なベースライン。頻度や連接の多様性でスコア付けすると用語抽出らしくなる。
-
-## 日本語のストップワードを除去する {stopwords_ja}
-
-「これ」「する」「ある」のように、どの文書にも出てきて特徴にならない語を取り除きたい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from fugashi import Tagger
-from spacy.lang.ja.stop_words import STOP_WORDS  # spaCy 同梱のリスト (モデル不要)
-
-print(len(STOP_WORDS), sorted(STOP_WORDS)[:30])
-```
-
-```python
-tagger = Tagger()
-MY_STOP = STOP_WORDS | {"思う", "言う", "行う"}  # タスクに合わせて追加
-
-def tokenize(text):
-    words = [w.feature.orthBase or w.surface for w in tagger(text) if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
-    return [w for w in words if w not in MY_STOP]
-
-print(tokenize("これは私が昨日行った実験の結果であると思います。"))
-```
-
-- 品詞フィルタ (助詞・助動詞・記号を落とす) とストップワードリストの併用が基本。
-- コーパスから自動で作る方法もある: 文書頻度が極端に高い語を落とす (`TfidfVectorizer(max_df=0.8)`)。
-
-## 単語 n-gram を作る {word_ngram}
-
-単語 bigram / trigram を数えて、よく出る言い回しを調べたい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from collections import Counter
-from fugashi import Tagger
-
-tagger = Tagger()
-
-def ngrams(tokens, n):
-    return list(zip(*[tokens[i:] for i in range(n)]))
-
-text = "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。吾輩はここで始めて人間というものを見た。"
-tokens = [w.surface for w in tagger(text)]
-print(ngrams(tokens, 2)[:5])
-print(Counter(ngrams(tokens, 2)).most_common(3))
-```
-
-```python
-# 文をまたがないようにし、文頭・文末記号を付ける
-def sent_ngrams(sentence, n=2):
-    tokens = ["<s>"] * (n - 1) + [w.surface for w in tagger(sentence)] + ["</s>"]
-    return ngrams(tokens, n)
-
-print(sent_ngrams("名前はまだ無い。"))
-```
-
-- NLTK にも `nltk.ngrams(tokens, n)` や `nltk.lm.preprocessing.pad_both_ends` がある。
-
-## 日本語の単語を読みの五十音順に並べる {sort_by_reading}
-
-漢字を含む単語リストを、文字コード順ではなく読みの五十音順でソートしたい (索引や用語集の作成)。
-
-```python
-!pip install -q fugashi unidic-lite jaconv
-```
-
-```python
-from fugashi import Tagger
-import jaconv
-
-tagger = Tagger()
-
-def reading(word):
-    kana = "".join(w.feature.kana or w.surface for w in tagger(word))
-    return jaconv.kata2hira(kana)
-
-words = ["機械翻訳", "形態素解析", "言語モデル", "アテンション", "構文解析", "埋め込み", "要約", "分かち書き"]
-print(sorted(words))  # 文字コード順 (漢字が読みと無関係に並ぶ)
-for w in sorted(words, key=reading):
-    print(reading(w), w, sep="\t")
-```
-
-- 固有名詞や専門用語は読みを誤ることがあるので、最終的には人手の確認が必要。
-
-## DataFrame の大量テキストをまとめて分かち書きする {tokenize_pandas}
-
-数万件のテキスト列を持つ DataFrame を、進捗を見ながら効率よくトークン化したい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-import pandas as pd
-from fugashi import Tagger
-from tqdm.auto import tqdm
-
-df = pd.DataFrame({"text": ["今日は良い天気ですね。", "自然言語処理を勉強しています。", "明日は雨が降るらしい。"] * 10000})
-tagger = Tagger("-Owakati")  # Tagger は 1 回だけ作って使い回す (毎回作ると非常に遅い)
-
-tqdm.pandas()
-df["wakati"] = df["text"].progress_apply(lambda s: tagger.parse(s).strip())
-df.head(3)
-```
-
-```python
-# 複数コアで並列化 (プロセスごとに Tagger を作る)
-from joblib import Parallel, delayed
-import numpy as np
-
-def work(texts):
-    t = Tagger("-Owakati")
-    return [t.parse(s).strip() for s in texts]
-
-chunks = np.array_split(df["text"].to_numpy(), 8)
-results = Parallel(n_jobs=2)(delayed(work)(c) for c in chunks)
-df["wakati2"] = [s for chunk in results for s in chunk]
-print((df["wakati"] == df["wakati2"]).all())
-```
-
-- Colab の無料枠は 2 コアなので並列化の効果は 2 倍弱。MeCab は 1 コアでも毎秒数万文は処理できる。
 
 ## 日本語の文を句点で分割する (括弧内は分割しない) {sentence_split_ja}
 
@@ -1046,11 +1046,11 @@ for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -nota
 ```
 
 - KyTea は Graham Neubig らが開発した解析器。文字と文字の間ごとに単語境界かどうかを、周りの文字 n-gram・文字種・辞書との一致を素性とする線形分類器 (線形 SVM やロジスティック回帰。学習は LIBLINEAR) で 1 か所ずつ独立に判定し、単語の品詞と読みも個別に推定する (点予測)。前のレシピの CRF はラベル列全体をまとめて決めるが、KyTea は隣の判定結果を使わないので、一部の境界や読みだけを付けた「部分的アノテーション」のデータでも学習できる。
-- 同梱のモデルは現代日本語書き言葉均衡コーパス (BCCWJ) や UniDic などで学習されたもので、活用語尾を語幹と別の単語にする (「渡 し た」「読 ん だ」「た く な かっ た」)。MeCab + UniDic の短単位 (「読ん」「たく」「なかっ」) より細かい。14 章の「Ckylark で日本語の句構造解析をする」の日本語モデルは、この分割を前提にしている。
+- 同梱のモデルは現代日本語書き言葉均衡コーパス (BCCWJ) や UniDic などで学習されたもので、活用語尾を語幹と別の単語にする (「渡 し た」「読 ん だ」「た く な かっ た」)。MeCab + UniDic の短単位 (「読ん」「たく」「なかっ」) より細かい。構文解析の章の「Ckylark で日本語の句構造解析をする」の日本語モデルは、この分割を前提にしている。
 - 読みはひらがなで、単語の表記に対応する部分だけが付く (「渡」→「わた」)。送り仮名が別の単語になるので、この章の「漢字の読みを取得してふりがな (ルビ) を付ける」(送り仮名ごとルビが付く) と違い、漢字の部分だけにルビを付けやすい。辞書で読みの候補が 1 つしかない語はスコアが 100 になり、「日本」のように候補が複数ある語は文脈で結果が変わる (「にほん」と「にっぽん」)。
 - 辞書にない語の推定は誤ることもある (「推し活」は「推 (お) / し活」に分割された)。Python のバインディングからは未知語かどうかは分からない。コマンド版の `kytea -unktag '[UNK]'` で同じ文を試すと、「鬼滅」「ジーピーティー」「し活」「エモ」「ポチポチ」に印が付き、「スマホ」「インスタ」は KyTea の辞書にある語だった。
 - 検証環境で 10,000 文にかかった時間は、品詞・読みありが 0.8〜0.9 秒、分割だけ (`-notags`) が約 0.15 秒、MeCab + UniDic が 0.1 秒ほど。モデルの読み込みに約 2 秒かかるので、`Mykytea` は 1 回だけ作って使い回す。
-- pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea` (`-part` で部分的アノテーション、`-dict` で辞書を与える) が要るなら、14 章の Ckylark のレシピのようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7 (2014 年)、リポジトリの最後の更新は 2020 年。
+- pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea` (`-part` で部分的アノテーション、`-dict` で辞書を与える) が要るなら、構文解析の章の「Ckylark で日本語の句構造解析をする」のようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7 (2014 年)、リポジトリの最後の更新は 2020 年。
 
 ## HMM で品詞タガーを作る {hmm_tagger}
 

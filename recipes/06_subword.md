@@ -210,7 +210,31 @@ print("最大長:", tokenizer.model_max_length)
 ```
 
 - 東北大 BERT は MeCab で単語分割してから WordPiece をかけるので `fugashi` と `unidic-lite` が必要。
-- `##` は「前のトークンに続く」印。`decode` すると日本語でもトークン間に空白が入る (次々項を参照)。
+- `##` は「前のトークンに続く」印。`decode` すると日本語でもトークン間に空白が入る (この章の「日本語 BERT のデコード結果から余分な空白を消す」を参照)。
+
+## 日本語 BERT のデコード結果から余分な空白を消す {decode_ja_spaces}
+
+日本語 BERT の `decode()` はトークン間に空白を入れてしまう。元の文のように連結したい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("tohoku-nlp/bert-base-japanese-v3")
+ids = tokenizer("東京スカイツリーは634メートルです。")["input_ids"]
+print(tokenizer.decode(ids, skip_special_tokens=True))
+
+def decode_ja(ids):
+    tokens = tokenizer.convert_ids_to_tokens(ids, skip_special_tokens=True)
+    return "".join(t[2:] if t.startswith("##") else t for t in tokens)
+
+print(decode_ja(ids))
+```
+
+- 単純に `.replace(" ", "")` すると英単語間の空白も消える。厳密に原文へ戻したい場合は、オフセットを返すトークナイザ (この章の「トークンと元テキストの文字位置を対応付ける (offset mapping)」) を使う。
 
 ## パディングと切り詰めをしてバッチのテンソルを作る {padding_truncation}
 
@@ -262,30 +286,6 @@ print(tokenizer.decode(batch["input_ids"][0]))
 ```
 
 - RoBERTa 系には `token_type_ids` がなく、`</s></s>` で区切るだけ。`tokenizer(a, b)` と書いておけばモデルに合った形式になる。
-
-## 日本語 BERT のデコード結果から余分な空白を消す {decode_ja_spaces}
-
-日本語 BERT の `decode()` はトークン間に空白を入れてしまう。元の文のように連結したい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("tohoku-nlp/bert-base-japanese-v3")
-ids = tokenizer("東京スカイツリーは634メートルです。")["input_ids"]
-print(tokenizer.decode(ids, skip_special_tokens=True))
-
-def decode_ja(ids):
-    tokens = tokenizer.convert_ids_to_tokens(ids, skip_special_tokens=True)
-    return "".join(t[2:] if t.startswith("##") else t for t in tokens)
-
-print(decode_ja(ids))
-```
-
-- 単純に `.replace(" ", "")` すると英単語間の空白も消える。厳密に原文へ戻したい場合は、オフセットを返すトークナイザ (次項) を使う。
 
 ## トークンと元テキストの文字位置を対応付ける (offset mapping) {offset_mapping}
 

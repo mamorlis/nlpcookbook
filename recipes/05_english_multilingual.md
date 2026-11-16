@@ -1,6 +1,6 @@
 # 英語・多言語の前処理
 
-英語を中心に、空白で区切られる言語や中国語などの基本的な前処理。
+英語を中心に、空白で区切られる言語や中国語などの基本的な前処理。英語のスペルミスの訂正と読みやすさの指標は「文法誤り訂正と言語教育」の章を参照。
 
 ## 英文を単語と文に分割する (NLTK) {nltk_tokenize}
 
@@ -323,36 +323,6 @@ print(sorted({l for s in wn.synsets("美しい", lang="jpn") for l in s.lemma_na
 
 - 同義語によるデータ拡張 (EDA) や、語義曖昧性解消のベースライン (Lesk) に使える。
 
-## 英語のスペルミスを訂正する {spellcheck}
-
-タイプミスを含む英文から誤りを見つけ、修正候補を出したい。
-
-```python
-!pip install -q pyspellchecker
-```
-
-```python
-import re
-from spellchecker import SpellChecker
-
-spell = SpellChecker()
-text = "I recieved a wonderfull mesage from my freind yestarday about langauge procesing"
-words = re.findall(r"[a-z']+", text.lower())
-for w in spell.unknown(words):
-    print(w, "→", spell.correction(w), sorted(spell.candidates(w) or [])[:5])
-```
-
-```python
-def correct(text):
-    return re.sub(r"[A-Za-z']+", lambda m: spell.correction(m.group()) or m.group() if m.group().lower() in spell.unknown([m.group()]) else m.group(), text)
-
-print(correct(text))
-spell.word_frequency.load_words(["nlp", "tokenizer"])  # 専門用語を辞書に追加
-print(spell.unknown(["nlp", "tokenizer", "transformr"]))
-```
-
-- 編集距離と単語頻度に基づく Norvig 方式。文脈は見ないので `their/there` のような実在語の誤りは直せない。文脈を見るには文法誤り訂正の章を参照。
-
 ## 英単語の単数形・複数形・冠詞を変換する (inflect) {inflect}
 
 テンプレートから英文を生成するとき、数に応じて複数形にしたり `a/an` を正しく付けたりしたい。
@@ -404,31 +374,6 @@ def spell_out(text, lang="en"):
 
 print(spell_out("I have 3 cats and 12 dogs, which cost 99.5 dollars."))
 ```
-
-## 英文の読みやすさ (リーダビリティ) を測る {readability_en}
-
-英文の難易度を、学年レベルなどの指標で数値化したい (教材の選定、平易化の評価)。
-
-```python
-!pip install -q textstat
-```
-
-```python
-import textstat
-
-easy = "The cat sat on the mat. It was a sunny day. The cat was happy."
-hard = ("The proliferation of large-scale pretrained language models has precipitated a fundamental "
-        "reconsideration of evaluation methodologies within computational linguistics.")
-
-for name, text in [("easy", easy), ("hard", hard)]:
-    print(name)
-    print("  Flesch Reading Ease  :", round(textstat.flesch_reading_ease(text), 1), "(高いほど易しい)")
-    print("  Flesch-Kincaid Grade :", round(textstat.flesch_kincaid_grade(text), 1), "(米国の学年)")
-    print("  Gunning Fog          :", round(textstat.gunning_fog(text), 1))
-    print("  音節数 / 単語数 / 文数:", textstat.syllable_count(text), textstat.lexicon_count(text), textstat.sentence_count(text))
-```
-
-- どの指標も「文の長さ」と「単語の長さ (音節数)」の組み合わせ。短い文章では値が不安定になる。
 
 ## テキストが何語で書かれているか判定する (langdetect) {langdetect}
 
