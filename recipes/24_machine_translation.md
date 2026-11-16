@@ -513,32 +513,28 @@ for src, hyp, ref in list(zip(open("data/test.ja"), hyps, refs))[:8]:
 対訳データだけから、ニューラル機械翻訳モデルを自分で学習したい。サブワード分割、モデルの定義、学習、ビームサーチ、BLEU による評価までを一通り行う。
 
 ```python
-!pip install -q datasets sentencepiece sacrebleu
+!pip install -q sentencepiece sacrebleu
 ```
 
 ```python
+import gzip
 import random
 import re
-from datasets import load_dataset
+import urllib.request
 
-ds = load_dataset("Helsinki-NLP/opus-100", "en-ja")
+# 田中コーパス (EDRDG 配布版、CC BY)。Tatoeba の日英対訳で、"A: 日本語<TAB>English#ID=..." の行が 1 対
+raw = gzip.decompress(urllib.request.urlopen("https://www.edrdg.org/pub/Nihongo/examples.utf.gz").read()).decode("utf-8")
+pairs = [m.groups() for m in re.finditer(r"^A: (.+?)\t(.+?)#ID=", raw, re.M)]
 
-def clean(pairs, max_len=60):
-    out = []
-    for p in pairs:
-        ja, en = p["ja"].strip(), p["en"].strip()
-        if not (0 < len(ja) <= max_len and 0 < len(en.split()) <= 30):
-            continue
-        if not re.search(r"[ぁ-んァ-ヶ一-龥]", ja) or re.search(r"[ぁ-んァ-ヶ一-龥]", en):   # 日本語側に日本語がない・英語側に日本語が混ざる対を除く
-            continue
-        out.append((ja, en))
-    return out
-
+# 日本語・英語のどちらかが同じ対は 1 つだけ残す (学習とテストに同じ文が入るのを防ぐ)
+seen_ja, seen_en, uniq = set(), set(), []
+for ja, en in sorted(pairs):
+    if ja not in seen_ja and en not in seen_en:
+        seen_ja.add(ja); seen_en.add(en); uniq.append((ja, en))
 random.seed(0)
-train = clean(ds["train"]["translation"][:300000])
-valid = clean(ds["validation"]["translation"])[:500]
-test = clean(ds["test"]["translation"])[:1000]
-print(len(train), len(valid), len(test), train[0])
+random.shuffle(uniq)
+test, valid, train = uniq[:1000], uniq[1000:1500], uniq[1500:]
+print(len(pairs), "→", len(uniq), "対 /", len(train), len(valid), len(test), train[0])
 ```
 
 ```python
@@ -585,7 +581,7 @@ def batches(data, batch_size, shuffle):
 ```
 
 ```python
-EPOCHS, BATCH, PEAK_LR, WARMUP = 6, 128, 7e-4, 2000
+EPOCHS, BATCH, PEAK_LR, WARMUP = 12, 128, 7e-4, 2000
 optimizer = torch.optim.AdamW(model.parameters(), lr=PEAK_LR, betas=(0.9, 0.98), weight_decay=0.01)
 schedule = lambda step: min((step + 1) / WARMUP, math.sqrt(WARMUP / (step + 1)))       # 線形に上げてから、ステップ数の平方根に反比例して下げる
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
@@ -633,36 +629,46 @@ for (ja, en), hyp in list(zip(test, hyps))[:6]:
     print(f"{ja}\n   訳: {hyp}\n   参照: {en}")
 ```
 
-- 流れは「対訳データの掃除 → サブワード分割 → モデルの定義 → 学習 → ビームサーチで翻訳 → BLEU で評価」。事前学習済みモデルを使わなくても、短い定型的な文なら翻訳らしいものが出てくる。
-- モデルは約 1,150 万パラメータの小さな Transformer。RTX A5000 で 6 エポックが約 6 分 (T4 ならその 2〜3 倍)。
-- 実測の BLEU は 6 エポックで 2.8、12 エポックで 5.3 (検証損失はまだ下がり続けていた)。同じテストセットで、大規模データで学習済みの `Helsinki-NLP/opus-mt-ja-en` は 17.6 なので、ゼロから学習したモデルとの差は大きい。opus-100 の日英は字幕が中心で、対訳のずれや意訳が多く、少ないデータで学習するには難しいデータでもある。
+- 流れは「対訳データの掃除 → サブワード分割 → モデルの定義 → 学習 → ビームサーチで翻訳 → BLEU で評価」。事前学習済みモデルを使わなくても、十数万文対の短い文なら翻訳らしいものが出てくる。
+- モデルは約 1,150 万パラメータの小さな Transformer。RTX A5000 で 12 エポックが約 6 分 (T4 ならその 2〜3 倍)。
+- 重複を除かずにランダムに分けると、学習データと同じ文がテストに入り、BLEU が約 21 と高めに出た。Tatoeba には同じ文や言い換えの対が多いので、分割の前に重複を除く。
+- データの質が結果を大きく左右する。田中コーパスは短く対訳のずれが少ない文が多く、BLEU は 12 エポックで約 18 だった。同じモデルを、字幕のような会話文が多い opus-100 (29 万文対) で学習すると、BLEU は 3〜5 にとどまった。
+- EDRDG 版は Tatoeba から定期的に更新されるので、実行する日によってデータの件数や BLEU の値が少し変わる。固定の分割で比べたいなら、田中コーパスから 5 万文対を抜き出した [small_parallel_enja](https://github.com/odashi/small_parallel_enja) を使う (英語は小文字化・トークン化済み)。
 - 学習率のウォームアップ (最初は小さく、徐々に上げる) がないと、Transformer の学習は発散しやすい。ラベル平滑化と勾配クリッピングも定番の設定。
-- 検証損失が下がらなくなったら学習を止める。データが少ないのに層を増やしても良くならない (`d_model=512` で約 3,800 万パラメータにすると、同じ 6 エポックでは BLEU 0.0 になり、どの文も「I'm sorry.」と訳した)。
+- 検証損失が下がらなくなったら学習を止める。データが少ないのに層を増やしても、過学習するだけで良くならない。
 - 本格的に学習するなら、データを増やし (JParaCrawl など数千万文対)、逆翻訳で単言語データを活用し、fairseq や Marian、OpenNMT などの専用ツールを使う。
 
 ## 学習済みの翻訳モデルを自分の分野のデータでファインチューニングする {mt_finetune gpu norun}
 
-公開されている翻訳モデルを、自分の分野の対訳データで追加学習して、その分野での訳質を上げたい。ここでは手順を示すために、映画やドラマの字幕が中心の opus-100 を使う。
+公開されている翻訳モデルを、自分の分野の対訳データで追加学習して、その分野での訳質を上げたい。ここでは、田中コーパス (Tatoeba の日英対訳。辞書や教科書の例文のような短い文) を「自分の分野」に見立てる。
 
 ```python
 !pip install -q datasets sentencepiece sacremoses sacrebleu accelerate
 ```
 
 ```python
+import gzip
+import random
 import re
-from datasets import Dataset, load_dataset
+import urllib.request
+from datasets import Dataset
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 model_name = "Helsinki-NLP/opus-mt-ja-en"        # 日英の Marian モデル (約 300MB)
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
 
-ds = load_dataset("Helsinki-NLP/opus-100", "en-ja")
-def clean(pairs):
-    return [p for p in pairs if 0 < len(p["ja"]) <= 80 and 0 < len(p["en"].split()) <= 40 and re.search(r"[ぁ-んァ-ヶ一-龥]", p["ja"])]
-
-train = Dataset.from_list(clean(ds["train"]["translation"][:60000])).shuffle(seed=0).select(range(30000))
-test = Dataset.from_list(clean(ds["test"]["translation"])).select(range(500))
+# 田中コーパス (EDRDG 配布版、CC BY)。日本語・英語のどちらかが同じ対は 1 つだけ残してから分ける
+raw = gzip.decompress(urllib.request.urlopen("https://www.edrdg.org/pub/Nihongo/examples.utf.gz").read()).decode("utf-8")
+pairs = [m.groups() for m in re.finditer(r"^A: (.+?)\t(.+?)#ID=", raw, re.M)]
+seen_ja, seen_en, uniq = set(), set(), []
+for ja, en in sorted(pairs):
+    if ja not in seen_ja and en not in seen_en:
+        seen_ja.add(ja); seen_en.add(en); uniq.append((ja, en))
+random.seed(0)
+random.shuffle(uniq)
+test = Dataset.from_list([{"ja": ja, "en": en} for ja, en in uniq[:500]])
+train = Dataset.from_list([{"ja": ja, "en": en} for ja, en in uniq[1500:31500]])   # 3 万文対だけ使う
 
 def preprocess(batch):
     return tokenizer(batch["ja"], text_target=batch["en"], truncation=True, max_length=64)   # text_target が訳文側 (labels になる)
@@ -711,8 +717,9 @@ for ja, en, b, a in list(zip(test["ja"], test["en"], before, after))[:6]:
 model.save_pretrained("mt-finetuned"); tokenizer.save_pretrained("mt-finetuned")
 ```
 
-- ゼロから学習するよりはるかに少ないデータと時間で、特定の分野の文体や用語に合わせられる。T4 GPU で 3 万文対・1 エポックが 5 分程度。
-- このデータでは、微調整しても BLEU は上がらない (実測で 17.6 → 17.5。学習率 1e-4 や 3 エポックにすると 15.6〜16.5 に下がった)。`opus-mt-ja-en` は字幕を含む OPUS のデータですでに学習されているので、opus-100 は「自分の分野」になっていない。効果が出るのは、特許・医療・社内文書など、元のモデルが見ていない分野のデータで微調整したとき。微調整の前に、元のモデルがその分野をどれだけ訳せるかを必ず測る。
+- ゼロから学習するよりはるかに少ないデータと時間で、特定の分野の文体や用語に合わせられる。RTX A5000 で 3 万文対・1 エポックが 1 分弱 (T4 ならその 2〜3 倍)。
+- 実測の BLEU は 39.9 → 43.8。「I've」→「I have」のように短縮形を避けるなど、田中コーパスの英訳の文体に寄る。2 エポックにしても、全 13.8 万文対で学習しても 43.3〜43.6 で、それ以上は上がらなかった。
+- 微調整前から BLEU が高いのは、`opus-mt-ja-en` が Tatoeba を含む OPUS のデータで学習されていて、テスト文をすでに見ている可能性があるため。分野が元のモデルの学習データと重なっていると、微調整の効果は出にくい (字幕が多い opus-100 で同じことをすると、BLEU は 17.6 → 17.5 で上がらなかった)。微調整の前に、元のモデルがその分野をどれだけ訳せるかを必ず測る。
 - 学習率は小さめ (1e-5〜5e-5) にする。大きすぎると、元のモデルが持っていた一般的な翻訳能力が壊れる (破滅的忘却)。
 - 微調整後は、対象の分野だけでなく、一般的な文のテストセットでも評価する。分野内で上がって分野外で下がるのが典型的な副作用。
 - BLEU の差が小さいときは、評価の章の検定 (ブートストラップ) で有意かどうかを確かめる。訳文を実際に見比べることも欠かせない。
