@@ -103,10 +103,11 @@ for s, row in zip(sents, sim):
 
 ```python
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
 
 name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"   # 多言語 NLI モデル
-tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+tokenizer = PreTrainedTokenizerFast.from_pretrained(name)
 model = AutoModelForSequenceClassification.from_pretrained(name).eval()
 print(model.config.id2label)
 
@@ -133,6 +134,7 @@ for claim in ["売上高は増加した。", "営業利益は増加した。", "
 - NLI は「ゼロショット分類」「事実整合性の評価」「言い換えの検証」などの部品として広く使われる。
 - 語彙の重なりが大きいと含意と判定しやすい、といった表面的な手がかりへの依存 (アーティファクト) が知られている。過信は禁物。
 - 日本語のデータセットには JNLI (JGLUE)、JSICK、JaNLI などがある。
+- mDeBERTa のトークナイザーの不具合: transformers 5 系では、`AutoTokenizer` が返す `DebertaV2Tokenizer` が、全角の括弧や英数字 (「（」「ＡＢＣ」など) を [UNK] にしてしまう (transformers の issue #49622。5.0〜5.23 で確認、4.57 では正しい)。エラーは出ないまま入力の一部が失われる。リポジトリにある tokenizer.json を `PreTrainedTokenizerFast.from_pretrained` で直接読めば、正しく分割される。`pipeline` で使うときは、こうして読んだトークナイザーを `tokenizer=` に渡す。上流で直れば不要になる。
 
 ## アテンションの重みをヒートマップで可視化する {attention_viz}
 
@@ -186,11 +188,19 @@ print(f"it → animal が最大のヘッド: layer {layer + 1}, head {head + 1} 
 言語モデルが「次に何が来る」と予測しているのか、上位候補と確率を直接見たい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def next_tokens(prefix, k=6):
@@ -228,11 +238,19 @@ print(compare("富士山があるのは", ["日本", "中国", "アメリカ"]))
 
 ```python
 import math
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def score(text):
@@ -267,12 +285,20 @@ for good, bad in pairs:
 
 ```python
 import math
+import sentencepiece as spm
 import torch
 from IPython.display import HTML
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def surprisals(text):
@@ -296,7 +322,7 @@ HTML("".join(show(t) for t in texts))
 ```
 
 - サプライザル (−log₂ 確率) は、心理言語学では読み時間と相関することが知られている指標。
-- 文法誤り (「コーヒーを食べて」「会社を行き」) や意味的に意外な語 (「月に」) で値が跳ね上がる。
+- 文法誤り (「コーヒーを食べて」「会社を行き」) や意味的に意外な語 (「月」) で値が跳ね上がる。
 - 文頭のトークンは文脈がないので、いつも値が大きい。
 
 ## テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる {generation_decoding}
@@ -304,11 +330,19 @@ HTML("".join(show(t) for t in texts))
 言語モデルに文章の続きを生成させたい。`temperature` や `top_p` などの設定で出力がどう変わるかを確かめたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B パラメータの小さな日本語 LLM (CPU でも動く)
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 messages = [{"role": "user", "content": "猫を主人公にした物語の書き出しを、一文だけ書いてください。"}]

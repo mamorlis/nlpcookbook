@@ -1,14 +1,17 @@
 # RAG (検索拡張生成)
 
-手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる。検索の部品 (BM25、意味検索、ハイブリッド、リランキング) は「検索」の章を参照。
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる (数十問を何度も生成する「RAG 全体を評価して設定を比べる」と「RAG の失敗を検索と生成に切り分けて分析する」は GPU を使う)。検索の部品 (BM25、意味検索、ハイブリッド、リランキング) は「検索」の章を参照。
 
 ## 検索した文書を LLM に渡して答えさせる (最小の RAG) {rag_minimal}
 
 LLM が知らない情報 (社内文書、最新情報) について、関連文書を検索してから答えさせたい。GPU なしで動かしたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 docs = [
@@ -24,6 +27,11 @@ doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。CPU でも 1 回答あたり数秒〜十数秒 (メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=100):
@@ -53,6 +61,7 @@ for q in ["カレーはいくらですか？", "日曜日は何時まで開い�
 - RAG = 検索 (Retrieval) + 生成 (Generation)。検索なしだと、モデルは知らない店についてもっともらしい嘘 (ハルシネーション) を答えるか、答えられない。
 - 精度の大半は検索で決まる。まず「正解の文書が上位 k 件に入っているか」を評価し、ハイブリッド検索やリランキング (検索の章) で改善する。
 - もっと軽くしたいなら `sarashina2.2-1b-instruct-v0.1` や `0.5b` に替えられるが、資料を読み違えることが増える。GPU があるなら 7B 以上のモデルにすると安定する。
+- トークナイザーを読み込んだあとの数行は、transformers 5 系で sarashina2.2 の分割が学習時と変わってしまう不具合への対処 (LLM の章の「オープンな LLM とチャットする」の注意書きを参照)。この章のほかのレシピも同じ。
 
 ## 長い文書をチャンクに分割する {chunking}
 
@@ -225,8 +234,11 @@ print([r[3] for r in search("出張のホテル代はいくらまで？", limit=
 対話の途中の「それはいくら？」のような質問は、そのままでは検索に当たらない。質問を検索向けに書き換えたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 docs = [
@@ -242,6 +254,11 @@ doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=80):
@@ -291,9 +308,12 @@ RAG の回答がどの資料に基づいているかを示したい。LLM が付
 
 ```python
 import re
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, PreTrainedTokenizerFast
 
 docs = [
     "クックブック食堂の営業時間は平日 11 時から 15 時、土日は 11 時から 20 時です。月曜日は定休日です。",
@@ -308,6 +328,11 @@ doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=120):
@@ -333,7 +358,8 @@ print(answer)
 ```python
 # 検証: 回答の各文について、(1) 引用番号が実在するか (2) 引用先の資料がその文を含意するか (NLI)
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-nli_tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 def entailment(premise, hypothesis):
@@ -369,8 +395,11 @@ verify("営業時間は土日は 20 時までです [2]。クレジットカー�
 検索結果に答えがないのに、LLM が無理に答えを作ってしまうのを防ぎたい。検索の段階と生成の段階の両方で歯止めをかける。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 docs = [
@@ -395,6 +424,11 @@ for label, qs in [("答えがある", answerable), ("答えがない", unanswera
 ```python
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=80):
@@ -417,7 +451,7 @@ for q in ["カレーはいくらですか？", "明日の東京の天気は？",
 ```
 
 - 類似度のしきい値だけでは「話題は近いが答えは載っていない」質問 (アレルギー対応) を弾けない。プロンプトでの指示と二段構えにする。
-- 断る指示がなくても断れることはあるが、一般論を付け足して長くなりがち。指示があると短く言い切る。
+- 断る指示がなくても断れることはある (ここでもアレルギーの質問には「その有無は不明です」と答えた)。ただ、言い方は毎回まちまちで、一般論を付け足して長くなることもある。指示があると「わかりません」と言い切るので、断ったかどうかを機械的に判定しやすい。
 - しきい値はモデルごとに違う (E5 は無関係な文でも 0.7 台後半が出る)。答えがある質問とない質問の例を用意して、分布を見て決める。
 - 「わかりません」と言わせすぎると、答えられる質問まで断るようになる。断るべき質問と答えるべき質問の両方で評価する。
 
@@ -564,7 +598,7 @@ import re
 import unicodedata
 import pandas as pd
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
 
 # 評価データ: 質問、検索された資料、システムの回答、正解 (answerable=False は「答えられない」が正解)
 data = [
@@ -580,7 +614,8 @@ norm = lambda s: re.sub(r"\s", "", unicodedata.normalize("NFKC", s))
 REFUSAL = re.compile(r"わかりません|分かりません|お答えできません|記載がありません|書かれていません")
 
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 def faithfulness(context, answer):
@@ -622,11 +657,19 @@ print(f"忠実性が 0.5 未満の回答 (資料にないことを述べてい�
 ```python
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
 
@@ -693,7 +736,7 @@ for a in ["日曜日は 20 時まで営業しています。", "定休日は月�
 - 正しさ・関連性・忠実性を LLM で採点する考え方をまとめたライブラリに RAGAS がある。API のモデルを使う前提だが、指標の定義は参考になる。
 - 小さなモデルは判定の精度が限られる。最終的な評価には、より大きなモデル (評価の章の LLM-as-a-judge を参照) か人手を使う。
 
-## RAG 全体を評価して設定を比べる {rag_eval_pipeline}
+## RAG 全体を評価して設定を比べる {rag_eval_pipeline gpu}
 
 RAG を「検索できたか」「正しく答えたか」「資料に基づいているか」「答えがないときに断れたか」に分けて測り、設定 (渡す文書の数など) を数値で比べたい。
 
@@ -706,10 +749,13 @@ import re
 import unicodedata
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, PreTrainedTokenizerFast
 
 # 評価セット (「RAG の評価セットを用意する」と同じ作り方): JSQuAD の段落 + 40 問 + 答えのない質問 5 問
 ds = load_dataset("sbintuitions/JSQuAD", split="validation")
@@ -733,18 +779,25 @@ print(len(passages), "段落 /", len(eval_set), "問")
 ```
 
 ```python
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (CPU)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (GPU を使う。45 問 × 2 設定を生成するので、CPU では 2 時間以上かかる)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-nli_tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 @torch.no_grad()
 def generate(question, contexts):
     prompt = ("以下の資料だけに基づいて、質問に一文で短く答えてください。資料に答えが書かれていない場合は、推測せずに「わかりません」とだけ答えてください。\n\n"
               "# 資料\n" + "\n".join(f"- {c}" for c in contexts) + f"\n\n# 質問\n{question}")
-    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**inputs, max_new_tokens=60, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
@@ -768,7 +821,7 @@ def run(k):
                      "refused": refused, "faithful": None if refused else faithfulness([passages[j] for j in ctx_ids], answer) > 0.5, "answer": answer})
     return pd.DataFrame(rows)
 
-results = {k: run(k) for k in [1, 3]}
+results = {k: run(k) for k in [1, 3]}   # 45 問 × 2 設定 (k=1, 3)。T4 で 10 分程度 (NLI は CPU で計算)
 ```
 
 ```python
@@ -789,11 +842,11 @@ results[3][["q", "hit", "correct", "refused", "faithful", "answer"]].head(8)
 
 - RAG の評価は 4 つに分けて見る: 検索 (正解の文書を渡せたか)、正答 (正しく答えたか)、忠実性 (渡した資料に基づいているか)、棄却 (答えがないときに断れたか)。1 つの数字にまとめると、どこを直せばよいかが分からなくなる。
 - 「検索が当たった質問のみの正答率」が低ければ生成側の問題、全体の正答率との差が大きければ検索側の問題。
-- 渡す文書を増やすと検索の当たりは増えるが、無関係な文書も増えて、読み違いや遅延の原因になる。両方の数字を見て決める。
+- 渡す文書を増やすと検索の当たりは増えるが、無関係な文書も増えて、読み違いや遅延の原因になる。両方の数字を見て決める。ここでは k=1 から k=3 にすると、検索の当たりが 0.85 から 0.925、正答率が 0.75 から 0.80 に上がった (T4 と同じ float16 で実行した値)。
 - 正答の判定は「正解の文字列を含むか」という簡易なもの。言い換えた正答を誤りと数え、正解の語を含むだけの誤答を正答と数えることがある。この章の「RAG の回答の正しさを LLM に判定させる」と併用する。
 - 45 問では、数ポイントの差は誤差の範囲。設定を決めるときは問数を増やし、評価の章のブートストラップで信頼区間を付ける。
 
-## RAG の失敗を検索と生成に切り分けて分析する {rag_error_analysis}
+## RAG の失敗を検索と生成に切り分けて分析する {rag_error_analysis gpu}
 
 RAG の正答率が低い。検索が悪いのか、LLM の読み取りが悪いのかを 1 問ずつ切り分けて、直すべき箇所を特定したい。
 
@@ -806,9 +859,12 @@ import re
 import unicodedata
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 ds = load_dataset("sbintuitions/JSQuAD", split="validation")
@@ -826,15 +882,21 @@ embedder = SentenceTransformer("intfloat/multilingual-e5-small")
 p_emb = embedder.encode(["passage: " + p for p in passages], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
 ranking = np.argsort(-(embedder.encode(["query: " + e["q"] for e in eval_set], normalize_embeddings=True) @ p_emb.T), axis=1)
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (GPU を使う。T4 で 1 問あたり 1〜2 秒)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 @torch.no_grad()
 def generate(question, contexts):
     prompt = ("以下の資料だけに基づいて、質問に一文で短く答えてください。資料に答えが書かれていない場合は「わかりません」とだけ答えてください。\n\n"
               "# 資料\n" + "\n".join(f"- {c}" for c in contexts) + f"\n\n# 質問\n{question}")
-    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**inputs, max_new_tokens=60, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
@@ -843,7 +905,7 @@ correct = lambda answer, golds: any(norm(g) in norm(answer) for g in golds)
 ```
 
 ```python
-K = 3
+K = 3   # 50 問を生成する (誤答の切り分けで追加の生成あり)。T4 で 2 分程度
 rows = []
 for i, e in enumerate(eval_set):
     ids = ranking[i, :K].tolist()
@@ -871,12 +933,12 @@ for cat in df["category"].unique():
 ```
 
 ```python
-# 上限の確認: 検索が完璧だったら (正解段落だけを渡したら) 正答率はどこまで上がるか
+# 上限の確認: 検索が完璧だったら (正解段落だけを渡したら) 正答率はどこまで上がるか (50 問をもう一度生成する。T4 で 1〜2 分)
 oracle = np.mean([correct(generate(e["q"], [passages[e["gold"]]]), e["answers"]) for e in eval_set])
 print(f"現在の正答率 {(df['category'] == '正答').mean():.2f} / 正解段落を必ず渡した場合 {oracle:.2f} / Recall@{K} = {(df['gold_rank'] <= K).mean():.2f}")
 ```
 
 - 失敗を「検索の失敗」と「生成の失敗」に分けると、打ち手が決まる。検索の失敗が多ければ、ハイブリッド検索・リランキング・チャンクの見直し。生成の失敗が多ければ、プロンプト・渡す件数・モデルの見直し。
-- 「正解段落だけを渡した場合の正答率」は、検索をどれだけ改善しても超えられない上限。これが低いなら、検索より先にモデルやプロンプトを直す。
+- 「正解段落だけを渡した場合の正答率」は、検索をどれだけ改善しても超えられない上限。これが低いなら、検索より先にモデルやプロンプトを直す。ここでは現在の 0.82 に対して上限は 0.84 で、検索を直して増やせるのは 1 問程度。失敗の数も生成側 (6 問) が検索側 (3 問) より多い (T4 と同じ float16 で実行した値)。
 - 正解段落の順位 (`gold_rank`) を見ると、「あと少しで入っていた」のか「まったく見当違い」なのかが分かる。前者は渡す件数を増やすかリランキングで拾える。
 - 文字列照合で「誤答」とされたものには、言い換えただけの正答が混ざる。分類の前に、誤答の一覧を目で見て確かめる。

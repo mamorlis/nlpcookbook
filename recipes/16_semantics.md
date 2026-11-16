@@ -145,7 +145,7 @@ print(resolve(doc))
 - 置換後の文は不自然になることがある。人が読むためではなく、関係抽出や検索の前処理として使う。
 - Stanza の共参照モデルは英語のほか、ドイツ語、フランス語、スペイン語など多数の言語に対応している (日本語は未対応なので、前項の KWJA を使う)。
 
-## 代名詞が何を指すかを常識で判断させる (Winograd Schema Challenge) {winograd_ja}
+## 代名詞が何を指すかを常識で判断させる (Winograd Schema Challenge) {winograd_ja gpu}
 
 「狙撃兵はテロリストを撃った。彼は悪漢だったからだ。」の「彼」が誰を指すかのように、文法だけでは決まらず、常識が必要な照応の問題をモデルに解かせたい。
 
@@ -153,7 +153,10 @@ print(resolve(doc))
 import re, urllib.request
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 url = "https://raw.githubusercontent.com/ku-nlp/Winograd-Schema-Challenge-Ja/master/test.txt"
@@ -171,15 +174,21 @@ print(len(problems), "問"); print(problems[0]); print(problems[1])
 ```python
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 ONE_TWO = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["1", "2"]]
 
 @torch.no_grad()
 def p_first(text, pronoun, a, b):
     prompt = (f"次の文の「{pronoun}」が指しているのはどちらですか。番号だけで答えてください。\n\n文: {text}\n1. {a}\n2. {b}")
     chat = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, ONE_TWO].softmax(-1)[0])
+    ids = tokenizer(chat, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
+    return float(llm(ids).logits[0, -1, ONE_TWO].float().softmax(-1)[0])
 
 def solve(p):
     """選択肢の順序を入れ替えて 2 回聞き、平均する (1 番目を選びやすい、といった偏りを打ち消す)"""
@@ -189,7 +198,7 @@ def solve(p):
 
 sample = problems[:200]
 df = pd.DataFrame(sample)
-df["prediction"] = [solve(p) for p in sample]
+df["prediction"] = [solve(p) for p in sample]   # 1 問に 2 回ずつ計算する。T4 なら 200 問で 1〜2 分
 df["correct"] = df["prediction"] == df["answer"]
 print("正解率:", round(df["correct"].mean(), 3), "(でたらめなら 0.5)")
 ```
@@ -208,7 +217,7 @@ for r in df[~df["correct"]].head(5).itertuples():
 - 組になっていることが重要。片方だけ正解しても、「主語を選びやすい」「先に出たほうを選びやすい」といった癖で当たっただけかもしれない。組の両方に正解した割合のほうが、実力をよく表す。
 - 日本語版 (JWSC) は英語からの翻訳で作られている。日本語ではゼロ代名詞が自然な場面でも「彼」「それ」が使われるので、やや不自然な文が含まれる。
 - 事前学習済みモデルの登場で、この種の問題の正解率は大きく上がった。ただし、Web 上の類似文を覚えているだけの可能性や、データの偏りを使っている可能性が指摘されており、改良版 (WinoGrande など) が作られている。
-- 照応解析の一般的な方法は、この章の共参照解析のレシピを参照。
+- 照応解析の一般的な方法は、この章の「日本語の共参照解析をする (KWJA)」を参照。
 
 ## FrameNet と PropBank で述語の意味フレームと意味役割を調べる {framenet_propbank}
 

@@ -533,9 +533,12 @@ for n_per_class in [4, 16, 64]:
 学習データがまったくない状態で、自分で決めたカテゴリにテキストを分類したい。
 
 ```python
-from transformers import pipeline
+from transformers import PreTrainedTokenizerFast, pipeline
 
-clf = pipeline("zero-shot-classification", model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
+name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+tokenizer = PreTrainedTokenizerFast.from_pretrained(name)
+clf = pipeline("zero-shot-classification", model=name, tokenizer=tokenizer)
 
 labels = ["スポーツ", "経済", "テクノロジー", "料理", "政治"]
 texts = ["大谷翔平が今季 50 本目のホームランを放った。",

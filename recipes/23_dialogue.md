@@ -1,6 +1,6 @@
 # 対話システム
 
-規則ベース、FAQ 検索、タスク指向、LLM による雑談まで。チャットボットを組み立てる部品を、CPU で動く範囲で。
+規則ベース、FAQ 検索、タスク指向、LLM による雑談まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で (3B の LLM で何度も生成するレシピは GPU を使う)。
 
 ## 規則だけでチャットボットを作る (ELIZA 方式) {eliza_rule}
 
@@ -209,11 +209,19 @@ for turns in [["予約をお願いします", "明日の夜7時に4人で", "山
 LLM と何ターンも対話を続けたい。履歴が長くなると入力が膨らんで遅くなり、やがて上限を超えるので、長さを管理したい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。CPU でも 1 応答あたり数秒〜十数秒 (メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 class Chat:
@@ -253,21 +261,31 @@ for user in ["私の名前は田中です。来月、京都に 2 泊で行く予
 - 古いターンを捨てると、そこで話したこと (最初に名乗った名前) は忘れる。上限を小さくしてあるこの例では、最後の質問でそれが起きる。
 - 捨てるときは user と assistant の組で捨てる。片方だけ残すと、チャットテンプレートの交互の並びが崩れる。
 - 大事な情報を失わないための方法が、次項の「要約して覚えておく」。
+- トークナイザーを読み込んだあとの数行は、transformers 5 系で sarashina2.2 の分割が学習時と変わってしまう不具合への対処 (LLM の章の「オープンな LLM とチャットする」の注意書きを参照)。この章のほかのレシピも同じ。
 
-## 古い対話を要約して長い対話を続ける {chat_summary_memory}
+## 古い対話を要約して長い対話を続ける {chat_summary_memory gpu}
 
 長い対話で、古いターンを単に捨てると大事な情報を忘れてしまう。捨てる前に要約して、記憶として持ち越したい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど (GPU メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def generate(messages, max_new_tokens=100):
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -294,6 +312,7 @@ class SummaryChat:
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
+# 要約を含めて 8 回生成する。T4 で 1〜2 分 (モデルの読み込みを除く)
 chat = SummaryChat("あなたは旅行の相談に乗るアシスタントです。1〜2 文で短く答えてください。"
                    "「これまでの対話で分かっていること」は、あなたがユーザーから既に聞いた内容です。覚えているものとして答えてください。")
 for user in ["私の名前は田中です。来月、京都に 2 泊で行く予定です。", "混雑が苦手なので、静かな場所が好きです。", "秋におすすめのお寺を 1 つ教えてください。",
@@ -307,21 +326,33 @@ for user in ["私の名前は田中です。来月、京都に 2 泊で行く予
 - 要約は LLM の呼び出しが 1 回増える。毎ターンではなく、履歴が一定の長さを超えたときだけ行う。
 - 要約を重ねるうちに細部は落ちていく。確実に覚えておきたい事実 (名前、日程、決定事項) は、要約とは別に項目として抽出して保存する方法もある。
 - 過去の対話を検索できる形で保存しておき、関係する部分だけを取り出して入力に加える方法 (RAG と同じ考え方) もよく使われる。
+- この例では、最初のターンが要約に置き換わったあとでも、最後の質問に名前 (田中) と好み (静かな場所) を正しく答えた。この章の「対話の履歴を管理して、長くなったら古いターンを捨てる」では、古いターンを捨てたために名前を忘れる。
+- 要約にも誤りが入る。「対話に出てこないことは書かない」と指示しても、要約には対話にない「彼女は」(性別) が入った。要約は次の入力にそのまま使われるので、誤りも持ち越される。
+- 応答の中身も確かめる必要がある。静かな場所が好きだと言われたのに、混雑する紅葉の名所 (東福寺) を勧め、行き方では「JR 奈良線で一駅目の稲荷駅」と答えた (一駅目は東福寺駅)。3B のモデルが答える地名や店名、経路は誤りを含みうる。
 
-## キャラクターや口調を設定する (ペルソナ) {persona_prompt}
+## キャラクターや口調を設定する (ペルソナ) {persona_prompt gpu}
 
 チャットボットに一貫した性格や話し方を持たせたい。システムプロンプトと発話例でどこまで制御できるかを確かめたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど (GPU メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def chat(messages, max_new_tokens=70):
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -332,7 +363,7 @@ personas = {
     "執事": [{"role": "system", "content": "あなたは由緒ある屋敷に仕える老執事です。相手を「お嬢様」と呼び、非常に丁寧な言葉遣いで、2 文以内で話します。"}],
     "猫": [{"role": "system", "content": "あなたは人間の言葉を話す気まぐれな猫です。語尾に「にゃ」を付け、2 文以内で話します。人間の用事にはあまり興味がありません。"}],
 }
-for user in ["今日はなんだか疲れました。", "おすすめの食べ物はありますか？"]:
+for user in ["今日はなんだか疲れました。", "おすすめの食べ物はありますか？"]:   # 8 回生成する。T4 で 1〜2 分 (モデルの読み込みを除く)
     print("あなた:", user)
     for label, system in personas.items():
         print(f"  [{label}] {chat(system + [{'role': 'user', 'content': user}])}")
@@ -352,14 +383,19 @@ print("発話例あり:", chat(system + shots + [question]))
 - 発話例を 2〜3 往復入れると、語尾や言い回しが安定する。小さいモデルほど、説明より例のほうがよく効く。
 - 対話が長くなると設定が薄れていく。システムプロンプトは履歴を捨てても必ず残し、必要なら定期的に念押しする。
 - 実在の人物や既存作品のキャラクターを模倣させる場合は、権利と誤認のおそれに注意する。
+- 設定がすべて守られるとは限らない。この例の猫は語尾に「にゃ」を付けたが、「お疲れ様ですにゃ」のように丁寧語が混ざり、「人間の用事にはあまり興味がない」はずなのに人間の食べ物を親切に勧めた。設定なしの応答は長く、「2 文以内」の指定がないと途中で切れる。
+- 発話例を与えると応答は短くなったが、例で使った「ござる」ではなく「じゃ」で答えた。例の言い回しがそのまま写るわけではない。
 
-## 資料を調べて答えるチャットボットを作る (複数ターンの RAG) {chat_rag}
+## 資料を調べて答えるチャットボットを作る (複数ターンの RAG) {chat_rag gpu}
 
 対話の流れを踏まえながら、手元の資料を検索して答えるチャットボットを作りたい。雑談と資料に基づく回答を両立させたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 docs = [
@@ -374,12 +410,18 @@ docs = [
 embedder = SentenceTransformer("intfloat/multilingual-e5-small")
 doc_emb = embedder.encode(["passage: " + d for d in docs], normalize_embeddings=True)
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど (GPU メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def generate(messages, max_new_tokens=80):
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -387,10 +429,11 @@ def generate(messages, max_new_tokens=80):
 
 ```python
 import re
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
 
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-nli_tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 def supported(context, reply):
@@ -436,6 +479,7 @@ class RagChat:
         return reply, query, hits, score
 
 bot = RagChat()
+# 8 ターンの対話。T4 で 1 分弱
 for user in ["こんにちは。", "おすすめのメニューは何ですか？", "それはいくらですか？", "子ども向けのメニューはありますか？",
              "日曜の 18 時は開いていますか？", "クレジットカードは使えますか？", "ペットを連れて行けますか？", "ありがとうございました。"]:
     reply, query, hits, score = bot.say(user)
@@ -445,8 +489,9 @@ for user in ["こんにちは。", "おすすめのメニューは何ですか�
 
 - 各ターンで「(必要なら) 質問の書き換え → 検索 → 資料を付けて生成 → 資料との照合」を行う。
 - 小さな埋め込みモデルの類似度では、挨拶と質問、答えのある質問とない質問をうまく区別できない (挨拶のほうが類似度が高く出ることもある)。そこで、挨拶は規則で判定し、答えが資料にあるかどうかは生成した応答を NLI で資料と照合して確かめている。
-- 3B クラスのモデルは、資料にないこと (ペット) を聞かれると、もっともらしい答えを作ってしまうことが多い。照合で裏付けが取れない応答は定型文に差し替えると、誤った案内を防げる。そのかわり、正しい応答まで差し替えてしまうこともある (3 ターン目の値段の質問がその例。安全側に倒す設計)。
-- 質問の書き換えは、指示語を含むときだけ行う。毎回書き換えると、関係のない前の話題を持ち込んで検索を外すことがある (RAG の章の「質問を書き換える」を参照)。
+- 3B クラスのモデルは、資料にないこと (ペット) を聞かれると、もっともらしい答えを作ってしまうことが多い。照合で裏付けが取れない応答は定型文に差し替えると、誤った案内を防げる。そのかわり、答えが資料にある質問まで差し替えてしまうこともある。この例では、2 ターン目のおすすめメニュー (裏付け 0.09) と 6 ターン目のクレジットカード (0.00) が、正しい資料を検索できているのに定型文になった。安全側に倒す設計で、しきい値や NLI のモデルを変えると結果が変わる。
+- 差し替えた定型文は履歴にも残るので、次のターンの指示語が指す先がなくなる。3 ターン目の「それはいくらですか？」は、直前の応答が定型文だったため、「この食堂で特に人気のある料理やおすすめのメニューについて情報を得るには、どのように問い合わせるのが最適ですか？」という別の質問に書き換えられた。値段の資料は 2 番目に検索できていたが、質問がずれているので応答の裏付けは 0.00 になり、定型文に差し替えられた。
+- 質問の書き換えは、指示語を含むときだけ行う。毎回書き換えると、関係のない前の話題を持ち込んで検索を外すことがある (RAG の章の「検索しやすい形に質問を書き換える (文脈の補完と HyDE)」を参照)。
 - 検索した資料は、そのターンの入力にだけ付けて、履歴には質問と回答だけを残す。
 
 ## 入力と出力に安全策を入れる (ガードレール) {dialogue_guardrail}
@@ -516,21 +561,30 @@ for reply in ["日曜日は 20 時まで営業しております。", "アレル
 - 話題の判定は、範囲内の例文を増やすほど正確になる。しきい値は、通したい発話と止めたい発話の両方の例で決める。
 - より本格的には、有害表現の分類モデルや、入力と出力を別の LLM に審査させる方法を重ねる。医療・法律・金融のような分野では、答えてよい範囲を明確に決めておく。
 
-## 攻撃的な投稿に対して落ち着いた返答を作る (カウンタースピーチ) {counter_speech}
+## 攻撃的な投稿に対して落ち着いた返答を作る (カウンタースピーチ) {counter_speech gpu}
 
 差別的・攻撃的な投稿に対して、削除するだけでなく、冷静に反論したり、言われた側に寄り添ったりする返答を作りたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど (GPU メモリ約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 @torch.no_grad()
 def chat(prompt, max_new_tokens=140, **kwargs):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id, **kwargs)
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
@@ -544,7 +598,7 @@ STRATEGIES = {
 }
 PROMPT = ("SNS に次の投稿がありました。これに対する返信を書いてください。\n方針: {strategy}。\n"
           "条件: 相手を侮辱しない。攻撃的な言葉を使わない。2 文以内で、丁寧な言葉で書く。返信の文だけを出力する。\n\n投稿: {post}")
-for post in posts[:2]:
+for post in posts[:2]:   # 6 回生成する。T4 で 1〜2 分 (モデルの読み込みを除く)
     print("投稿:", post)
     for label, strategy in STRATEGIES.items():
         print(f"   [{label}] {chat(PROMPT.format(strategy=strategy, post=post))}")
@@ -573,7 +627,7 @@ for post in posts[:2]:
 - カウンタースピーチは、有害な投稿を削除するのではなく、言葉で対抗する取り組み。事実を示す、矛盾を指摘する、問いかける、当事者に共感を示す、などの方針がある。どれが有効かは場面による。
 - 明確な暴言だけでなく、悪意のない決めつけや「ほめ言葉」の形をとった偏見 (マイクロアグレッション) も対象になる。こちらは、相手を責めずに気付きを促す返答が向く。
 - LLM は、もっともらしい統計や研究結果を作ってしまうことがある。事実で反論する返答は、根拠を人が確認してから使う。確認できない数字は入れさせない。
-- 小さなモデルの出力には、実際に次のような失敗が出た: 英単語が混ざる (「peacefulな」)、当事者に寄り添う方針なのに、投稿者本人に向けて「応援しています」と書いてしまう、文の途中で切れる。方針が守られているかは、生成のたびに確かめる必要がある。
+- 小さなモデルの出力には、実際に次のような失敗が出た: 「2 文以内」の条件を守らずに 4 文書く、当事者に寄り添う方針なのに、投稿者本人に向けて「あなたの意見は一部の傾向を一般化している」「応援しています」と書いてしまう。英単語が混ざる (「peacefulな」のような) 失敗も起こりうる。方針が守られているかは、生成のたびに確かめる必要がある。
 - 返答が説教調・上から目線になると逆効果になる。生成した返答が攻撃的でないかを点検し、最終的には人が読んでから投稿する。自動で返信する仕組みにはしない。
 - モデルによっては、有害な投稿を入力に含むだけで応答を拒否することがある。その場合は、目的 (有害表現への対抗) を指示の中で明確にする。
 
@@ -587,11 +641,19 @@ for post in posts[:2]:
 
 ```python
 from threading import Thread
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto").eval()   # float16 で GPU に載せる (約 7GB)
 SYSTEM = "あなたは親切なアシスタントです。簡潔に答えてください。"
 
