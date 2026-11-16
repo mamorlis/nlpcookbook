@@ -1,6 +1,6 @@
 # 対話システム
 
-規則ベース、FAQ 検索、タスク指向、LLM による雑談まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で (3B の LLM で何度も生成するレシピは GPU を使う)。
+規則ベース、FAQ 検索、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で (3B の LLM で何度も生成するレシピは GPU を使う)。
 
 ## 規則だけでチャットボットを作る (ELIZA 方式) {eliza_rule}
 
@@ -630,6 +630,217 @@ for post in posts[:2]:
 - 小さなモデルの出力には、実際に次のような失敗が出た: 「2 文以内」の条件を守らずに 4 文書く、当事者に寄り添う方針なのに、投稿者本人に向けて「あなたの意見は一部の傾向を一般化している」「応援しています」と書いてしまう。英単語が混ざる (「peacefulな」のような) 失敗も起こりうる。方針が守られているかは、生成のたびに確かめる必要がある。
 - 返答が説教調・上から目線になると逆効果になる。生成した返答が攻撃的でないかを点検し、最終的には人が読んでから投稿する。自動で返信する仕組みにはしない。
 - モデルによっては、有害な投稿を入力に含むだけで応答を拒否することがある。その場合は、目的 (有害表現への対抗) を指示の中で明確にする。
+
+## 対話システムの応答を評価する (参照あり・参照なしの指標と LLM による判定) {dialogue_eval gpu}
+
+対話システムの応答の良し悪しを、自動で評価したい。人が「対話が破綻している」かを判定したデータを使い、どの評価方法が人の判断と合うかを確かめたい。
+
+```python
+!pip install -q bert-score sacrebleu fugashi unidic-lite
+```
+
+```python
+import glob, json, random, urllib.request, zipfile
+import numpy as np
+
+# 対話破綻検出チャレンジ 3 (DBDC3) の日本語の評価データ (MIT ライセンス、DBDC3 Task Organizers)。
+# 人と 3 つの雑談システムの対話 50 件ずつ (DCM: NTT ドコモの雑談対話 API、DIT: デンソーアイティーラボラトリのシステム、IRS: IR-status に基づくシステム)。システムの各発話に、30 人が O (破綻ではない)・T (破綻の可能性がある)・X (破綻) を付けている
+urllib.request.urlretrieve("https://dbd-challenge.github.io/dbdc3/data/DBDC3.zip", "DBDC3.zip")
+zipfile.ZipFile("DBDC3.zip").extractall(".")
+
+items = []
+for path in sorted(glob.glob("DBDC3/dbdc3/ja/eval/*/*.log.json")):
+    log = json.load(open(path, encoding="utf-8"))
+    turns = log["turns"]
+    for i, t in enumerate(turns):
+        if t["speaker"] == "S" and i > 0:                        # 最初の挨拶 (定型文) は除く
+            labels = [a["breakdown"] for a in t["annotations"]]
+            items.append({"system": path.split("/")[-2], "dialogue": log["dialogue-id"],
+                          "context": [(u["speaker"], u["utterance"]) for u in turns[:i]], "response": t["utterance"],
+                          "human": labels.count("O") / len(labels)})     # 人の評価 = O を付けた人の割合
+random.seed(0)
+data = [x for s in ["DCM", "DIT", "IRS"] for x in random.sample([x for x in items if x["system"] == s], 100)]
+for x in data:      # 比較用に、別の対話のシステム応答を無作為に持ってきた「無関係な応答」も用意する
+    x["random"] = random.choice([y["response"] for y in items if y["dialogue"] != x["dialogue"]])
+print(len(items), "発話から", len(data), "件を抽出")
+for s in ["DCM", "DIT", "IRS"]:
+    print(s, "人の評価の平均:", round(np.mean([x["human"] for x in data if x["system"] == s]), 3))
+x = data[0]
+print("\n".join(f"  {sp}: {u}" for sp, u in x["context"][-3:]), f"\n→ S: {x['response']}  (人の評価 {x['human']:.2f})")
+```
+
+```python
+# 同じ文脈に、この章の LLM (sarashina2.2-3b) で応答を生成する。履歴あり (直近 5 発話) と、履歴なし (直前のユーザー発話だけ) の 2 つの設定
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"    # MIT ライセンス
+BF16 = torch.cuda.get_device_capability()[0] >= 8       # T4 では float16
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+import sentencepiece as spm
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="cuda").eval()
+pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+SYSTEM = "あなたは雑談の相手です。相手の発話に、1 文で短く自然に応答してください。"
+
+def to_messages(context, n):
+    return [{"role": "system", "content": SYSTEM}] + [{"role": "user" if sp == "U" else "assistant", "content": u} for sp, u in context[-n:]]
+
+def encode(prompts):
+    texts = [p if isinstance(p, str) else tokenizer.apply_chat_template(p, add_generation_prompt=True, tokenize=False) for p in prompts]
+    return tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+
+@torch.no_grad()
+def generate(prompts, max_new_tokens=50, bs=32):
+    outs = []
+    for k in range(0, len(prompts), bs):
+        enc = encode(prompts[k:k + bs])
+        out = llm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=pad_id)
+        outs += [tokenizer.decode(o[enc["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0] for o in out]
+    return outs
+
+# 600 件の生成。T4 で 3〜5 分程度
+for key, n in [("llm_hist", 5), ("llm_nohist", 1)]:
+    for x, r in zip(data, generate([to_messages(x["context"], n) for x in data])):
+        x[key] = r
+for x in data[:3]:
+    print(f"U: {x['context'][-1][1]}\n  元のシステム ({x['human']:.2f}): {x['response']}\n  LLM 履歴あり: {x['llm_hist']}\n  LLM 履歴なし: {x['llm_nohist']}")
+```
+
+```python
+# (1) 参照ありの指標: DBDC3 には人が書いた参照応答がないので、LLM (履歴あり) の応答を代わりの「参照応答」として、
+#     元のシステムの応答を BLEU と BERTScore で測る (本来は人が書いた参照応答を、できれば複数使う)
+from bert_score import BERTScorer
+from sacrebleu.metrics import BLEU
+from scipy.stats import spearmanr
+
+bleu = BLEU(tokenize="char", effective_order=True)      # 文字単位の BLEU
+scorer = BERTScorer(lang="ja")                           # bert-base-multilingual-cased
+human = np.array([x["human"] for x in data])
+
+def corr(scores, n_boot=1000):
+    """人の評価との Spearman 相関と、ブートストラップの 95% 信頼区間"""
+    scores, rng = np.asarray(scores), np.random.default_rng(0)
+    boots = [spearmanr(human[i], scores[i]).statistic for i in rng.integers(0, len(human), (n_boot, len(human)))]
+    return f"{spearmanr(human, scores).statistic:+.3f} [{np.percentile(boots, 2.5):+.3f}, {np.percentile(boots, 97.5):+.3f}]"
+
+refs = [x["llm_hist"] for x in data]
+ref_scores = {}
+for key in ["response", "random"]:
+    hyps = [x[key] for x in data]
+    ref_scores[key] = {"BLEU": np.array([bleu.sentence_score(h, [r]).score for h, r in zip(hyps, refs)]),
+                       "BERTScore": scorer.score(hyps, refs)[2].numpy()}
+for m in ["BLEU", "BERTScore"]:
+    print(f"{m:9} 人の評価との相関 {corr(ref_scores['response'][m])} | 平均: 元の応答 {ref_scores['response'][m].mean():.3f} / 無関係な応答 {ref_scores['random'][m].mean():.3f}")
+# 人の評価が高いのに、参照と言葉が重ならないので BLEU が低い例
+for i in [i for i in np.argsort(ref_scores["response"]["BLEU"]) if human[i] >= 0.8][:3]:
+    print(f"  人 {human[i]:.2f} / BLEU {ref_scores['response']['BLEU'][i]:.1f} | U: {data[i]['context'][-1][1]} → 応答: {data[i]['response']} / 参照: {refs[i]}")
+```
+
+```python
+# (2) 参照なしの指標: 長さ、多様性 (distinct-n)、文脈との矛盾 (NLI)
+from fugashi import Tagger
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
+
+tagger = Tagger("-Owakati")
+def distinct_n(texts, n):
+    grams = [g for t in texts for toks in [tagger.parse(t).split()] for g in zip(*[toks[i:] for i in range(n)])]
+    return len(set(grams)) / max(1, len(grams))
+
+SYSTEMS = {"DCM": [x["response"] for x in data if x["system"] == "DCM"], "DIT": [x["response"] for x in data if x["system"] == "DIT"],
+           "IRS": [x["response"] for x in data if x["system"] == "IRS"], "LLM 履歴あり": [x["llm_hist"] for x in data[:100]],
+           "LLM 履歴なし": [x["llm_nohist"] for x in data[:100]]}     # LLM は DCM と同じ 100 件の文脈で揃える
+for s, texts in SYSTEMS.items():
+    print(f"{s:8} 平均の長さ {np.mean([len(t) for t in texts]):5.1f} 文字  distinct-1 {distinct_n(texts, 1):.3f}  distinct-2 {distinct_n(texts, 2):.3f}")
+
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"     # 多言語の NLI モデル (MIT ライセンス)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).to("cuda").eval()
+CONTRA = nli.config.label2id["contradiction"]
+
+@torch.no_grad()
+def contradiction(premises, hyps, bs=64):
+    """前提 (文脈) と応答が矛盾する確率"""
+    out = []
+    for k in range(0, len(hyps), bs):
+        enc = nli_tok(premises[k:k + bs], hyps[k:k + bs], return_tensors="pt", padding=True, truncation=True, max_length=256).to("cuda")
+        out += nli(**enc).logits.softmax(-1)[:, CONTRA].tolist()
+    return np.array(out)
+
+# 前提: 同じシステムが以前に言ったこと (自己矛盾) と、直前のユーザー発話
+own = ["\n".join(u for sp, u in x["context"] if sp == "S") for x in data]
+last_user = [x["context"][-1][1] for x in data]
+resp = [x["response"] for x in data]
+free = {"長さ": [len(r) for r in resp], "自己矛盾 (NLI)": contradiction(own, resp), "直前と矛盾 (NLI)": contradiction(last_user, resp)}
+for m, v in free.items():
+    print(f"{m:12} 人の評価との相関 {corr(v)}")
+```
+
+```python
+# (3) LLM による判定: 観点ごとに「はい / いいえ」で答えさせ、「はい」の確率をスコアにする (評価の章の CPU で動く LLM-as-a-judge と同じ方法)
+YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
+ASPECTS = {
+    "適切さ": "最後の「応答」は、直前のユーザーの発話に対する返事として適切ですか。",
+    "一貫性": "最後の「応答」は、それまでの対話の内容と食い違いがなく、話の流れに沿っていますか。",
+    "魅力": "最後の「応答」は、ユーザーがもっと話を続けたくなるような、興味を引く内容ですか。",
+}
+
+def dialogue_text(context, n=5):
+    return "\n".join(f"{'ユーザー' if sp == 'U' else 'システム'}: {u}" for sp, u in context[-n:])
+
+@torch.no_grad()
+def next_token_probs(prompts, token_ids, bs=32):
+    out = []
+    for k in range(0, len(prompts), bs):
+        enc = encode([[{"role": "user", "content": p}] for p in prompts[k:k + bs]])
+        out.append(llm(**enc).logits[:, -1, token_ids].float().softmax(-1).cpu())   # 左詰めのパディングなので、最後の位置が次のトークン
+    return torch.cat(out).numpy()
+
+def judge(contexts, responses, question):
+    prompts = [f"次の雑談の対話を読んで、質問に「はい」か「いいえ」の一語で答えてください。\n\n# 対話\n{dialogue_text(c)}\n\n# 応答\nシステム: {r}\n\n# 質問\n{question}"
+               for c, r in zip(contexts, responses)]
+    return next_token_probs(prompts, YES_NO)[:, 0]
+
+contexts = [x["context"] for x in data]
+# 300 件 × 4 種類の応答 × 3 観点。T4 で 3〜5 分程度
+judged = {(a, key): judge(contexts, [x[key] for x in data], q) for a, q in ASPECTS.items() for key in ["response", "random", "llm_hist", "llm_nohist"]}
+print(f"{'':6}{'人の評価との相関 (元の応答)':>28}  {'元の応答':>6} {'無関係':>6} {'LLM 履歴あり':>8} {'LLM 履歴なし':>8}")
+for a in ASPECTS:
+    print(f"{a:6} {corr(judged[a, 'response']):>30}   " + "  ".join(f"{judged[a, k].mean():7.3f}" for k in ["response", "random", "llm_hist", "llm_nohist"]))
+```
+
+```python
+# 2 つの応答を比べさせる (ペアワイズ)。A と B の位置を入れ替えて 2 回聞き、位置バイアスを確かめる
+AB = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["A", "B"]]
+
+def prefer_a(contexts, a, b):
+    prompts = [f"次の雑談の対話の続きとして、システムの応答 A と B のどちらがより自然で適切かを選び、A か B の 1 文字だけで答えてください。\n\n"
+               f"# 対話\n{dialogue_text(c)}\n\n# 応答 A\n{x}\n\n# 応答 B\n{y}" for c, x, y in zip(contexts, a, b)]
+    return next_token_probs(prompts, AB)[:, 0]
+
+# 300 件 × 3 組 × 2 回。T4 で 2〜4 分程度
+for k1, k2 in [("response", "random"), ("llm_hist", "response"), ("llm_hist", "llm_nohist")]:
+    a, b = [x[k1] for x in data], [x[k2] for x in data]
+    fwd, bwd = prefer_a(contexts, a, b), prefer_a(contexts, b, a)     # fwd: k1 が A、bwd: k1 が B
+    p1 = (fwd + (1 - bwd)) / 2                                       # 順序を打ち消した「k1 のほうが良い」確率
+    print(f"{k1} vs {k2}: {k1} を選ぶ割合 {np.mean(p1 > 0.5):.2f} | A を選ぶ割合 (A=k1 のとき {np.mean(fwd > 0.5):.2f}, A=k2 のとき {np.mean(bwd > 0.5):.2f})"
+          f" | 入れ替えても同じ方を選んだ割合 {np.mean((fwd > 0.5) != (bwd > 0.5)):.2f}")
+print("GPU メモリの最大使用量:", round(torch.cuda.max_memory_allocated() / 1e9, 1), "GB")
+```
+
+- データは対話破綻検出チャレンジ 3 (DBDC3) の日本語の評価データ (Higashinaka ら, DSTC6 Workshop 2017、MIT ライセンス)。システムの各発話に 30 人が付けたラベルから「破綻ではない (O) と判定した人の割合」を人の評価とし、評価の章の「自動評価指標と人手評価の相関を調べる」と同じく、Spearman 相関とブートストラップの信頼区間で指標と比べている (300 件)。
+- 雑談では 1 つの発話に適切な応答がいくつもあるので、参照応答との重なりは良さの基準になりにくい。BLEU と BERTScore と人の評価との相関は +0.11 と +0.16 で弱い (BLEU の信頼区間の下限は +0.002 で、ほぼ 0)。人の 8〜9 割が破綻なしとした「だよね」も BLEU は 0 になる。英語の対話でも、BLEU などと人の評価との相関は弱いと報告されている (Liu ら, EMNLP 2016)。ただし、ここでは参照に LLM の応答を使っているので、参照の質も相関の低さに効いている。無関係な応答との平均の差も小さい (BLEU 4.7 対 2.5、BERTScore 0.682 対 0.653。BERTScore の値の範囲が狭いことは評価の章の「BERTScore で意味的な近さを評価する」を参照)。
+- 参照なしの指標も、単独では人の評価とほとんど合わなかった。長さ (-0.09) と自己矛盾 (-0.03) は信頼区間が 0 をまたぎ、直前との矛盾 (-0.125 [-0.240, -0.016]) も弱い負の相関にとどまる。NLI のモデルは MNLI と XNLI (15 言語、日本語を含まない) で学習したもので、日本語の対話での精度は保証されない。長さや distinct-n はシステムの癖を見る指標で、DIT と LLM の応答は長く、LLM の履歴なしは distinct-1 が最も低い (0.236)。DIT は最も長いのに distinct-1 (0.289) が IRS (0.318) より低く、長さが違うと distinct-n は単純に比べられない (評価の章の「生成テキストの多様性と繰り返しを測る」)。
+- LLM による判定 (評価の章の「CPU で動く LLM に生成文を採点させる」と同じく「はい」の確率を使う) は、適切さ +0.48、一貫性 +0.46 と、ほかの指標よりずっと人の評価に合った。魅力 (+0.24) は「破綻かどうか」という人の評価とはもともと別の観点である。この実験では確かめていないが、質問は肯定の形で書くとよい (「矛盾していませんか」のような否定の疑問文では、「はい」がどちらの意味かあいまいになる)。
+- 評価の章で挙げた偏りが、実データでも見えた。1 つは自分と同系統のモデルの出力に甘いこと: 同じ 3B のモデルで判定すると、LLM 自身の応答に高い点が付いた (適切さ: 元のシステム 0.08、LLM 0.53〜0.57。ペアワイズでも 93% で LLM を選んだ)。LLM の応答には人の評価がないので、本当に良いのか自己選好なのかは区別できない。もう 1 つは位置バイアス: 差の小さい組 (履歴あり・なし) では、どちらの順でも B を 7 割以上選び、入れ替えて同じ方を選んだのは 43% だけだった。評価の章では「先に出たほうを選びやすい」としたが、ここでは後に置いた方への偏りが強く出た。向きはモデルやプロンプトで変わるので、必ず両方の順で聞いて平均し、判定するモデルは生成するモデルと別にする。
+- 無関係な応答は、評価方法が最低限の区別をできるかを確かめる手軽な基準になる (適切さの「はい」の確率 0.010、ペアワイズでは 78% で元の応答を選んだ)。一方、履歴の有無については、判定ではむしろ履歴なしがわずかに高く (適切さ 0.573 対 0.531 など)、ペアワイズでは差がなかった (0.50)。設定の違いを評価するには、その違いが表れる対話 (前に話した内容を後で聞くなど) を用意する。
 
 ## ブラウザで使えるチャット画面を作る (Gradio) {gradio_chat gpu norun}
 
