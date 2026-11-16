@@ -403,16 +403,19 @@ for i, j in pairs:
 要約や翻訳、対話応答の品質を、参照訳との一致ではなく、LLM に評価基準を与えて採点させたい。
 
 ```python
-!pip install -q anthropic pydantic scipy
+!pip install -q google-genai pydantic scipy
 ```
 
 ```python
 from typing import Literal
-import anthropic
+from google import genai
 from google.colab import userdata
+from google.genai import types
 from pydantic import BaseModel
 
-client = anthropic.Anthropic(api_key=userdata.get("ANTHROPIC_API_KEY"))
+# Google AI Studio で作った API キーを、Colab のシークレットに GOOGLE_API_KEY として登録しておく (無料枠で使える)
+client = genai.Client(api_key=userdata.get("GOOGLE_API_KEY"))
+MODEL = "gemini-flash-latest"
 
 class Judgment(BaseModel):
     reasoning: str                    # 先に根拠を書かせてから点数を付けさせる
@@ -425,12 +428,12 @@ RUBRIC = """あなたは要約の評価者です。元の文章と要約を読�
 要約が短いことや情報が少ないことは減点しないでください。"""
 
 def judge(source, summary):
-    r = client.messages.parse(
-        model="claude-opus-5-5", max_tokens=16000, system=RUBRIC,
-        messages=[{"role": "user", "content": f"# 元の文章\n{source}\n\n# 要約\n{summary}"}],
-        output_format=Judgment,
+    r = client.models.generate_content(
+        model=MODEL, contents=f"# 元の文章\n{source}\n\n# 要約\n{summary}",
+        config=types.GenerateContentConfig(system_instruction=RUBRIC, temperature=0.0,
+                                           response_mime_type="application/json", response_schema=Judgment),
     )
-    return r.parsed_output
+    return r.parsed
 
 source = "同社の 2023 年度の売上高は前年比 5% 増の 120 億円だった。一方、原材料費の高騰により営業利益は 8 億円と、前年の 10 億円から減少した。"
 for summary in ["売上高は 5% 増の 120 億円だったが、営業利益は 8 億円に減少した。", "売上高、営業利益ともに前年を上回り、好調だった。",
@@ -451,7 +454,8 @@ print("Spearman:", round(spearmanr(human, llm).statistic, 3))
 - 採点基準 (ルーブリック) を具体的に書く。観点ごとに分けて採点させ、点数の前に根拠を書かせると安定する。
 - LLM の評価には偏りがある (長い出力を好む、自分と同系統のモデルの出力に甘い、提示順に影響される)。2 つの出力を比べさせる場合は、順序を入れ替えて 2 回評価する。
 - 人手評価との一致を確認していない LLM 評価は、評価として使ってはいけない。
-- 評価されるモデルと評価するモデルは、できれば別系統のものにする。
+- 評価されるモデルと評価するモデルは、できれば別系統のものにする。同じ書き方で、Claude API など他の API のモデルにも置き換えられる (LLM の章の Claude のレシピを参照)。
+- 無料枠で送った内容は Google のモデルの改善に使われることがある。評価するデータに個人情報や機密が含まれる場合は送らない。
 
 ## ブートストラップ法で評価値の信頼区間を求める {bootstrap_ci}
 
