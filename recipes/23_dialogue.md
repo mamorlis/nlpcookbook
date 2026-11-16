@@ -577,7 +577,7 @@ for post in posts[:2]:
 - 返答が説教調・上から目線になると逆効果になる。生成した返答が攻撃的でないかを点検し、最終的には人が読んでから投稿する。自動で返信する仕組みにはしない。
 - モデルによっては、有害な投稿を入力に含むだけで応答を拒否することがある。その場合は、目的 (有害表現への対抗) を指示の中で明確にする。
 
-## ブラウザで使えるチャット画面を作る (Gradio) {gradio_chat norun}
+## ブラウザで使えるチャット画面を作る (Gradio) {gradio_chat gpu norun}
 
 作ったチャットボットを、ノートブックのセルではなく、チャット画面で試したい。他の人にも URL を渡して触ってもらいたい。
 
@@ -592,14 +592,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStream
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+llm = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto").eval()   # float16 で GPU に載せる (約 7GB)
 SYSTEM = "あなたは親切なアシスタントです。簡潔に答えてください。"
 
 def respond(message, history):
     """history は [{"role": ..., "content": ...}, ...] の形で渡される。応答を少しずつ yield すると、画面に逐次表示される"""
     messages = [{"role": "system", "content": SYSTEM}] + [{"role": m["role"], "content": m["content"]} for m in history[-6:]]
     messages.append({"role": "user", "content": message})
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     Thread(target=llm.generate, kwargs=dict(**inputs, max_new_tokens=200, do_sample=False, streamer=streamer,
                                             pad_token_id=tokenizer.eos_token_id)).start()
@@ -612,12 +612,14 @@ def respond(message, history):
 ```python
 import gradio as gr
 
-demo = gr.ChatInterface(respond, type="messages", title="CPU で動くチャットボット",
+demo = gr.ChatInterface(respond, title="Gradio で作るチャットボット",
                         examples=["自己紹介をしてください。", "京都の秋のおすすめを教えて。"])
 demo.launch(share=True)   # Colab では share=True にすると、72 時間有効な公開 URL が発行される
 ```
 
 - `ChatInterface` に「メッセージと履歴を受け取って応答を返す関数」を渡すだけで、入力欄・履歴表示・やり直しボタンの付いた画面になる。
+- Gradio 5 までは `type="messages"` を指定しないと履歴が `[[ユーザー, アシスタント], ...]` の形で渡されたが、Gradio 6 では辞書のリストが既定になり、`type` 引数はなくなった (指定するとエラーになる)。
 - `share=True` の URL は誰でもアクセスできる。API キーを使うボットや、個人情報を扱うボットを公開したままにしない。
 - 止めるときは `demo.close()`。Colab のランタイムが切れると URL も無効になる。
 - 関数の中身を、RAG のチャットボットや FAQ ボットに差し替えれば、同じ画面でそのまま試せる。
+- GPU ランタイムで実行する。CPU でも動くが、3B のモデルでは応答が 1 文字ずつゆっくり出る。CPU で試すなら `sarashina2.2-0.5b-instruct-v0.1` に替える。

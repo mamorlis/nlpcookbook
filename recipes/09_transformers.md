@@ -335,7 +335,7 @@ print("top_k=20        :", generate(do_sample=True, temperature=1.0, top_p=1.0, 
 - `max_new_tokens` は生成する長さの上限。指定しないと短い既定値で打ち切られる。
 - モデルに付属の `generation_config.json` に既定値 (temperature や top_p など) が入っていることがある。指定しなかったパラメータにはそれが使われるので、`print(model.generation_config)` で確認する。
 
-## バッチ処理と GPU で推論を高速化する {batch_inference}
+## バッチ処理と GPU で推論を高速化する {batch_inference gpu}
 
 数万件のテキストに対してモデルの推論を回したい。1 件ずつ処理すると遅すぎる。
 
@@ -364,6 +364,7 @@ def predict(texts, batch_size, sort_by_length=False):
     return preds
 
 print("device:", device)
+predict(texts[:32], batch_size=32)   # 初回は GPU の初期化に時間がかかるので、計測の前に 1 回動かしておく
 for label, kwargs in [("1 件ずつ", dict(batch_size=1)), ("バッチ 32", dict(batch_size=32)), ("バッチ 32 + 長さでソート", dict(batch_size=32, sort_by_length=True))]:
     t = time.perf_counter()
     preds = predict(texts, **kwargs)
@@ -372,7 +373,9 @@ for label, kwargs in [("1 件ずつ", dict(batch_size=1)), ("バッチ 32", dict
 
 - `torch.inference_mode()` (または `no_grad()`) で勾配計算を止める。忘れるとメモリを浪費し、遅くなる。
 - 長さの近い文を同じバッチにまとめると、パディングが減って速くなる。結果は元の順番に戻す。
-- GPU ではバッチ化の効果が非常に大きい (数十倍)。さらに `model.half()` (半精度) で速度とメモリが改善する。
+- この 96 件では、GPU で 1 件ずつ 0.2〜0.3 秒 → バッチ + 長さでソートで 0.04 秒 (6〜8 倍)。件数が多いほど、またモデルが大きいほど差は広がる。さらに `model.half()` (半精度) で速度とメモリが改善する。
+- CPU では、長さを揃えずにバッチにすると、長い文に合わせたパディングの計算が重く、1 件ずつより遅くなることがある。
+- GPU の処理時間を測るときは、最初の 1 回 (初期化やカーネルの準備を含む) を計測から外す。
 - `pipeline(..., device=0, batch_size=32)` でも同様のバッチ処理ができる。
 
 ## モデルのパラメータ数とメモリ使用量を調べる {model_size}

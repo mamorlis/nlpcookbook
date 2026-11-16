@@ -104,7 +104,7 @@ except userdata.NotebookAccessError:
 - キーを `print` した出力はノートブックに保存される。出力に残っていないか、共有や GitHub への保存の前に確認する。
 - うっかり公開してしまったキーは、すぐに発行元で無効化して作り直す。
 
-## GPU が使えるか確認し、メモリを解放する {colab_gpu}
+## GPU が使えるか確認し、メモリを解放する {colab_gpu gpu}
 
 GPU ランタイムになっているか、メモリがどれくらい空いているかを確認したい。`CUDA out of memory` から復帰したい。
 
