@@ -364,7 +364,7 @@ for d in sorted(docs, key=lambda d: -cos(weighted_vec(query), weighted_vec(d))):
     print(f"{cos(weighted_vec(query), weighted_vec(d)):.3f}  {d}")
 ```
 
-- 語順は無視されるが、驚くほど強いベースライン。まずこれを試し、足りなければ文埋め込みモデル (次章) に進む。
+- 語順は無視されるが、驚くほど強いベースライン。まずこれを試し、足りなければ文埋め込みモデル (文埋め込みとクラスタリングの章) に進む。
 - 単純平均は `the` `of` などの機能語に引っ張られて、どの文も似てしまう。ストップワード除去か頻度による重み付けが効く。
 
 ## Doc2Vec で文書ベクトルを学習する {doc2vec}

@@ -1,6 +1,6 @@
 # Transformers の基本操作
 
-Hugging Face Transformers と Datasets で、事前学習済みモデルを動かすときの定番の操作。
+Hugging Face Transformers と Datasets で、事前学習済みモデルを動かすときの定番の操作。言語モデルの確率で文の自然さや文法知識を測る方法と、モデルの内部にどんな情報があるかを調べるプロービングも扱う。
 
 ## マスクされた単語を BERT に予測させる (fill-mask) {fill_mask}
 
@@ -183,174 +183,6 @@ print(f"it → animal が最大のヘッド: layer {layer + 1}, head {head + 1} 
 - 下位層は隣接トークンや `[SEP]` に向くヘッドが多く、中〜上位層に構文関係や共参照に対応するヘッドが現れる。
 - アテンションの重みは、そのまま「モデルの判断根拠」ではない。説明として使うときは注意が必要 (Jain & Wallace, 2019)。
 
-## BERT の各層に品詞や構文の情報がどれくらい入っているかを調べる (プロービング) {probing gpu}
-
-BERT の内部の単語ベクトルに、品詞や係り受けの情報がどの層でどれくらい表れているかを、簡単な分類器 (プローブ) で調べたい。
-
-```python
-!pip install -q fugashi unidic-lite conllu
-```
-
-```python
-import random
-import urllib.request
-import numpy as np
-import torch
-from conllu import parse
-
-random.seed(0); np.random.seed(0); torch.manual_seed(0)
-
-# UD Japanese-GSD (CC BY-SA 4.0、https://github.com/UniversalDependencies/UD_Japanese-GSD)
-base = "https://raw.githubusercontent.com/UniversalDependencies/UD_Japanese-GSD/master/ja_gsd-ud-"
-def load(split, n=None):
-    sents = parse(urllib.request.urlopen(base + split + ".conllu").read().decode("utf-8"))[:n]
-    return [[t for t in s if isinstance(t["id"], int)] for s in sents]   # 複数語トークンなどの行を除く
-
-train, test = load("train", 3000), load("test")   # 学習データは先頭 3000 文だけ使う
-print(len(train), "文", sum(map(len, train)), "語 (学習) /", len(test), "文", sum(map(len, test)), "語 (評価)")
-print([(t["form"], t["upos"], t["deprel"]) for t in test[0]])
-```
-
-```python
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-name = "tohoku-nlp/bert-base-japanese-v3"   # Apache 2.0
-tokenizer = AutoTokenizer.from_pretrained(name)
-
-def encode(sent):
-    """UD の語ごとにサブワードに分け、各語の先頭サブワードの位置を覚えておく"""
-    ids, first = [tokenizer.cls_token_id], []
-    for t in sent:
-        first.append(len(ids))
-        ids += tokenizer.encode(t["form"], add_special_tokens=False) or [tokenizer.unk_token_id]
-    return ids + [tokenizer.sep_token_id], first
-
-@torch.no_grad()
-def features(model, sents, batch_size=32):
-    """全層 (埋め込み層 + 12 層) の語ごとのベクトル: (13, 語数, 768)"""
-    encoded = [encode(s) for s in sents]
-    order = sorted(range(len(sents)), key=lambda i: len(encoded[i][0]))   # 長さの近い文をまとめてパディングを減らす
-    out = [None] * len(sents)
-    for b in range(0, len(order), batch_size):
-        idx = order[b:b + batch_size]
-        L = max(len(encoded[i][0]) for i in idx)
-        ids = torch.zeros(len(idx), L, dtype=torch.long)
-        mask = torch.zeros(len(idx), L, dtype=torch.long)
-        for j, i in enumerate(idx):
-            ids[j, :len(encoded[i][0])] = torch.tensor(encoded[i][0]); mask[j, :len(encoded[i][0])] = 1
-        ids, mask = ids.to(device), mask.to(device)
-        hs = torch.stack(model(input_ids=ids, attention_mask=mask, output_hidden_states=True).hidden_states)
-        for j, i in enumerate(idx):
-            out[i] = hs[:, j, encoded[i][1]].half()             # 先頭サブワードのベクトル。メモリ節約のため float16 で保存 (1 モデルの学習データ分で約 1.4GB)
-    return torch.cat(out, dim=1)
-
-print("最長の文:", max(len(encode(s)[0]) for s in train + test), "サブワード")
-bert = AutoModel.from_pretrained(name).to(device).eval()   # 推論だけなので float32 のまま (T4 でも 1GB 未満)
-torch.manual_seed(0)
-random_bert = AutoModel.from_config(AutoConfig.from_pretrained(name)).to(device).eval()   # 同じ構造で重みがランダムな対照モデル
-# GPU で 1〜2 分 (CPU だと 10 分以上かかる)
-feats = {m: (features(model, train), features(model, test)) for m, model in [("BERT", bert), ("random BERT", random_bert)]}
-print(feats["BERT"][0].shape, f"GPU メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f} GB" if device == "cuda" else "")
-```
-
-```python
-from collections import Counter
-import torch.nn.functional as F
-
-y = {task: tuple([t[task] for s in d for t in s] for d in (train, test)) for task in ["upos", "deprel"]}
-
-# 対照タスク (Hewitt & Liang, 2019): 単語の形 (type) ごとにランダムなラベルを 1 つ決め、どこに出てきても同じラベルにする。
-# ラベルは正解の品詞の頻度分布から引く。文脈とは無関係なので、当たるとしたら分類器が単語を丸暗記したから
-rng = np.random.default_rng(0)
-tags, counts = np.unique(y["upos"][0], return_counts=True)
-forms = sorted({t["form"] for s in train + test for t in s})
-control_map = dict(zip(forms, rng.choice(tags, size=len(forms), p=counts / counts.sum())))
-y["control"] = tuple([control_map[t["form"]] for s in d for t in s] for d in (train, test))
-
-def probe(Xtr, ytr, Xte, yte, epochs=20, return_pred=False):
-    """線形の分類器 (多クラスのロジスティック回帰) を学習し、評価データの正解率 (と予測) を返す"""
-    classes = {c: i for i, c in enumerate(sorted(set(ytr)))}
-    ytr = torch.tensor([classes[c] for c in ytr], device=device)
-    yte = torch.tensor([classes.get(c, -1) for c in yte], device=device)   # 学習データにないラベルは必ず不正解
-    mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6                                # 標準化
-    Xtr, Xte = (Xtr - mu) / sd, (Xte - mu) / sd
-    torch.manual_seed(0)
-    clf = torch.nn.Linear(Xtr.shape[1], len(classes)).to(device)
-    opt = torch.optim.AdamW(clf.parameters(), lr=3e-3, weight_decay=0.01)
-    for _ in range(epochs):
-        for i in torch.randperm(len(Xtr), device=device).split(1024):
-            loss = F.cross_entropy(clf(Xtr[i]), ytr[i])
-            opt.zero_grad(); loss.backward(); opt.step()
-    with torch.no_grad():
-        pred = clf(Xte).argmax(-1)
-    acc = (pred == yte).float().mean().item()
-    return (acc, [list(classes)[i] for i in pred.tolist()]) if return_pred else acc
-
-# 2 モデル × 3 タスク × 13 層 = 78 個の分類器。T4 で 3〜5 分
-acc = {}
-for m, (Ftr, Fte) in feats.items():
-    for task in ["upos", "deprel", "control"]:
-        acc[m, task] = [probe(Ftr[l].float(), y[task][0], Fte[l].float(), y[task][1]) for l in range(Ftr.shape[0])]
-        print(f"{m:12} {task:8}", " ".join(f"{a:.3f}" for a in acc[m, task]))
-
-# 参考: 文脈を見ずに「学習データでその単語に最も多く付いていたラベル」を答える (未知語は全体の最頻ラベル)
-def by_form(task):
-    c = {}
-    for t_, lab in zip((t["form"] for s in train for t in s), y[task][0]):
-        c.setdefault(t_, Counter())[lab] += 1
-    default = Counter(y[task][0]).most_common(1)[0][0]
-    pred = [c[t["form"]].most_common(1)[0][0] if t["form"] in c else default for s in test for t in s]
-    return float(np.mean(np.array(pred) == np.array(y[task][1])))
-baseline = {task: by_form(task) for task in ["upos", "deprel"]}
-print("単語ごとの最頻ラベル:", {k: round(v, 3) for k, v in baseline.items()})
-```
-
-```python
-import matplotlib.pyplot as plt
-
-fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
-for ax, task in zip(axes, ["upos", "deprel"]):
-    ax.plot(acc["BERT", task], "o-", label="BERT")
-    ax.plot(acc["random BERT", task], "s--", label="random BERT")
-    ax.axhline(baseline[task], color="gray", ls=":", label="most frequent label per word")
-    ax.set_title(task.upper() if task == "upos" else "deprel")
-    ax.set_xlabel("layer (0 = embeddings)"); ax.set_ylabel("accuracy"); ax.legend()
-axes[0].plot(acc["BERT", "control"], "^-", label="BERT, control task"); axes[0].legend()
-plt.tight_layout(); plt.show()
-
-# 選択性 (selectivity) = 本来のタスクの正解率 − 対照タスクの正解率
-for m in ["BERT", "random BERT"]:
-    sel = np.array(acc[m, "upos"]) - np.array(acc[m, "control"])
-    print(f"選択性 ({m}, UPOS):", " ".join(f"{s:.3f}" for s in sel))
-for task in ["upos", "deprel"]:
-    best = int(np.argmax(acc["BERT", task]))
-    print(f"{task}: 最高は layer {best} ({acc['BERT', task][best]:.3f})、layer 0 は {acc['BERT', task][0]:.3f}")
-```
-
-```python
-# 係り受けのラベルごとに、文脈のない層 0 と、評価データで最も良かった層を比べる
-# (層の選択に評価データを使っているので、厳密には開発データ ja_gsd-ud-dev で選ぶ)
-best = int(np.argmax(acc["BERT", "deprel"]))
-Ftr, Fte = feats["BERT"]
-gold = np.array(y["deprel"][1])
-_, pred0 = probe(Ftr[0].float(), y["deprel"][0], Fte[0].float(), y["deprel"][1], return_pred=True)
-_, predb = probe(Ftr[best].float(), y["deprel"][0], Fte[best].float(), y["deprel"][1], return_pred=True)
-print(f"評価データで最も良かった層: {best}")
-print(f"{'label':12}{'件数':>6}{'layer 0':>9}{f'layer {best}':>9}")
-for lab, n in Counter(gold).most_common(12):
-    m = gold == lab
-    print(f"{lab:12}{n:6}{np.mean(np.array(pred0)[m] == lab):9.3f}{np.mean(np.array(predb)[m] == lab):9.3f}")
-```
-
-- プローブ (probe) は、モデルの内部表現を入力にした簡単な分類器で、その情報が表現から取り出せるかを調べる (線形のプローブは Alain & Bengio, 2016。BERT の層ごとの分析は Tenney et al., 2019 など)。単語ベクトルの取り出し方はこの章の「BERT から文脈に応じた単語ベクトルを取り出す」と同じく `output_hidden_states=True` で、層 0 は文脈を見ない埋め込み層の出力 (位置の情報は含む)。
-- この実行では、品詞 (UPOS) は層 0 で 0.883 (単語ごとの最頻ラベルの 0.875 とほぼ同じ) から層 1 で 0.960 に上がり、層 4〜5 の 0.971 が最高で、層 12 では 0.950 に下がった。係り受けのラベル (deprel) は層 0 の 0.643 から層 5 の 0.882 まで上がった。評価は 543 文 (約 1.3 万語)、シード 1 つの結果なので、層 2〜6 の間の 0.01 未満の差で順位は決めない。
-- 層 0 と、評価データで最も良かった層 5 のラベルごとの比較では、`nsubj` (0.161 → 0.857) や `nmod` (0.239 → 0.761) など、同じ名詞でも後ろの助詞や係り先によって決まるラベルが大きく上がった。`case` や `punct` は層 0 で既にほぼ当たる。日本語の品詞は単語の形でほぼ決まるので、文脈の効果は係り受けのラベルのほうが見えやすい。
-- 対照タスク (Hewitt & Liang, 2019) の正解率は層 0 の 0.790 から層 12 の 0.650 まで下がり、選択性 (品詞の正解率 − 対照タスクの正解率) は 0.093 から約 0.30 に上がった。下の層ほど単語の丸暗記で当てやすい。ただし重みがランダムな BERT でも対照タスクは 0.788 から 0.745 に下がるので、低下の一部は学習の効果ではなく、層を重ねるごとにほかのトークンの情報が混ざることによる。正解率の最高 (層 4〜5) と選択性の最高 (層 9〜12、0.30 前後) の層がずれた点は、論文の ELMo の結果 (1 層目のほうが品詞の正解率はわずかに高いが、2 層目のほうが選択性はかなり高い) と似ている。
-- 重みがランダムな BERT でも品詞は 0.78〜0.80 当たるが、対照タスクも 0.75〜0.79 当たり、選択性は 0.01〜0.03 程度しかない。単語の区別が残っていれば分類器が暗記で当てられるということで、「正解率が高い = モデルが品詞を学習した」とは言えない。必ず対照と比べる。
-- プロービングで分かるのは「情報が (線形に) 取り出せる」ことまでで、モデルが予測にその情報を使っているかは分からない。分類器の表現力を上げれば正解率は上がるが、暗記できる分も増えるので選択性と合わせて見る。結果は学習データの量、分類器の設定、サブワードの代表の選び方 (ここでは先頭) にも左右される。この章の「アテンションの重みをヒートマップで可視化する」の重みと同様、相関的な分析であることに注意。
-- データは構文解析の章と同じ UD Japanese-GSD (CC BY-SA 4.0。元の文は Google UDT 2.0 のニュース・ブログ)、モデルは東北大学の BERT (Apache 2.0、CC-100 と Wikipedia で学習)。UD の単語単位 (短単位) をそのまま 1 語ずつトークナイザに通しているので、モデル本来の分割 (MeCab + unidic-lite) とは少し違う入力になる。
-
 ## 次に来るトークンの確率分布を見る {next_token_probs}
 
 言語モデルが「次に何が来る」と予測しているのか、上位候補と確率を直接見たい。
@@ -492,6 +324,81 @@ HTML("".join(show(t) for t in texts))
 - サプライザル (−log₂ 確率) は、心理言語学では読み時間と相関することが知られている指標。
 - 文法誤り (「コーヒーを食べて」「会社を行き」) や意味的に意外な語 (「月」) で値が跳ね上がる。
 - 文頭のトークンは文脈がないので、いつも値が大きい。
+
+## 言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP) {minimal_pairs}
+
+言語モデルが文法をどれくらい身に付けているかを調べたい。1 か所だけ違う「文法的な文」と「非文法的な文」の組 (最小対) を与え、文法的なほうに高い確率を付けるかを見る。
+
+```python
+!pip install -q datasets sentencepiece
+```
+
+```python
+import json, urllib.request
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+url = "https://raw.githubusercontent.com/osekilab/JBLiMP/main/data/validated/validated_minimal_pairs.jsonl"
+pairs = pd.DataFrame([json.loads(line) for line in urllib.request.urlopen(url).read().decode("utf-8").strip().split("\n")])
+print(len(pairs), "組"); print(pairs["phenomenon"].value_counts().to_string())
+print(pairs.iloc[0][["good_sentence", "bad_sentence", "paradigm"]].to_dict())
+```
+
+```python
+name = "rinna/japanese-gpt2-small"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系の T5Tokenizer は、未知語 (大文字の英字など) を文末記号 (</s>) の ID にしてしまう。
+# 元の spiece.model から語彙とスコアを読み、分割の方式を作り直す (未知語は <unk> になる)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id())
+model = AutoModelForCausalLM.from_pretrained(name).eval()
+
+@torch.no_grad()
+def log_prob(sentence):
+    """文全体の対数確率 (各トークンの対数確率の和) と、トークン数"""
+    ids = tokenizer(sentence, return_tensors="pt")["input_ids"]
+    ids = torch.cat([torch.tensor([[tokenizer.bos_token_id]]), ids], dim=1)
+    logp = model(ids).logits[0, :-1].log_softmax(-1)
+    return float(logp.gather(1, ids[0, 1:, None]).sum()), ids.shape[1] - 1
+
+scores = [(log_prob(g), log_prob(b)) for g, b in zip(pairs["good_sentence"], pairs["bad_sentence"])]
+pairs["good_lp"], pairs["good_len"] = [s[0][0] for s in scores], [s[0][1] for s in scores]
+pairs["bad_lp"], pairs["bad_len"] = [s[1][0] for s in scores], [s[1][1] for s in scores]
+pairs["correct"] = pairs["good_lp"] > pairs["bad_lp"]
+print("全体の正解率:", round(pairs["correct"].mean(), 3), "(でたらめなら 0.5)")
+print(pairs.groupby("phenomenon")["correct"].agg(["mean", "count"]).round(3).sort_values("mean").to_string())
+```
+
+```python
+# 長さの偏り: 文の確率はトークンが増えるほど下がるので、短いほうの文が有利になる
+pairs["diff"] = pairs["good_len"] - pairs["bad_len"]
+pairs["length"] = np.select([pairs["diff"] < 0, pairs["diff"] == 0], ["文法的な文のほうが短い", "同じ長さ"], "文法的な文のほうが長い")
+print(pairs.groupby("length")["correct"].agg(["mean", "count"]).round(3).to_string())
+
+# 対処: トークン数で割った平均対数確率で比べる
+pairs["correct_norm"] = pairs["good_lp"] / pairs["good_len"] > pairs["bad_lp"] / pairs["bad_len"]
+print("長さで正規化した正解率:", round(pairs["correct_norm"].mean(), 3))
+print(pairs.groupby("length")["correct_norm"].mean().round(3).to_string())
+```
+
+```python
+# 間違えた組を見る
+for r in pairs[~pairs["correct"]].head(5).itertuples():
+    print(f"[{r.phenomenon}] ○ {r.good_sentence} ({r.good_lp:.1f}, {r.good_len} トークン)\n            × {r.bad_sentence} ({r.bad_lp:.1f}, {r.bad_len} トークン)")
+```
+
+- 最小対による評価は、言語モデルに追加の学習をさせずに文法知識を測れる。英語の BLiMP、日本語の JBLiMP などがあり、現象ごと (一致、束縛、島の制約など) に得意・不得意が分かる。
+- 文全体の確率で比べると、トークン数の少ない文が有利になる。最小対の 2 文でトークン数が違う場合、モデルが文法ではなく長さで選んでいるだけかもしれない。データセットによっては、この偏りだけで高い正解率が出る。
+- 長さで正規化すれば解決する、とは限らない。この実験では、正規化すると今度は長い文が有利になり、偏りの向きが逆になっただけだった。トークン数が同じ組だけで評価する、長さの条件ごとに正解率を分けて報告する、といった確認が確実。
+- 正解率が高くても、その現象を「理解している」とは限らない。語の頻度や共起のような表面的な手がかりで解ける組もある。
+- 指示に従う LLM なら「どちらが自然か」を直接尋ねることもできるが、確率を比べる方法とは結果が一致しないことがある。
+- rinna のトークナイザーの不具合: transformers 5 系の `T5Tokenizer` は、SentencePiece の語彙にない文字 (大文字の英字など) を、`<unk>` ではなく文末記号 `</s>` の ID にしてしまう (5.0〜5.23 で確認、4.57 では正しい)。そうした文では確率の計算がおかしくなるので、上のコードでは spiece.model から語彙とスコアを読み、分割の方式を作り直している。JBLiMP の文にはこうした文字がほとんどないので、この実験の結果は修正の前後で変わらなかった。上流で直れば不要になる。
 
 ## テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる {generation_decoding}
 
@@ -757,3 +664,171 @@ for a in sample:
 - `streaming=True` だと `IterableDataset` になり、`ds[0]` のような添字アクセスや `len()` は使えない。
 - `shuffle` はバッファサイズ分しか混ざらない。完全なランダムサンプルが必要なら、ダウンロードして通常のデータセットとして扱う。
 - 取り出したものを保存するなら `Dataset.from_list(list(wiki.take(10000)))`。
+
+## BERT の各層に品詞や構文の情報がどれくらい入っているかを調べる (プロービング) {probing gpu}
+
+BERT の内部の単語ベクトルに、品詞や係り受けの情報がどの層でどれくらい表れているかを、簡単な分類器 (プローブ) で調べたい。
+
+```python
+!pip install -q fugashi unidic-lite conllu
+```
+
+```python
+import random
+import urllib.request
+import numpy as np
+import torch
+from conllu import parse
+
+random.seed(0); np.random.seed(0); torch.manual_seed(0)
+
+# UD Japanese-GSD (CC BY-SA 4.0、https://github.com/UniversalDependencies/UD_Japanese-GSD)
+base = "https://raw.githubusercontent.com/UniversalDependencies/UD_Japanese-GSD/master/ja_gsd-ud-"
+def load(split, n=None):
+    sents = parse(urllib.request.urlopen(base + split + ".conllu").read().decode("utf-8"))[:n]
+    return [[t for t in s if isinstance(t["id"], int)] for s in sents]   # 複数語トークンなどの行を除く
+
+train, test = load("train", 3000), load("test")   # 学習データは先頭 3000 文だけ使う
+print(len(train), "文", sum(map(len, train)), "語 (学習) /", len(test), "文", sum(map(len, test)), "語 (評価)")
+print([(t["form"], t["upos"], t["deprel"]) for t in test[0]])
+```
+
+```python
+from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+name = "tohoku-nlp/bert-base-japanese-v3"   # Apache 2.0
+tokenizer = AutoTokenizer.from_pretrained(name)
+
+def encode(sent):
+    """UD の語ごとにサブワードに分け、各語の先頭サブワードの位置を覚えておく"""
+    ids, first = [tokenizer.cls_token_id], []
+    for t in sent:
+        first.append(len(ids))
+        ids += tokenizer.encode(t["form"], add_special_tokens=False) or [tokenizer.unk_token_id]
+    return ids + [tokenizer.sep_token_id], first
+
+@torch.no_grad()
+def features(model, sents, batch_size=32):
+    """全層 (埋め込み層 + 12 層) の語ごとのベクトル: (13, 語数, 768)"""
+    encoded = [encode(s) for s in sents]
+    order = sorted(range(len(sents)), key=lambda i: len(encoded[i][0]))   # 長さの近い文をまとめてパディングを減らす
+    out = [None] * len(sents)
+    for b in range(0, len(order), batch_size):
+        idx = order[b:b + batch_size]
+        L = max(len(encoded[i][0]) for i in idx)
+        ids = torch.zeros(len(idx), L, dtype=torch.long)
+        mask = torch.zeros(len(idx), L, dtype=torch.long)
+        for j, i in enumerate(idx):
+            ids[j, :len(encoded[i][0])] = torch.tensor(encoded[i][0]); mask[j, :len(encoded[i][0])] = 1
+        ids, mask = ids.to(device), mask.to(device)
+        hs = torch.stack(model(input_ids=ids, attention_mask=mask, output_hidden_states=True).hidden_states)
+        for j, i in enumerate(idx):
+            out[i] = hs[:, j, encoded[i][1]].half()             # 先頭サブワードのベクトル。メモリ節約のため float16 で保存 (1 モデルの学習データ分で約 1.4GB)
+    return torch.cat(out, dim=1)
+
+print("最長の文:", max(len(encode(s)[0]) for s in train + test), "サブワード")
+bert = AutoModel.from_pretrained(name).to(device).eval()   # 推論だけなので float32 のまま (T4 でも 1GB 未満)
+torch.manual_seed(0)
+random_bert = AutoModel.from_config(AutoConfig.from_pretrained(name)).to(device).eval()   # 同じ構造で重みがランダムな対照モデル
+# GPU で 1〜2 分 (CPU だと 10 分以上かかる)
+feats = {m: (features(model, train), features(model, test)) for m, model in [("BERT", bert), ("random BERT", random_bert)]}
+print(feats["BERT"][0].shape, f"GPU メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f} GB" if device == "cuda" else "")
+```
+
+```python
+from collections import Counter
+import torch.nn.functional as F
+
+y = {task: tuple([t[task] for s in d for t in s] for d in (train, test)) for task in ["upos", "deprel"]}
+
+# 対照タスク (Hewitt & Liang, 2019): 単語の形 (type) ごとにランダムなラベルを 1 つ決め、どこに出てきても同じラベルにする。
+# ラベルは正解の品詞の頻度分布から引く。文脈とは無関係なので、当たるとしたら分類器が単語を丸暗記したから
+rng = np.random.default_rng(0)
+tags, counts = np.unique(y["upos"][0], return_counts=True)
+forms = sorted({t["form"] for s in train + test for t in s})
+control_map = dict(zip(forms, rng.choice(tags, size=len(forms), p=counts / counts.sum())))
+y["control"] = tuple([control_map[t["form"]] for s in d for t in s] for d in (train, test))
+
+def probe(Xtr, ytr, Xte, yte, epochs=20, return_pred=False):
+    """線形の分類器 (多クラスのロジスティック回帰) を学習し、評価データの正解率 (と予測) を返す"""
+    classes = {c: i for i, c in enumerate(sorted(set(ytr)))}
+    ytr = torch.tensor([classes[c] for c in ytr], device=device)
+    yte = torch.tensor([classes.get(c, -1) for c in yte], device=device)   # 学習データにないラベルは必ず不正解
+    mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6                                # 標準化
+    Xtr, Xte = (Xtr - mu) / sd, (Xte - mu) / sd
+    torch.manual_seed(0)
+    clf = torch.nn.Linear(Xtr.shape[1], len(classes)).to(device)
+    opt = torch.optim.AdamW(clf.parameters(), lr=3e-3, weight_decay=0.01)
+    for _ in range(epochs):
+        for i in torch.randperm(len(Xtr), device=device).split(1024):
+            loss = F.cross_entropy(clf(Xtr[i]), ytr[i])
+            opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        pred = clf(Xte).argmax(-1)
+    acc = (pred == yte).float().mean().item()
+    return (acc, [list(classes)[i] for i in pred.tolist()]) if return_pred else acc
+
+# 2 モデル × 3 タスク × 13 層 = 78 個の分類器。T4 で 3〜5 分
+acc = {}
+for m, (Ftr, Fte) in feats.items():
+    for task in ["upos", "deprel", "control"]:
+        acc[m, task] = [probe(Ftr[l].float(), y[task][0], Fte[l].float(), y[task][1]) for l in range(Ftr.shape[0])]
+        print(f"{m:12} {task:8}", " ".join(f"{a:.3f}" for a in acc[m, task]))
+
+# 参考: 文脈を見ずに「学習データでその単語に最も多く付いていたラベル」を答える (未知語は全体の最頻ラベル)
+def by_form(task):
+    c = {}
+    for t_, lab in zip((t["form"] for s in train for t in s), y[task][0]):
+        c.setdefault(t_, Counter())[lab] += 1
+    default = Counter(y[task][0]).most_common(1)[0][0]
+    pred = [c[t["form"]].most_common(1)[0][0] if t["form"] in c else default for s in test for t in s]
+    return float(np.mean(np.array(pred) == np.array(y[task][1])))
+baseline = {task: by_form(task) for task in ["upos", "deprel"]}
+print("単語ごとの最頻ラベル:", {k: round(v, 3) for k, v in baseline.items()})
+```
+
+```python
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+for ax, task in zip(axes, ["upos", "deprel"]):
+    ax.plot(acc["BERT", task], "o-", label="BERT")
+    ax.plot(acc["random BERT", task], "s--", label="random BERT")
+    ax.axhline(baseline[task], color="gray", ls=":", label="most frequent label per word")
+    ax.set_title(task.upper() if task == "upos" else "deprel")
+    ax.set_xlabel("layer (0 = embeddings)"); ax.set_ylabel("accuracy"); ax.legend()
+axes[0].plot(acc["BERT", "control"], "^-", label="BERT, control task"); axes[0].legend()
+plt.tight_layout(); plt.show()
+
+# 選択性 (selectivity) = 本来のタスクの正解率 − 対照タスクの正解率
+for m in ["BERT", "random BERT"]:
+    sel = np.array(acc[m, "upos"]) - np.array(acc[m, "control"])
+    print(f"選択性 ({m}, UPOS):", " ".join(f"{s:.3f}" for s in sel))
+for task in ["upos", "deprel"]:
+    best = int(np.argmax(acc["BERT", task]))
+    print(f"{task}: 最高は layer {best} ({acc['BERT', task][best]:.3f})、layer 0 は {acc['BERT', task][0]:.3f}")
+```
+
+```python
+# 係り受けのラベルごとに、文脈のない層 0 と、評価データで最も良かった層を比べる
+# (層の選択に評価データを使っているので、厳密には開発データ ja_gsd-ud-dev で選ぶ)
+best = int(np.argmax(acc["BERT", "deprel"]))
+Ftr, Fte = feats["BERT"]
+gold = np.array(y["deprel"][1])
+_, pred0 = probe(Ftr[0].float(), y["deprel"][0], Fte[0].float(), y["deprel"][1], return_pred=True)
+_, predb = probe(Ftr[best].float(), y["deprel"][0], Fte[best].float(), y["deprel"][1], return_pred=True)
+print(f"評価データで最も良かった層: {best}")
+print(f"{'label':12}{'件数':>6}{'layer 0':>9}{f'layer {best}':>9}")
+for lab, n in Counter(gold).most_common(12):
+    m = gold == lab
+    print(f"{lab:12}{n:6}{np.mean(np.array(pred0)[m] == lab):9.3f}{np.mean(np.array(predb)[m] == lab):9.3f}")
+```
+
+- プローブ (probe) は、モデルの内部表現を入力にした簡単な分類器で、その情報が表現から取り出せるかを調べる (線形のプローブは Alain & Bengio, 2016。BERT の層ごとの分析は Tenney et al., 2019 など)。単語ベクトルの取り出し方はこの章の「BERT から文脈に応じた単語ベクトルを取り出す」と同じく `output_hidden_states=True` で、層 0 は文脈を見ない埋め込み層の出力 (位置の情報は含む)。
+- この実行では、品詞 (UPOS) は層 0 で 0.883 (単語ごとの最頻ラベルの 0.875 とほぼ同じ) から層 1 で 0.960 に上がり、層 4〜5 の 0.971 が最高で、層 12 では 0.950 に下がった。係り受けのラベル (deprel) は層 0 の 0.643 から層 5 の 0.882 まで上がった。評価は 543 文 (約 1.3 万語)、シード 1 つの結果なので、層 2〜6 の間の 0.01 未満の差で順位は決めない。
+- 層 0 と、評価データで最も良かった層 5 のラベルごとの比較では、`nsubj` (0.161 → 0.857) や `nmod` (0.239 → 0.761) など、同じ名詞でも後ろの助詞や係り先によって決まるラベルが大きく上がった。`case` や `punct` は層 0 で既にほぼ当たる。日本語の品詞は単語の形でほぼ決まるので、文脈の効果は係り受けのラベルのほうが見えやすい。
+- 対照タスク (Hewitt & Liang, 2019) の正解率は層 0 の 0.790 から層 12 の 0.650 まで下がり、選択性 (品詞の正解率 − 対照タスクの正解率) は 0.093 から約 0.30 に上がった。下の層ほど単語の丸暗記で当てやすい。ただし重みがランダムな BERT でも対照タスクは 0.788 から 0.745 に下がるので、低下の一部は学習の効果ではなく、層を重ねるごとにほかのトークンの情報が混ざることによる。正解率の最高 (層 4〜5) と選択性の最高 (層 9〜12、0.30 前後) の層がずれた点は、論文の ELMo の結果 (1 層目のほうが品詞の正解率はわずかに高いが、2 層目のほうが選択性はかなり高い) と似ている。
+- 重みがランダムな BERT でも品詞は 0.78〜0.80 当たるが、対照タスクも 0.75〜0.79 当たり、選択性は 0.01〜0.03 程度しかない。単語の区別が残っていれば分類器が暗記で当てられるということで、「正解率が高い = モデルが品詞を学習した」とは言えない。必ず対照と比べる。
+- プロービングで分かるのは「情報が (線形に) 取り出せる」ことまでで、モデルが予測にその情報を使っているかは分からない。分類器の表現力を上げれば正解率は上がるが、暗記できる分も増えるので選択性と合わせて見る。結果は学習データの量、分類器の設定、サブワードの代表の選び方 (ここでは先頭) にも左右される。この章の「アテンションの重みをヒートマップで可視化する」の重みと同様、相関的な分析であることに注意。
+- データは構文解析の章と同じ UD Japanese-GSD (CC BY-SA 4.0。元の文は Google UDT 2.0 のニュース・ブログ)、モデルは東北大学の BERT (Apache 2.0、CC-100 と Wikipedia で学習)。UD の単語単位 (短単位) をそのまま 1 語ずつトークナイザに通しているので、モデル本来の分割 (MeCab + unidic-lite) とは少し違う入力になる。

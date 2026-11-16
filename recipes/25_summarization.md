@@ -2,9 +2,97 @@
 
 文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、見出し生成、テキスト平易化と、その評価。
 
+## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
+
+長い文章から、内容を代表する文をいくつか抜き出して要約にしたい。生成モデルと違い、原文にない内容が混ざらない。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import re
+import networkx as nx
+import numpy as np
+from fugashi import Tagger
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+tagger = Tagger()
+tok = lambda s: [w.feature.orthBase or w.surface for w in tagger(s) if w.feature.pos1 in ("名詞", "動詞", "形容詞") and w.feature.pos2 != "非自立可能"]
+
+def lexrank(text, n=3, threshold=0.1):
+    sents = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
+    X = TfidfVectorizer(tokenizer=tok, token_pattern=None, lowercase=False).fit_transform(sents)
+    sim = (X @ X.T).toarray()                      # 文同士のコサイン類似度
+    np.fill_diagonal(sim, 0)
+    sim[sim < threshold] = 0
+    scores = nx.pagerank(nx.from_numpy_array(sim), weight="weight")   # 多くの文と似ている文 = 中心的な文
+    top = sorted(sorted(scores, key=scores.get, reverse=True)[:n])    # スコア上位を、元の順番で並べる
+    return [sents[i] for i in top], [round(scores[i], 3) for i in range(len(sents))]
+
+text = ("自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる技術である。"
+        "その歴史は 1950 年代の機械翻訳の研究にさかのぼる。"
+        "初期の機械翻訳は人手で書かれた規則に基づいていたが、十分な精度は得られなかった。"
+        "1990 年代になると、大量の対訳データから統計的に翻訳を学習する統計的機械翻訳が主流となった。"
+        "2010 年代半ばには、ニューラルネットワークを用いたニューラル機械翻訳が登場し、翻訳の精度は飛躍的に向上した。"
+        "現在では、機械翻訳に限らず、自然言語処理のほとんどのタスクでニューラルネットワークが使われている。"
+        "特に、大量のテキストで事前学習された大規模言語モデルは、少ない追加学習で多様なタスクに適用できる。"
+        "ところで、昨日の夕食はカレーだった。")
+summary, scores = lexrank(text)
+print(scores)
+for s in summary:
+    print("・", s)
+```
+
+- 文をノード、類似度を辺の重みとするグラフを作り、PageRank で中心的な文を選ぶ。無関係な文 (最後の文) はどの文とも似ていないのでスコアが低い。
+- 類似度の計算を TF-IDF から文埋め込みに替えると、言い換えにも強くなる。
+- ニュース記事では「先頭の 3 文を取る」(Lead-3) が非常に強いベースラインになる。要約手法を評価するときは必ず比較する (この章の「先頭の数文を要約とする (Lead-3) ベースラインと比べる」を参照)。
+- 英語を含む各種の抽出型要約アルゴリズムは `sumy` にまとまっている。
+
+## 要約を ROUGE で評価する (日本語対応) {rouge_ja}
+
+要約の出力を、参照要約との単語の重なり (ROUGE-1/2/L) で評価したい。日本語でも正しく計算したい。
+
+```python
+!pip install -q rouge-score fugashi unidic-lite
+```
+
+```python
+from fugashi import Tagger
+from rouge_score import rouge_scorer
+
+class MecabTokenizer:
+    """rouge-score の既定のトークナイザは英数字以外を捨ててしまうので、日本語用のものを渡す"""
+    def __init__(self):
+        self.tagger = Tagger("-Owakati")
+    def tokenize(self, text):
+        return self.tagger.parse(text).split()
+
+scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], tokenizer=MecabTokenizer())
+ref = "政府は来年度予算案を閣議決定し、一般会計の総額は過去最大となった。"
+for hyp in ["政府は来年度予算案を決定し、総額は過去最大となった。", "来年度の予算は過去最大の規模である。", "今日は天気が良い。"]:
+    s = scorer.score(ref, hyp)    # 引数の順番は (参照, 出力)
+    print(f"R1 {s['rouge1'].fmeasure:.3f}  R2 {s['rouge2'].fmeasure:.3f}  RL {s['rougeL'].fmeasure:.3f}  {hyp}")
+```
+
+```python
+# 既定のトークナイザに日本語を渡すと、何も残らず 0 になる
+default = rouge_scorer.RougeScorer(["rouge1"])
+print(default.score(ref, "政府は来年度予算案を決定し、総額は過去最大となった。"))
+
+# コーパス全体では、文書ごとの F 値を平均して報告するのが一般的
+import numpy as np
+refs = [ref, "新しい言語モデルが発表され、性能が大幅に向上した。"]
+hyps = ["政府は予算案を決定した。", "新しいモデルが発表された。"]
+print(round(float(np.mean([scorer.score(r, h)["rougeL"].fmeasure for r, h in zip(refs, hyps)])), 3))
+```
+
+- ROUGE-1/2 は単語 1-gram / 2-gram の重なり、ROUGE-L は最長共通部分列。再現率・適合率・F 値のどれを報告しているかを明記する。
+- 日本語で「ROUGE が 0 になる」「異常に高い/低い」ときは、ほぼトークナイザの問題。
+
 ## 先頭の数文を要約とする (Lead-3) ベースラインと比べる {lead3_baseline}
 
-要約手法を試す前に、「先頭の 3 文を取るだけ」という最も単純な方法でどこまでいけるかを確かめたい。
+凝った手法と比べる前に、「先頭の 3 文を取るだけ」という最も単純な方法でどこまでいけるかを確かめたい。
 
 ```python
 !pip install -q rouge-score fugashi unidic-lite networkx
@@ -81,97 +169,10 @@ print("LexRank:", " ".join(lexrank(df["sents"][i])))
 ```
 
 - ニュース記事は重要なことを最初に書く (逆ピラミッド型) ので、Lead-3 は非常に強い。凝った手法が Lead-3 に勝てないことは珍しくない。
+- 比べている LexRank と、日本語のトークナイザを渡した ROUGE の使い方は、この章の「重要な文を選んで抽出型要約を作る (LexRank)」と「要約を ROUGE で評価する (日本語対応)」で説明した。
 - 新しい要約手法を評価するときは、必ず Lead-3 とランダムを並べて報告する。
 - ここではタイトルを参照の代わりにした簡易な評価。本来は人手で書いた参照要約 (日本語なら livedoor の 3 行要約、XL-Sum の日本語部分、WikiLingua など) を使う。
 - 小説、論文、議事録のように、重要な内容が先頭にあるとは限らない文書では、Lead の優位は小さくなる。
-
-## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
-
-長い文章から、内容を代表する文をいくつか抜き出して要約にしたい。生成モデルと違い、原文にない内容が混ざらない。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-import re
-import networkx as nx
-import numpy as np
-from fugashi import Tagger
-from sklearn.feature_extraction.text import TfidfVectorizer
-
-tagger = Tagger()
-tok = lambda s: [w.feature.orthBase or w.surface for w in tagger(s) if w.feature.pos1 in ("名詞", "動詞", "形容詞") and w.feature.pos2 != "非自立可能"]
-
-def lexrank(text, n=3, threshold=0.1):
-    sents = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
-    X = TfidfVectorizer(tokenizer=tok, token_pattern=None, lowercase=False).fit_transform(sents)
-    sim = (X @ X.T).toarray()                      # 文同士のコサイン類似度
-    np.fill_diagonal(sim, 0)
-    sim[sim < threshold] = 0
-    scores = nx.pagerank(nx.from_numpy_array(sim), weight="weight")   # 多くの文と似ている文 = 中心的な文
-    top = sorted(sorted(scores, key=scores.get, reverse=True)[:n])    # スコア上位を、元の順番で並べる
-    return [sents[i] for i in top], [round(scores[i], 3) for i in range(len(sents))]
-
-text = ("自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる技術である。"
-        "その歴史は 1950 年代の機械翻訳の研究にさかのぼる。"
-        "初期の機械翻訳は人手で書かれた規則に基づいていたが、十分な精度は得られなかった。"
-        "1990 年代になると、大量の対訳データから統計的に翻訳を学習する統計的機械翻訳が主流となった。"
-        "2010 年代半ばには、ニューラルネットワークを用いたニューラル機械翻訳が登場し、翻訳の精度は飛躍的に向上した。"
-        "現在では、機械翻訳に限らず、自然言語処理のほとんどのタスクでニューラルネットワークが使われている。"
-        "特に、大量のテキストで事前学習された大規模言語モデルは、少ない追加学習で多様なタスクに適用できる。"
-        "ところで、昨日の夕食はカレーだった。")
-summary, scores = lexrank(text)
-print(scores)
-for s in summary:
-    print("・", s)
-```
-
-- 文をノード、類似度を辺の重みとするグラフを作り、PageRank で中心的な文を選ぶ。無関係な文 (最後の文) はどの文とも似ていないのでスコアが低い。
-- 類似度の計算を TF-IDF から文埋め込みに替えると、言い換えにも強くなる。
-- ニュース記事では「先頭の 3 文を取る」(Lead-3) が非常に強いベースラインになる。要約手法を評価するときは必ず比較する。
-- 英語を含む各種の抽出型要約アルゴリズムは `sumy` にまとまっている。
-
-## 要約を ROUGE で評価する (日本語対応) {rouge_ja}
-
-要約の出力を、参照要約との単語の重なり (ROUGE-1/2/L) で評価したい。日本語でも正しく計算したい。
-
-```python
-!pip install -q rouge-score fugashi unidic-lite
-```
-
-```python
-from fugashi import Tagger
-from rouge_score import rouge_scorer
-
-class MecabTokenizer:
-    """rouge-score の既定のトークナイザは英数字以外を捨ててしまうので、日本語用のものを渡す"""
-    def __init__(self):
-        self.tagger = Tagger("-Owakati")
-    def tokenize(self, text):
-        return self.tagger.parse(text).split()
-
-scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], tokenizer=MecabTokenizer())
-ref = "政府は来年度予算案を閣議決定し、一般会計の総額は過去最大となった。"
-for hyp in ["政府は来年度予算案を決定し、総額は過去最大となった。", "来年度の予算は過去最大の規模である。", "今日は天気が良い。"]:
-    s = scorer.score(ref, hyp)    # 引数の順番は (参照, 出力)
-    print(f"R1 {s['rouge1'].fmeasure:.3f}  R2 {s['rouge2'].fmeasure:.3f}  RL {s['rougeL'].fmeasure:.3f}  {hyp}")
-```
-
-```python
-# 既定のトークナイザに日本語を渡すと、何も残らず 0 になる
-default = rouge_scorer.RougeScorer(["rouge1"])
-print(default.score(ref, "政府は来年度予算案を決定し、総額は過去最大となった。"))
-
-# コーパス全体では、文書ごとの F 値を平均して報告するのが一般的
-import numpy as np
-refs = [ref, "新しい言語モデルが発表され、性能が大幅に向上した。"]
-hyps = ["政府は予算案を決定した。", "新しいモデルが発表された。"]
-print(round(float(np.mean([scorer.score(r, h)["rougeL"].fmeasure for r, h in zip(refs, hyps)])), 3))
-```
-
-- ROUGE-1/2 は単語 1-gram / 2-gram の重なり、ROUGE-L は最長共通部分列。再現率・適合率・F 値のどれを報告しているかを明記する。
-- 日本語で「ROUGE が 0 になる」「異常に高い/低い」ときは、ほぼトークナイザの問題。
 
 ## LLM で文章を要約する (長さと観点を指定する) {llm_summary gpu}
 
@@ -502,7 +503,7 @@ for col, label in [("generated", "LLM の見出し"), ("lead", "本文の先頭 
 
 - 見出し生成は、要約の中でも最も圧縮率が高いタスク。何を残すかの選択がそのまま品質になる。
 - 実際の見出しは、読者の興味を引くための表現 (煽り、伏せ字、疑問形) を含むことが多く、内容の要約とは限らない。ROUGE が低くても、見出しとして悪いとは言えない。
-- 12 記事では平均値のばらつきが大きい。手法を比べるなら、数百件以上で評価し、信頼区間を付ける (評価の章を参照)。
+- 12 記事では平均値のばらつきが大きい。手法を比べるなら、数百件以上で評価し、信頼区間を付ける (評価指標と統計的検定の章を参照)。
 - 「記事にない情報は入れない」と指示しても、固有名詞や数字を作ってしまうことがある。公開する見出しに使うなら、人の確認が必要。
 
 ## 文章をやさしい日本語に書き換える (テキスト平易化) {text_simplification}
