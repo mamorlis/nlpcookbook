@@ -538,11 +538,14 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 def encode(example):
     enc = tokenizer(example["text"], truncation=True, max_length=256, return_offsets_mapping=True)
     tags = []
-    for s, e in enc["offset_mapping"]:
+    for tok, (s, e) in zip(enc.tokens(), enc["offset_mapping"]):
         if s == e:                                  # 特殊トークンは損失計算から除外
             tags.append(-100)
             continue
         tag = "O"
+        if tok == "▁":                              # 単独の「▁」は次の文字と同じ位置を返すので、常に O にする
+            tags.append(label2id[tag])
+            continue
         for start, end, typ in zip(example["starts"], example["ends"], example["types"]):
             if s < end and e > start:               # トークンがスパンと重なる
                 tag = ("B-" if s <= start else "I-") + typ
@@ -593,6 +596,7 @@ for e in ner(text):
     print(text[e["start"]:e["end"]], e["entity_group"], round(float(e["score"]), 2))
 ```
 
-- T4 GPU で 5 エポック約 5 分、エンティティ単位の F1 は 0.85 前後。
+- T4 GPU で 5 エポック約 5 分、エンティティ単位の F1 は 0.84 前後。
 - ここではサブワードすべてにラベルを付けている (先頭だけに付けて残りを -100 にする流儀もある)。評価は本来、単語や文字の単位に戻して行うのが厳密。
+- XLM-R のトークナイザは、文頭や空白の後に単独の `▁` トークンを置き、その文字位置を次の文字と同じ `(0, 1)` のように返す。そのまま位置で判定すると `▁` と次のトークンの両方が `B-` になり、推論時に「ソ」と「ソニーグループ」のように同じ固有表現が二重に出る。
 - 日本語特化の BERT (`tohoku-nlp/bert-base-japanese-v3`) のほうが精度は高いが、トークナイザが文字位置を返さないので、位置合わせを自分で実装する必要がある。
