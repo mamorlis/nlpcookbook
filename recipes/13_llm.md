@@ -401,7 +401,7 @@ name = "Qwen/Qwen2.5-7B-Instruct"
 quant = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",               # 正規分布を仮定した 4bit 量子化
-    bnb_4bit_compute_dtype=torch.bfloat16,   # 計算は 16bit で行う
+    bnb_4bit_compute_dtype=torch.float16,    # 計算は 16bit で行う (T4 は bfloat16 に非対応なので float16)
     bnb_4bit_use_double_quant=True,          # 量子化の定数も量子化して、さらに節約
 )
 tokenizer = AutoTokenizer.from_pretrained(name)
@@ -421,6 +421,7 @@ print(tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_token
 - 4bit 量子化による精度の低下は、多くのタスクでわずか。「大きなモデルの 4bit」は「小さなモデルの 16bit」より良いことが多い。
 - bitsandbytes は NVIDIA GPU 専用。CPU や Mac で動かすなら、GGUF 形式 + llama.cpp (Ollama) を使う。
 - 速度は 16bit より遅くなる。メモリに収まるなら `torch_dtype=torch.float16` で普通に読み込むほうが速い。
+- A100 や L4 など bfloat16 に対応した GPU (Ampere 以降) なら、`bnb_4bit_compute_dtype=torch.bfloat16` のほうが数値的に安定する。
 
 ## LoRA で LLM を少ないメモリでファインチューニングする {lora_finetune gpu norun}
 
@@ -438,7 +439,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.bfloat16, device_map="auto")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
 
 lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
                   target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])   # アテンションの射影行列に低ランク行列を追加
@@ -469,7 +471,7 @@ ds = Dataset.from_list([{"src": s, "tgt": t} for s, t in pairs]).map(encode, rem
 from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
 
 args = TrainingArguments(output_dir="lora-out", num_train_epochs=3, per_device_train_batch_size=8, learning_rate=2e-4,
-                         warmup_steps=10, logging_steps=10, save_strategy="no", report_to="none", bf16=True, seed=0)
+                         warmup_steps=10, logging_steps=10, save_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
 trainer = Trainer(model=model, args=args, train_dataset=ds,
                   data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100))
 trainer.train()
@@ -493,6 +495,7 @@ model.save_pretrained("gec-lora")   # 保存されるのは追加した LoRA の
 - 読み込み: `PeftModel.from_pretrained(ベースモデル, "gec-lora")`。推論を速くするなら `merge_and_unload()` で重みを統合する。
 - 学習率は全体のファインチューニングより高め (1e-4〜3e-4)。`r` は 8〜64 が一般的。
 - 4bit 量子化と組み合わせる (QLoRA) と、7B クラスでも T4 で学習できる。`prepare_model_for_kbit_training` を使う。
+- ここでは 8 種類の文を 25 回ずつ繰り返しているので、1 エポック目で損失がほぼ 0 になり、学習データを丸暗記する。その結果、「楽しいでした」→「面白かったです」のように、誤りでない語まで学習データの訂正文に寄せて書き換える。実際のデータで学習するときは、検証データの損失を見てエポック数を決める。
 
 ## Colab の組み込み AI (google.colab.ai) で Gemini を呼び出す {colab_ai norun}
 
