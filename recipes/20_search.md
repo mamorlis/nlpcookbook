@@ -215,6 +215,175 @@ for q in ["日本で一番高い山", "BERT とは何ですか", "日本一大�
 - 3 つ目のクエリのように語が一致しない言い換え (大きい ↔ 最大) には弱い。埋め込み検索と組み合わせると補い合える (ハイブリッド検索のレシピを参照)。
 - 大規模なら `bm25s` (高速な実装) や Elasticsearch / OpenSearch、Pyserini を使う。
 
+## Elasticsearch で日本語の全文検索をする (kuromoji) {elasticsearch_ja}
+
+自前の BM25 ではなく、検索エンジンの Elasticsearch で日本語の文書を全文検索したい。形態素解析器 kuromoji を組み込んだアナライザを作り、スコアやハイライト付きで検索結果を見たい。
+
+```python
+# 所要時間の目安: Colab で 2〜4 分 (本体の配布物が約 840MB)
+ES = "elasticsearch-9.5.6"
+!wget -q https://artifacts.elastic.co/downloads/elasticsearch/{ES}-linux-x86_64.tar.gz
+!tar -xzf {ES}-linux-x86_64.tar.gz && rm {ES}-linux-x86_64.tar.gz
+!{ES}/bin/elasticsearch-plugin install --batch analysis-kuromoji > /dev/null
+# 学習用の設定: 1 台構成、手元 (127.0.0.1) だけで待ち受け、セキュリティ機能 (認証・TLS) は無効。
+# 機械学習の機能は使わないので切る (メモリの節約)
+!printf 'discovery.type: single-node\nnetwork.host: 127.0.0.1\nhttp.port: 9200\nxpack.security.enabled: false\nxpack.ml.enabled: false\n' >> {ES}/config/elasticsearch.yml
+# ヒープ (Java のメモリ) は 1GB に固定する (指定しないと搭載メモリと役割から自動で決まる)
+!printf -- '-Xms1g\n-Xmx1g\n' > {ES}/config/jvm.options.d/heap.options
+# Elasticsearch は root では起動できないので、Colab に最初からいる daemon ユーザーの持ち物にしておく
+!chown -R daemon:daemon {ES}
+!pip install -q "elasticsearch>=9,<10" rank_bm25 fugashi unidic-lite
+```
+
+```python
+import subprocess, time, urllib.request
+import elasticsearch
+
+# バックグラウンドで起動する (Colab で 1 分ほど)。root では起動を拒否されるので daemon ユーザーで動かす
+server = subprocess.Popen([f"{ES}/bin/elasticsearch"], user="daemon", group="daemon",
+                          stdout=open("es.log", "w"), stderr=subprocess.STDOUT)
+for _ in range(180):   # HTTP で応答するまで待つ
+    if server.poll() is not None:   # 起動に失敗して終了した
+        print(open("es.log").read()[-3000:]); break
+    try:
+        urllib.request.urlopen("http://localhost:9200", timeout=1); break
+    except Exception:
+        time.sleep(1)
+es = elasticsearch.Elasticsearch("http://localhost:9200")
+info = es.info()
+print("サーバー", info["version"]["number"], "/ Lucene", info["version"]["lucene_version"], "/ クライアント", elasticsearch.__versionstr__)
+print([p["component"] for p in es.cat.plugins(format="json")])
+```
+
+```python
+# トークンの分かれ方を _analyze API で見る: 標準のアナライザ / kuromoji の通常モード / 検索モード
+text = "関西国際空港で東京スカイツリーのお土産を買いました"
+show = lambda **kw: print([t["token"] for t in es.indices.analyze(text=text, **kw)["tokens"]])
+show(analyzer="standard")
+show(tokenizer={"type": "kuromoji_tokenizer", "mode": "normal"})
+show(tokenizer={"type": "kuromoji_tokenizer", "mode": "search"})
+# 品詞での除外 (助詞・助動詞など) と原形化 (買い → 買う) まで入れたもの
+show(tokenizer={"type": "kuromoji_tokenizer", "mode": "search"},
+     filter=["kuromoji_baseform", "kuromoji_part_of_speech", "cjk_width", "ja_stop", "kuromoji_stemmer", "lowercase"])
+```
+
+```python
+# 索引 (index) を作る。アナライザとマッピング (フィールドの型) はここで決める
+settings = {
+    "number_of_shards": 1, "number_of_replicas": 0,
+    "analysis": {
+        "tokenizer": {"ja_search": {"type": "kuromoji_tokenizer", "mode": "search"}},
+        "analyzer": {"ja": {"type": "custom", "tokenizer": "ja_search",
+                            "char_filter": ["kuromoji_iteration_mark"],
+                            "filter": ["kuromoji_baseform", "kuromoji_part_of_speech", "cjk_width",
+                                       "ja_stop", "kuromoji_stemmer", "lowercase"]}}},
+    # BM25 のパラメータを変えた類似度も定義できる (b=0: 文書の長さで割り引かない)
+    "similarity": {"bm25_nolen": {"type": "BM25", "k1": 1.2, "b": 0.0}},
+}
+mappings = {"properties": {
+    "text": {"type": "text", "analyzer": "ja",
+             "fields": {"nolen": {"type": "text", "analyzer": "ja", "similarity": "bm25_nolen"}}},
+    "category": {"type": "keyword"},   # 絞り込み用 (解析しない)
+}}
+es.indices.delete(index="docs", ignore_unavailable=True)
+es.indices.create(index="docs", settings=settings, mappings=mappings)
+```
+
+```python
+from elasticsearch import helpers
+
+# この章の「BM25 で日本語のキーワード検索をする」と同じ文書
+docs = [
+    ("地理", "富士山は標高 3776 メートルで、日本で最も高い山である。"),
+    ("建築", "東京スカイツリーは高さ 634 メートルの電波塔である。"),
+    ("地理", "琵琶湖は滋賀県にある日本最大の湖である。"),
+    ("地理", "信濃川は全長 367 キロメートルで、日本で最も長い川である。"),
+    ("技術", "形態素解析とは、文を単語に分割して品詞を付与する処理である。"),
+    ("技術", "BERT は Transformer のエンコーダを用いた事前学習モデルである。"),
+]
+actions = ({"_index": "docs", "_id": str(i), "_source": {"category": c, "text": t}} for i, (c, t) in enumerate(docs))
+print(helpers.bulk(es, actions, refresh=True))   # refresh=True: 登録した文書をすぐ検索できるようにする
+print(es.count(index="docs")["count"], "件")
+```
+
+```python
+ja = lambda s: [t["token"] for t in es.indices.analyze(index="docs", analyzer="ja", text=s)["tokens"]]
+
+def search(query, field="text", category=None, size=2):
+    q = {"match": {field: query}}   # クエリも同じアナライザで解析され、どれかの語を含む文書が当たる (OR)
+    if category:   # bool の filter はスコアに影響しない絞り込み
+        q = {"bool": {"must": [q], "filter": [{"term": {"category": category}}]}}
+    res = es.search(index="docs", query=q, size=size, highlight={"fields": {field: {}}})
+    print(query, ja(query), f"→ {res['hits']['total']['value']} 件ヒット")
+    for h in res["hits"]["hits"]:
+        print(f"  {h['_score']:.3f}  [{h['_source']['category']}] {h['highlight'][field][0]}")
+
+for q in ["日本で一番高い山", "BERT とは何ですか", "日本一大きい湖はどこ？"]:
+    search(q)
+search("日本", size=4)
+search("日本", category="技術")
+print(ja("高さ"), ja("お土産を買いました"))
+```
+
+```python
+# match は既定で OR。minimum_should_match で「クエリの語のうち何割を含むか」を指定できる
+for msm in ["1", "75%", "100%"]:
+    res = es.search(index="docs", query={"match": {"text": {"query": "日本で一番高い山", "minimum_should_match": msm}}})
+    print(f"{msm:>4}", [(h["_id"], round(h["_score"], 3)) for h in res["hits"]["hits"]])
+```
+
+```python
+# 自前の BM25 (この章の「BM25 で日本語のキーワード検索をする」の rank_bm25 + fugashi) とスコアを並べる
+import numpy as np
+from fugashi import Tagger
+from rank_bm25 import BM25Okapi
+
+tagger = Tagger()
+tok = lambda s: [w.feature.orthBase or w.surface for w in tagger(s.lower())
+                 if w.feature.pos1 not in ("助詞", "助動詞", "補助記号", "空白")]
+bm25 = BM25Okapi([tok(t) for _, t in docs])
+for q in ["日本で一番高い山", "日本 最も 長い", "メートル"]:
+    es_score = np.zeros(len(docs))
+    for h in es.search(index="docs", query={"match": {"text": q}})["hits"]["hits"]:
+        es_score[int(h["_id"])] = h["_score"]
+    print(q, "\n   Elasticsearch:", es_score.round(2).tolist(), "\n   rank_bm25    :", bm25.get_scores(tok(q)).round(2).tolist())
+```
+
+```python
+# スコアの内訳 (explain): Lucene の BM25 の式の各項が見える
+def print_tree(e, depth=0):
+    print("  " * depth + f"{e['value']:.3f}  {e['description'][:60]}")
+    for d in e["details"]:
+        print_tree(d, depth + 1)
+
+res = es.search(index="docs", query={"match": {"text": "日本"}}, explain=True, size=1)
+print_tree(res["hits"]["hits"][0]["_explanation"])
+```
+
+```python
+# BM25 の b を 0 にしたフィールド (text.nolen) では、文書の長さで割り引かなくなる
+for field in ["text", "text.nolen"]:
+    hits = es.search(index="docs", query={"match": {field: "日本"}})["hits"]["hits"]
+    print(f"{field:10}", [(h["_id"], len(ja(h["_source"]["text"])), round(h["_score"], 3)) for h in hits])
+```
+
+```python
+# 後片付け: サーバーを止める (終了処理に 30 秒ほどかかる)
+es.close()
+server.terminate()
+server.wait(timeout=120)
+print("終了コード", server.returncode)   # 143 = SIGTERM で終了した
+```
+
+- Elasticsearch は、検索ライブラリ Lucene の転置索引を HTTP の API で使えるようにした検索サーバー。この版 (9.5.6) は Lucene 10.5.2 を使っている。スコアの既定は BM25 で、explain の内訳のとおり k1=1.2、b=0.75、IDF は log(1 + (N − n + 0.5) / (n + 0.5))。boost の 2.2 は k1 + 1 にあたり、この章の「BM25 を自分で実装してパラメータの働きを確かめる」の式と同じ形になる。
+- 自前の BM25 (rank_bm25 の BM25Okapi) と比べると、スコアが 0 より大きい文書の順位は同じだが、スコアの値とヒットする文書の数が違う。BM25Okapi の IDF は log((N − n + 0.5) / (n + 0.5)) なので、6 件中 3 件に出る「日本」の IDF が 0 になり、「日本」だけが一致する文書のスコアが 0 になる。Lucene の IDF は 1 を足してから対数をとるので、必ず正になる。k1 の既定値 (rank_bm25 は 1.5、Lucene は 1.2) や、単語の区切り方 (unidic-lite と kuromoji に内蔵の辞書) も違う。
+- kuromoji の検索モードは、長い複合語を、全体 (関西国際空港) と部分 (関西 / 国際 / 空港) の両方のトークンにするので、「空港」のような部分の語でも当たるようになる。通常モードでは複合語が 1 語のまま。標準のアナライザ (standard) は、漢字やひらがなを 1 文字ずつに分けてしまう (カタカナの続きは 1 語)。
+- 品詞による除外 (`kuromoji_part_of_speech`) とストップワード (`ja_stop`) で、「で」「を」「とは」「です」のような機能語が消える (「BERT とは何ですか」→ bert, 何)。`kuromoji_baseform` は活用語を原形に戻す (買い → 買う)。その結果、「高さ」の「高」も「高い」になり、「日本で一番高い山」で東京スカイツリーの文書がヒットしている。原形化は検索漏れを減らすが、このような意図しない一致も増やす。
+- 「日本一」は 1 語として解析されるので、「日本」とは一致しない。「大きい」と「最大」のような言い換えに弱いのも自前の BM25 と同じで、埋め込み検索との組み合わせ (この章の「キーワード検索と埋め込み検索を組み合わせる」) が有効。
+- `match` は既定で、クエリの語のどれかを含めばヒットする (OR)。`minimum_should_match` を 75% にすると、「日本で一番高い山」(4 語) では 3 語以上を含む富士山の文書だけになる。bool の `filter` はスコアを変えずに絞り込む。BM25 のパラメータは索引の `similarity` で指定でき、b=0 のフィールド (text.nolen) では、文書の長さ (dl) が 6、8、10 と違っても「日本」のスコアが同じになる。アナライザやマッピングは索引を作るときに決め、変えるときは文書を入れ直す。
+- ここではセキュリティ機能 (認証と HTTPS) を無効にしている。127.0.0.1 だけで待ち受ける学習用の設定であり、外から接続できるサーバーでは無効にしない。設定しないと、初回の起動時に証明書が作られて HTTPS と認証が必須になり、バックグラウンドで起動した場合は `bin/elasticsearch-reset-password` で elastic ユーザーのパスワードを設定する必要がある。
+- 配布物 (tar.gz) のライセンスは Elastic License 2.0。ソースコードの大部分は AGPLv3、SSPL、Elastic License 2.0 から選べる (リポジトリの LICENSE.txt)。Apache License 2.0 だったころの Elasticsearch (7.10.2) のコードから派生した OpenSearch もあり、こちらは Apache License 2.0 で、analysis-kuromoji プラグインも用意されている。
+
 ## 単語に区切らず文字 n-gram で検索する (表記ゆれに強い検索) {char_ngram_search}
 
 形態素解析の区切り方や表記ゆれのせいで検索に当たらない。単語に区切らずに、文字 2-gram で索引を作りたい。
@@ -560,6 +729,171 @@ for r in reranker.rank(query, candidates, top_k=2, return_documents=True):
 - バイエンコーダ (文埋め込み) はクエリと文書を別々にベクトル化するので速いが粗い。クロスエンコーダは両方を連結して入力するので正確だが遅い。
 - 定番の構成: BM25 や埋め込み検索で上位 100 件を取得 → クロスエンコーダで上位 10 件に絞る。
 - 多言語なら `BAAI/bge-reranker-v2-m3`、日本語で高精度なら `hotchpotch/japanese-reranker-cross-encoder-large-v1` など。
+
+## 複数の特徴量からランキングを学習する (Learning to Rank、LambdaMART) {learning_to_rank}
+
+BM25 のスコア、埋め込みの類似度、文書の長さなど、手元にある複数の手がかりをどう組み合わせて並べるかを、関連度のラベル付きデータから学習したい。クイズの質問と Wikipedia の段落に関連の有無のラベルを付けた JQaRA を使い、LightGBM の LambdaMART で学習して、BM25、埋め込み、RRF と比べる。
+
+```python
+!pip install -q rank_bm25 fugashi unidic-lite
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+# JQaRA: クイズの質問ごとに Wikipedia の段落の候補 (dev は 50 件、test は 100 件) が付いている。
+# ラベルは、答えの文字列を含み、答えを導くのに有用と確かめた段落が 1、それ以外が 0
+base = "hf://datasets/hotchpotch/JQaRA/data/"
+dev = pd.read_parquet(base + "dev-00000-of-00001.parquet")
+test = pd.read_parquet(base + "test-00000-of-00001.parquet")
+for name, d in [("dev", dev), ("test", test)]:
+    by_pos = d.groupby(d.groupby("q_id").cumcount())["label"].mean()   # 配布時の並び順の i 番目が正解である割合
+    print(f"{name}: {d['q_id'].nunique()} 質問, 正解の割合 (並び順の 1〜8 番目) {by_pos.head(8).round(2).tolist()}")
+
+# 配布時の並び順は、dev でも test でも上位ほど正解が多い。並び順が答えを漏らさないよう、候補の順番は混ぜる
+# 時間の都合で、dev (学習用) と test (評価用) から 100 質問ずつ選ぶ
+rng = np.random.default_rng(0)
+def sample(d, n):
+    qids = rng.choice(d["q_id"].unique(), n, replace=False)
+    return d[d["q_id"].isin(qids)].sample(frac=1, random_state=0).sort_values("q_id", kind="stable")
+
+df = pd.concat([sample(dev, 100).assign(split="train"), sample(test, 100).assign(split="test")], ignore_index=True)
+assert df.groupby("q_id")["split"].nunique().max() == 1      # 同じ質問が学習と評価の両方に入っていない
+print(len(df), "組 |", df["question"].iloc[0], df["answers"].iloc[0])
+```
+
+```python
+from fugashi import Tagger
+from rank_bm25 import BM25Okapi
+
+tagger = Tagger()
+def tokenize(text):
+    return [w.feature.orthBase or w.surface for w in tagger(text.lower())
+            if w.feature.pos1 not in ("助詞", "助動詞", "補助記号", "空白")]
+
+titles = [tokenize(t) for t in df["title"]]
+bodies = [tokenize(t) for t in df["text"]]
+# IDF は手元の候補全体 (200 質問分) から計算する簡略版。本来は検索対象の全文書から計算する
+bm25 = BM25Okapi([t + b for t, b in zip(titles, bodies)])   # タイトル + 本文
+bm25_title = BM25Okapi(titles)                               # タイトルだけ
+
+rows = {}
+for qid, g in df.groupby("q_id", sort=False):
+    q = tokenize(g["question"].iloc[0]); qs = set(q); idx = g.index.to_list()
+    for i, s, st in zip(idx, bm25.get_batch_scores(q, idx), bm25_title.get_batch_scores(q, idx)):
+        rows[i] = {"bm25": s, "bm25_title": st,
+                   "coverage": len(qs & (set(titles[i]) | set(bodies[i]))) / len(qs),   # クエリの語のうち文書に出てくる割合
+                   "title_coverage": len(qs & set(titles[i])) / len(qs)}
+df = df.join(pd.DataFrame.from_dict(rows, orient="index"))
+df["doc_len"] = df["text"].str.len()
+
+# 第 1 段: BM25 で各質問の上位 20 件に絞る。以降はこの 20 件の並べ替えを比べる
+df["bm25_rank"] = df.groupby("q_id")["bm25"].rank(ascending=False, method="first")
+cand = df[df["bm25_rank"] <= 20].reset_index(drop=True)
+recall = cand.groupby("q_id")["label"].sum() / df.groupby("q_id")["label"].sum()
+print(len(cand), "候補 | 正解のうち上位 20 件に残った割合:", recall.groupby(cand.groupby("q_id")["split"].first()).mean().round(3).to_dict())
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+# 4000 段落の埋め込み。Colab の CPU で 8〜12 分かかる
+model = SentenceTransformer("intfloat/multilingual-e5-small")
+P = model.encode(["passage: " + t + " " + x for t, x in zip(cand["title"], cand["text"])], batch_size=32, normalize_embeddings=True)
+questions = cand["question"].unique().tolist()
+Q = dict(zip(questions, model.encode(["query: " + q for q in questions], normalize_embeddings=True)))
+cand["dense"] = (P * np.stack([Q[q] for q in cand["question"]])).sum(axis=1)   # コサイン類似度
+cand["dense_rank"] = cand.groupby("q_id")["dense"].rank(ascending=False, method="first")
+print(cand[["bm25", "bm25_title", "dense", "coverage", "title_coverage", "doc_len", "label"]].describe().round(2).loc[["mean", "min", "max"]])
+```
+
+```python
+import lightgbm as lgb
+
+features = ["bm25", "bm25_title", "dense", "coverage", "title_coverage", "doc_len"]
+params = dict(objective="lambdarank", n_estimators=100, learning_rate=0.05, num_leaves=7, min_child_samples=20, random_state=0, verbose=-1)
+train, ev = cand[cand["split"] == "train"], cand[cand["split"] == "test"].copy()
+
+# group: クエリごとの候補数を、行の並び順どおりに並べたもの。同じクエリの行は連続していなければならない
+group = train.groupby("q_id", sort=False).size().to_numpy()
+assert (train["q_id"] != train["q_id"].shift()).sum() == len(group)
+print("group:", group[:8], "... 合計", group.sum(), "=", len(train), "行")
+
+ranker = lgb.LGBMRanker(**params)
+ranker.fit(train[features], train["label"], group=group)
+ev["ltr"] = ranker.predict(ev[features])
+ev["rrf"] = 1 / (60 + ev["bm25_rank"]) + 1 / (60 + ev["dense_rank"])    # この章の「キーワード検索と埋め込み検索を組み合わせる (ハイブリッド検索、RRF)」と同じ RRF (k=60)
+```
+
+```python
+def reciprocal_rank(ranked, relevant):
+    for i, doc in enumerate(ranked, 1):
+        if doc in relevant:
+            return 1 / i
+    return 0.0
+
+def ndcg_at_k(ranked, gains, k):
+    dcg = sum(gains.get(doc, 0) / np.log2(i + 1) for i, doc in enumerate(ranked[:k], 1))
+    ideal = sum(g / np.log2(i + 1) for i, g in enumerate(sorted(gains.values(), reverse=True)[:k], 1))
+    return float(dcg / ideal) if ideal else 0.0
+
+# 正解は第 1 段で落ちたものも含めて数える (理想の nDCG は元の候補全体の正解から計算)
+gold = {qid: {d: 1 for d in s} for qid, s in df[df["label"] == 1].groupby("q_id")["id"]}
+
+def evaluate(data, col):
+    nd, rr = [], []
+    for qid, g in data.groupby("q_id"):
+        ranked = g.sort_values(col, ascending=False)["id"].tolist()
+        nd.append(ndcg_at_k(ranked, gold[qid], 10)); rr.append(reciprocal_rank(ranked[:10], set(gold[qid])))
+    return np.array(nd), np.array(rr)
+
+methods = [("BM25", "bm25"), ("埋め込み", "dense"), ("RRF", "rrf"), ("LTR (LambdaMART)", "ltr"), ("上限 (20 件中の正解を全部上に)", "label")]
+results = {name: evaluate(ev, col) for name, col in methods}
+print(pd.DataFrame({k: {"nDCG@10": v[0].mean(), "MRR@10": v[1].mean()} for k, v in results.items()}).T.round(4))
+
+def paired_ci(diff, n_boot=2000, seed=0):
+    """質問ごとの差の平均の 95% 信頼区間 (質問を復元抽出するブートストラップ)"""
+    r = np.random.default_rng(seed)
+    means = [diff[r.integers(0, len(diff), len(diff))].mean() for _ in range(n_boot)]
+    return diff.mean(), *np.percentile(means, [2.5, 97.5])
+
+for a, b in [("LTR (LambdaMART)", "RRF"), ("LTR (LambdaMART)", "BM25"), ("RRF", "埋め込み")]:
+    diff = results[a][0] - results[b][0]
+    m_, lo, hi = paired_ci(diff)
+    print(f"nDCG@10 の差 {a} − {b}: {m_:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]"
+          f"  (良い {(diff > 0).sum()} / 悪い {(diff < 0).sum()} / 同じ {(diff == 0).sum()} 質問)")
+
+imp = pd.Series(ranker.booster_.feature_importance("gain"), index=features)
+print((imp / imp.sum()).sort_values(ascending=False).round(3))
+```
+
+```python
+# 比較: 評価と同じ分布のデータ (test の別の質問) で学習したらどうなるか。test の 100 質問を、質問単位で 5 分割して交差検証する
+from sklearn.model_selection import GroupKFold
+
+ev["ltr_cv"] = 0.0
+imps = []
+for tr_idx, te_idx in GroupKFold(n_splits=5).split(ev, groups=ev["q_id"]):
+    a = ev.iloc[tr_idx]
+    m = lgb.LGBMRanker(**params).fit(a[features], a["label"], group=a.groupby("q_id", sort=False).size().to_numpy())
+    ev.iloc[te_idx, ev.columns.get_loc("ltr_cv")] = m.predict(ev.iloc[te_idx][features])
+    imps.append(m.booster_.feature_importance("gain"))
+nd, rr = evaluate(ev, "ltr_cv")
+m_, lo, hi = paired_ci(nd - results["RRF"][0])
+print(f"LTR (test の別の質問で学習): nDCG@10 {nd.mean():.4f}  MRR@10 {rr.mean():.4f}  | RRF との差 {m_:+.4f}  95% CI [{lo:+.4f}, {hi:+.4f}]")
+imp = pd.Series(np.mean(imps, axis=0), index=features)
+print((imp / imp.sum()).sort_values(ascending=False).round(3))
+```
+
+- Learning to Rank (LTR) は、クエリと文書の組ごとの特徴量から並べる順番を学習する。文書ごとの関連度を当てる pointwise、同じクエリの 2 文書のどちらが上かを当てる pairwise、並び全体の良さを目的にする listwise に分けられる。LambdaMART は、ペアの順序の誤りに「入れ替えたら nDCG がどれだけ変わるか」で重みを付けた勾配を勾配ブースティング木で学習する方式で、LightGBM の objective="lambdarank" がこれにあたる。クロスエンコーダのスコア (この章の「クロスエンコーダで検索結果を並べ替える (リランキング)」) も特徴量の 1 つにできる。
+- `group` は「最初の 20 行が 1 つ目のクエリ、次の 20 行が 2 つ目…」という件数の並びで、合計が行数と一致しなければならない。同じクエリの行は連続させる。ここでは全クエリが 20 件だが、件数はクエリごとに違ってよい。予測は行ごとのスコアなので `group` は要らず、クエリの中でスコア順に並べればよい。
+- 学習と評価はクエリ単位で分ける。同じクエリの候補が両方に入ると、そのクエリに特有の傾向を覚えたまま評価することになり、数値が甘くなる。ここでは dev の質問で学習して test の質問で評価し (assert で確認)、最後のセルは `GroupKFold` で質問単位に分割している。また配布データの候補は上位ほど正解が多い (最初のセルの出力で、dev は 1〜5 番目が 1.0〜0.29 で 6 番目以降は 0、test も 1〜8 番目で 0.61 から 0.22 に下がる) ので、順番が答えを漏らさないよう混ぜてから使う。データの質問と答えは JAQKET 由来で CC BY-SA 4.0、段落は Wikipedia 由来 (CC BY-SA 4.0 または GFDL)。
+- 100 質問の評価では、どの方法の差も誤差の範囲にある。dev で学習した LTR は nDCG@10 0.478 で RRF の 0.484 より低いが、質問ごとの差のブートストラップ 95% 信頼区間は [−0.023, +0.011] で 0 をまたぎ、勝ち負けも 37 対 43 である。BM25 との差 (+0.013、[−0.016, +0.043]) も同様。RRF と埋め込みの差 (+0.023、[+0.003, +0.043]) だけは 0 をまたがなかったが、いくつも比べたうちの 1 つなので強くは言えない。信頼区間の考え方は評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照。LTR を入れるなら、もっと多くの質問で調整なしの RRF より良いことを確かめてからにする。
+- dev と test では性質が違う。dev で学習したモデルの重要度は dense に偏り (0.889)、test の別の質問で学習すると bm25 や coverage にも分散する (dense 0.402)。BM25 の上位 20 件に残る正解の割合も dev 93.4%、test 51.5% と違う。README によれば、候補数が dev 50 件・test 100 件で、dev は正解を LLM で確かめた最大 5 件に絞っており、test のほうが正解が多い。また候補自体が e5-large など 5 つの埋め込みモデルの検索結果を RRF で絞ったもので、ここでの BM25 の第 1 段はその中での絞り込みにすぎない。dense の重要度が高いのは、候補を作った方法と同系統だからという可能性もある。ただし、これらが性能差の原因だとは、この実験からは言えない。なお最後のセルの LTR (nDCG@10 0.486、RRF との差 +0.002、[−0.020, +0.023]) は、評価と同じ分布のラベルで学習しているのに対し、BM25・埋め込み・RRF はラベルを使っていない。しかも特徴量や設定は、試行の段階で test の結果を見ながら決めたので、楽観的な参考値である。
+- 第 1 段で落ちた正解は並べ替えでは取り戻せない。20 件の候補の中の正解を全部上に並べたときの上限は nDCG@10 0.700・MRR@10 0.920 で、どの方法 (0.46〜0.49) も方法同士の差よりはるかに大きく上限を下回る。test の正解のうち上位 20 件に残ったのは 51.5% なので、第 1 段をハイブリッド検索にする、候補を増やすなどで上限を上げる余地が大きい。
+- 木のモデルは値の大小で分岐するので、特徴量の標準化は要らない。重要度 (gain) は分岐で損失を減らした量の合計で、似た特徴量の間で分け合われ、学習データで大きく変わる (上の 2 つのモデルのとおり)。ラベルは 0 以上の整数で、0〜3 のような段階もそのまま渡せる。LightGBM の lambdarank は既定で関連度 l の重みを 2^l − 1 とし、31 以上のラベルはエラーになる (`label_gain` で変えられる)。この章の「検索・ランキングを評価する (Recall@k、MRR、nDCG)」の `ndcg_at_k` は関連度をそのまま足すので、段階のあるラベルでは LightGBM の nDCG と値が一致しない (0/1 なら同じ)。
+- クリックログを正解の代わりにすると、上位に表示された文書ほどクリックされる位置バイアスまで学習してしまう。クリックされなかった文書は、見られていないだけかもしれない。表示位置ごとのクリックされやすさを推定して補正する方法 (unbiased learning to rank) があり、LightGBM の `Dataset` には表示位置を渡す `position` 引数がある (4.6.0 で確認)。
 
 ## 検索結果の重複を減らして多様にする (MMR) {mmr_diversify}
 

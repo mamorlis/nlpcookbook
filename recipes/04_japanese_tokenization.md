@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome で単語に区切り、品詞や原形、読みを取り出す。文への分割、単語分割や品詞タグ付けの仕組みも扱う。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、文への分割、単語分割や品詞タグ付けの仕組みも扱う。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -259,6 +259,92 @@ for w in tagger("国境の長いトンネルを抜けると雪国であった。
 - `GenericTagger` は素性に名前が付かないので添字でアクセスする。未知語は読みがなく素性が 7 個になる点に注意。
 - IPA 辞書は 2007 年で更新が止まっている。新しく始めるなら UniDic か Sudachi がおすすめ。
 
+## NEologd 辞書で新語・固有名詞をまとまりとして解析する {mecab_neologd}
+
+人名・作品名・組織名や新語が IPA 辞書では細かく切れてしまうので、1 語として扱いたい。ウェブ上の語彙から新語・固有表現を IPA 辞書に追加した MeCab 用のシステム辞書 mecab-ipadic-NEologd を使う。
+
+```python
+# Colab で 5 分ほどかかる (辞書のダウンロードとビルド。できる辞書は 900MB ほど)
+!apt-get install -y -q mecab libmecab-dev mecab-ipadic-utf8 > /dev/null
+!git clone -q --depth 1 https://github.com/neologd/mecab-ipadic-neologd
+!cd mecab-ipadic-neologd && ./bin/install-mecab-ipadic-neologd -n -y -u > ../neologd_install.log 2>&1; tail -n 3 ../neologd_install.log
+!pip install -q fugashi
+# インストール先は mecab-config --dicdir の下の mecab-ipadic-neologd
+!ls -lh $(mecab-config --dicdir)/mecab-ipadic-neologd/sys.dic
+!echo "米津玄師の新曲" | mecab -d $(mecab-config --dicdir)/mecab-ipadic-neologd
+```
+
+```python
+import subprocess
+from fugashi import GenericTagger
+
+dicdir = subprocess.run(["mecab-config", "--dicdir"], capture_output=True, text=True).stdout.strip()
+NEOLOGD = f"{dicdir}/mecab-ipadic-neologd"
+# fugashi は既定で /usr/local/etc/mecabrc を探すので、apt の MeCab の設定ファイルを -r で渡す
+ipa = GenericTagger("-r /etc/mecabrc")                  # apt の IPA 辞書 (mecabrc の既定の辞書)
+neo = GenericTagger(f"-r /etc/mecabrc -d {NEOLOGD}")    # NEologd
+
+sents = [
+    "米津玄師の新曲が鬼滅の刃の主題歌に決まった。",
+    "大谷翔平と藤井聡太が話題になった。",
+    "きゃりーぱみゅぱみゅがNHK紅白歌合戦に出場した。",
+    "君の名は。を観てからインスタ映えする場所を巡った。",
+    "逃げるは恥だが役に立つの恋ダンスが流行った。",
+    "ほぼ日刊イトイ新聞とメルカリとZOZOTOWNを比べる。",
+]
+for s in sents:
+    print("IPA    :", " | ".join(w.surface for w in ipa(s)))
+    print("NEologd:", " | ".join(w.surface for w in neo(s)))
+    print()
+```
+
+```python
+# NEologd で固有名詞になった語の品詞 (細分類) と読み。素性は IPA 辞書と同じ並び
+for s in sents:
+    for w in neo(s):
+        f = w.feature
+        if f[1] == "固有名詞":
+            print(w.surface, ",".join(f[:4]), f[7] if len(f) > 7 else "(読みなし: 未知語)", sep="\t")
+```
+
+```python
+# 収録されていない新しい語 (2020 年 9 月より後に広まった語など) は、IPA 辞書と同じく切れるか未知語になる
+for s in ["推しの子のアニメを観た。", "ChatGPTと生成AIの話をした。"]:
+    for w in neo(s):
+        f = w.feature
+        print(w.surface, ",".join(f[:4]), f[7] if len(f) > 7 else "(読みなし: 未知語)", sep="\t")
+    print()
+```
+
+```python
+# 長い固有名詞が 1 語になると、その一部の語で検索したときに見つからなくなる (再現率が下がる)
+docs = [
+    "東京大学大学院情報理工学系研究科の共同研究。",
+    "東京大学の入試が行われた。",
+    "新型コロナウイルス感染症の影響でテレワークが広がった。",
+    "コロナ禍でオンライン授業が増えた。",
+    "コロナの影響で休校になった。",
+]
+for name, tagger in [("IPA", ipa), ("NEologd", neo)]:
+    index = [set(w.surface for w in tagger(d)) for d in docs]
+    for q in ["東京大学", "コロナ"]:
+        print(f"{name:8}{q}: {[i for i, toks in enumerate(index) if q in toks]}")
+print(" | ".join(w.surface for w in neo(docs[0])))
+print(" | ".join(w.surface for w in neo(docs[2])))
+
+# 対策の一例: 検索用の索引には両方の辞書のトークンを入れる (README も IPA 辞書との併用を勧めている)
+index = [set(w.surface for w in ipa(d)) | set(w.surface for w in neo(d)) for d in docs]
+for q in ["東京大学", "コロナ", "新型コロナウイルス感染症"]:
+    print(f"両方    {q}: {[i for i, toks in enumerate(index) if q in toks]}")
+```
+
+- mecab-ipadic-NEologd は、はてなキーワード・郵便番号データ・駅名・ニュース記事・ウェブの文書などから集めた新語・固有表現を IPA 辞書 (mecab-ipadic-2.7.0-20070801) に追加したシステム辞書 (佐藤敏紀氏ら、Apache License 2.0)。IPA 辞書と同じ素性の並びで読みも付く。apt の mecab-ipadic-utf8 と pip の `ipadic` (前のレシピ「IPA 辞書で MeCab を使う」) は同じ版の IPA 辞書。NEologd は IPA 辞書の語の読みや生起コストにもパッチを当てるので、IPA 辞書との差がすべて新語によるものとは限らない。
+- **更新は止まっている。** README には「少なくとも毎週 2 回更新」とあるが、master の最後のコミットは 2020 年 9 月 14 日 (シードのデータは 2020-09-10 版) で、それ以降の語は入っていない (2026 年 11 月時点で、リポジトリはアーカイブされていない)。上の例では、収録されていない「推しの子」が「推し / の子」に切れて「の子」が人名になり、「ChatGPT」は読みのない未知語になる。
+- 固有名詞の細分類は粗く、誤りもある (上の例では「ほぼ日刊イトイ新聞」が「人名」)。README の「欠点」にも、分類が不十分なこと、固有表現ではない語も固有表現として登録されていること、読みの誤りがあることが書かれている。入力は、NEologd の正規化ルールを実装した neologdn (3 章「文字列処理と正規化」の「neologdn で日本語の表記ゆれを正規化する」) で正規化してから解析するとよい。
+- 長い固有名詞が 1 語になるので、トークン単位で「東京大学」「コロナ」と検索しても「東京大学大学院情報理工学系研究科」「新型コロナウイルス感染症」は見つからない。README も、ウェブの文書の解析では標準の IPA 辞書との併用を勧めている。単語の単位を評価データや学習済みモデルに合わせる必要がある場合は使わない。
+- インストーラーは元の IPA 辞書の tar.gz を自分でダウンロードし (SHA-1 で照合)、パッチを当ててビルドする。最初のダウンロード先 osdn.net は検証時 (2026 年 11 月) 名前解決できず、SourceForge から取得された。`-n` は GitHub の最新版に更新してからインストール、`-y` はテスト結果の確認を省略、`-u` はインストール先が自分のディレクトリでなくても sudo を使わずに `make install` する (付けないと Colab では `sudo make install` を通る)。インストール先は `mecab-config --dicdir` の下 (Colab では `/usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd`) で、`-p ディレクトリ` で変えられる。
+- README の目安では、標準のインストールに空きメモリが最低 2GB (推奨 6GB) 必要。手元の検証では、ビルド中の最大のプロセスのメモリ使用量 (最大常駐サイズ) は約 1.6GB、できた `sys.dic` は `ls -lh` で 866M (README では約 910MB) だった。`--ignore_adverb` などの `--ignore_*` で一部の辞書を外すと小さくなり (README によれば全部指定して約 300MB 減る)、`-a` では標準では入らない低頻度の日時・数量表現などもすべて入る。Colab のランタイムを作り直すとインストールはやり直しになる。
+
 ## 古文を形態素解析する (中古和文 UniDic) {classical_japanese}
 
 源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
@@ -461,6 +547,83 @@ for s in ["外国人参政権について話し合った。", "東京都立大�
 ```
 
 - 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
+
+## Juman++ で形態素解析する (代表表記・カテゴリ付き) {jumanpp}
+
+単語の区切りと品詞に加えて、「りんご/林檎/リンゴ」をまとめる代表表記や、「人」「場所」のような意味カテゴリも欲しい。京都大学の研究室が開発した、RNN 言語モデルで単語列のもっともらしさを評価する形態素解析器 Juman++ を使う。
+
+```python
+# ダウンロード (約 300MB)・展開・ビルドで、Colab (2 コア) では 10 分ほどかかる見込み
+!wget -q https://github.com/ku-nlp/jumanpp/releases/download/v2.0.0-rc4/jumanpp-2.0.0-rc4.tar.xz
+!tar xf jumanpp-2.0.0-rc4.tar.xz
+!cd jumanpp-2.0.0-rc4 && mkdir -p bld && cd bld && cmake .. -DCMAKE_BUILD_TYPE=Release -DJPP_ENABLE_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local > /dev/null && make install -j2 > /dev/null 2>&1
+!pip install -q rhoknp fugashi unidic-lite
+!jumanpp --version
+```
+
+```python
+import subprocess
+
+# 生の出力 (JUMAN 形式): 表層形 読み 原形 品詞 品詞ID 細分類 ID 活用型 ID 活用形 ID 意味情報
+r = subprocess.run(["jumanpp"], input="外国人参政権について話し合った。\n", capture_output=True, text=True)
+print(r.stdout)
+```
+
+```python
+from rhoknp import Jumanpp
+
+# skip_sanity_check=True: 起動時の確認 (空の文を送る) を省く (下の注意書きを参照)
+# 別の場所に入れたときは Jumanpp("/path/to/bin/jumanpp", skip_sanity_check=True)。options=["--beam", "10"] でオプションも渡せる
+jumanpp = Jumanpp(skip_sanity_check=True)
+
+def analyze(text, keys=("代表表記", "カテゴリ", "ドメイン")):
+    for m in jumanpp.apply_to_sentence(text).morphemes:
+        sem = {k: v for k, v in m.semantics.items() if keys is None or k in keys}
+        print(m.text, m.reading, m.lemma, m.pos, m.subpos, m.conjtype, m.conjform, sem, sep="\t")
+
+analyze("国境の長いトンネルを抜けると雪国であった。")
+print()
+analyze("スマホでググった。", keys=None)   # 意味情報をすべて表示
+print()
+
+# 生の出力の @ 行 (同形異義語) は homographs に入る
+for m in jumanpp.apply_to_sentence("外国人参政権について話し合った。").morphemes:
+    if m.homographs:
+        print(m.text, m.canon, [h.canon for h in m.homographs])
+```
+
+```python
+# 代表表記 (canon) で表記ゆれをまとめる。代表表記がない語 (自動獲得語など) は canon が None なので表層形で代用する
+from collections import Counter
+
+texts = ["りんごを食べた。", "林檎を食べた。", "リンゴを食べた。", "子どもと子供とこどもが遊ぶ。"]
+surf, canon = Counter(), Counter()
+for t in texts:
+    for m in jumanpp.apply_to_sentence(t).morphemes:
+        if m.pos == "名詞":
+            surf[m.text] += 1
+            canon[m.canon or m.text] += 1
+print("表層形:  ", surf.most_common())
+print("代表表記:", canon.most_common())
+```
+
+```python
+# MeCab + UniDic (fugashi) と、分割と品詞を比べる (例文は「解析器・辞書による分割の違いを比べる」と同じ)
+from fugashi import Tagger
+
+unidic = Tagger()
+for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
+    print(s)
+    print("  Juman++     ", " | ".join(f"{m.text}/{m.pos}" for m in jumanpp.apply_to_sentence(s).morphemes))
+    print("  MeCab+UniDic", " | ".join(f"{w.surface}/{w.feature.pos1}" for w in unidic(s)))
+```
+
+- 品詞体系と辞書は JUMAN のもので、UniDic とは品詞名も単位も違う。「であった」は判定詞 1 語、「させ」「られ」「たく」「なかった」は接尾辞になる (UniDic では助動詞や形容詞で、「なかっ/た」と切れる)。構文解析の章の「KWJA で文節・基本句の係り受けと並列構造を解析する」の KWJA も同じ品詞体系で、結果は rhoknp で同じように扱える。
+- 「外国人参政権」は、Juman++ では「外国/人/参政/権」、MeCab + UniDic では「外国/人参/政権」になった。Juman++ は単語列の意味的なもっともらしさを RNN 言語モデルで考慮する (README から張られたウェブデモもこの文を例にしている)。比べた 3 文は、この章の「解析器・辞書による分割の違いを比べる」と同じ例文なので、Sudachi や Janome の結果とも見比べられる。
+- 意味情報には、代表表記、カテゴリ (人、場所-施設、抽象物など)、ドメイン (政治、料理・食事など)、自他動詞や反義語の対応が入る。代表表記は「Sudachi の正規化形で表記ゆれを吸収する」の正規化形と同じ目的に使え、「りんご/林檎/リンゴ」は「林檎/りんご」に、「子ども/子供/こども」は「子供/こども」にまとまった。
+- 生の出力の `@` で始まる行は、読みも品詞も同じで代表表記だけが違う候補 (同形異義語)。「スマホ」のような自動獲得語は代表表記がなく (`canon` が None)、意味情報に「Wikipediaリダイレクト:スマートフォン」が入った。
+- Juman++ (v2.0.0-rc4) は、最初の入力行が空行だと異常終了 (セグメンテーション違反) することがある (毎回ではない)。rhoknp (1.8.2) の `Jumanpp()` は起動時の確認で空の文を送るので、異常終了した回は「failed to start Juman++」という警告が出る (解析は再起動したプロセスで行われる)。`skip_sanity_check=True` で確認を省いたときは、最初に空文字列を渡さない。subprocess で直接渡すときも先頭に空行を置かない。
+- 配布物 (約 300MB) に学習済みのモデルが含まれるので、GitHub のソースではなくリリースの tar.xz を使う。ライセンスは Apache 2.0。最新版は 2023 年の v2.0.0-rc4。
 
 ## 連続する名詞をつなげて複合名詞を抽出する {compound_noun}
 
@@ -810,8 +973,84 @@ print(segment("親譲りの無鉄砲で小供の時から損ばかりしてい�
 print(segment("最新のスマートフォンで自然言語処理を勉強する。"))
 ```
 
-- 辞書を使わない「点予測」に近い方式 (KyTea など) の簡易版。学習データにない分野の語 (2 文目) では誤りが増える。
+- 辞書を使わず、文字の並びだけから単語の境界を学習する。学習データにない分野の語 (2 文目) では誤りが増える。CRF はラベル列全体をまとめて決めるが、次のレシピの KyTea は境界ごとに独立に判定し (点予測)、辞書も素性に使う。
 - 中国語の単語分割では、B/M/E/S (先頭・中間・末尾・単独) の 4 タグが標準的。
+
+## KyTea で単語分割と読みの推定をする {kytea}
+
+辞書の照合ではなく、文字の並びから「ここで単語が切れるか」を判定する解析器で、単語分割と品詞・読みを得たい。辞書にない語の読みも推定できる KyTea (京都テキスト解析ツールキット) を使う。
+
+```python
+!pip install -q kytea fugashi unidic-lite
+# 学習済みの日本語モデル (gzip で約 38MB、展開後 約 120MB) はソースのリポジトリに同梱されている。pip のパッケージには含まれない
+!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz && ls -lh model.bin
+```
+
+```python
+import Mykytea
+
+kytea = Mykytea.Mykytea("-model model.bin")   # オプションはコマンド版の kytea と同じ書き方で渡す
+s = "太郎は図書館で借りた本を花子に渡した。"
+print(" ".join(kytea.getWS(s)))      # 単語分割だけ
+print(kytea.getTagsToString(s))      # 単語/品詞/読み
+
+# getTags は単語ごとに [品詞の候補, 読みの候補] を返す (各候補は (タグ, スコア))
+for w in kytea.getTags(s):
+    (pos, pos_score), = w.tag[0]
+    (yomi, yomi_score), = w.tag[1]
+    print(w.surface, pos, yomi, round(pos_score, 2), round(yomi_score, 2), sep="\t")
+```
+
+```python
+# getAllTags は 2 位以下の候補とスコアも返す (-tagmax で候補数を変えられる。既定は 3)。読みは文脈で変わる
+for s in ["日本語の本を今日読んだ。", "今日は日本語の本を読んだ。"]:
+    for w in kytea.getAllTags(s):
+        if w.surface == "日本":
+            print(s, "日本 の読みの候補:", [(t, round(sc, 2)) for t, sc in w.tag[1]])
+
+# -notags は分割だけ、-notag 1 は 1 番目のタグ (品詞) を推定せず読みだけを付ける
+print(Mykytea.Mykytea("-model model.bin -notags").getTagsToString("日本語の本を今日読んだ。"))
+print(Mykytea.Mykytea("-model model.bin -notag 1").getTagsToString("日本語の本を今日読んだ。"))
+```
+
+```python
+# MeCab + UniDic (fugashi) と分割の単位を比べる
+from fugashi import Tagger
+
+tagger = Tagger()
+for s in ["食べさせられたくなかった。", "大規模言語モデルを用いた検索拡張生成の論文を読んだ。", "ググってもわからんかった。"]:
+    print("KyTea  :", " | ".join(kytea.getWS(s)))
+    print("UniDic :", " | ".join(w.surface for w in tagger(s)))
+```
+
+```python
+# UniDic (unidic-lite) で未知語になったり細かく分かれたりする語を含む文 (最後の文は「辞書にない未知語を見つける」と同じ)。
+# UniDic は未知語に読みを付けられないが、KyTea は自分の辞書にない語 (「鬼滅」「ジーピーティー」) も文字の並びから区切りと読みを推定する
+for s in ["鬼滅の刃の竈門炭治郎が好きだ。", "チャットジーピーティーに聞いた。", "彼はスマホをポチポチいじっていた。", "推し活でエモい写真をインスタにあげた。"]:
+    print("KyTea  :", kytea.getTagsToString(s))
+    print("UniDic :", " ".join(f"{w.surface}/{'(未知語)' if w.is_unk else w.feature.kana or w.surface}" for w in tagger(s)))
+```
+
+```python
+# 速度の比較 (10,000 文)
+import time
+
+texts = ["国境の長いトンネルを抜けると雪国であった。", "自然言語処理の小ネタを集めたクックブックを作りたい。"] * 5000
+for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -notags").getWS),
+                ("KyTea (品詞・読み)", kytea.getTags),
+                ("MeCab + UniDic", tagger)]:
+    t = time.perf_counter()
+    for x in texts:
+        f(x)
+    print(f"{name:16} {time.perf_counter() - t:5.2f} 秒")
+```
+
+- KyTea は Graham Neubig らが開発した解析器。文字と文字の間ごとに単語境界かどうかを、周りの文字 n-gram・文字種・辞書との一致を素性とする線形分類器 (線形 SVM やロジスティック回帰。学習は LIBLINEAR) で 1 か所ずつ独立に判定し、単語の品詞と読みも個別に推定する (点予測)。前のレシピの CRF はラベル列全体をまとめて決めるが、KyTea は隣の判定結果を使わないので、一部の境界や読みだけを付けた「部分的アノテーション」のデータでも学習できる。
+- 同梱のモデルは現代日本語書き言葉均衡コーパス (BCCWJ) や UniDic などで学習されたもので、活用語尾を語幹と別の単語にする (「渡 し た」「読 ん だ」「た く な かっ た」)。MeCab + UniDic の短単位 (「読ん」「たく」「なかっ」) より細かい。14 章の「Ckylark で日本語の句構造解析をする」の日本語モデルは、この分割を前提にしている。
+- 読みはひらがなで、単語の表記に対応する部分だけが付く (「渡」→「わた」)。送り仮名が別の単語になるので、この章の「漢字の読みを取得してふりがな (ルビ) を付ける」(送り仮名ごとルビが付く) と違い、漢字の部分だけにルビを付けやすい。辞書で読みの候補が 1 つしかない語はスコアが 100 になり、「日本」のように候補が複数ある語は文脈で結果が変わる (「にほん」と「にっぽん」)。
+- 辞書にない語の推定は誤ることもある (「推し活」は「推 (お) / し活」に分割された)。Python のバインディングからは未知語かどうかは分からない。コマンド版の `kytea -unktag '[UNK]'` で同じ文を試すと、「鬼滅」「ジーピーティー」「し活」「エモ」「ポチポチ」に印が付き、「スマホ」「インスタ」は KyTea の辞書にある語だった。
+- 検証環境で 10,000 文にかかった時間は、品詞・読みありが 0.8〜0.9 秒、分割だけ (`-notags`) が約 0.15 秒、MeCab + UniDic が 0.1 秒ほど。モデルの読み込みに約 2 秒かかるので、`Mykytea` は 1 回だけ作って使い回す。
+- pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea` (`-part` で部分的アノテーション、`-dict` で辞書を与える) が要るなら、14 章の Ckylark のレシピのようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7 (2014 年)、リポジトリの最後の更新は 2020 年。
 
 ## HMM で品詞タガーを作る {hmm_tagger}
 
