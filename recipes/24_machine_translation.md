@@ -214,7 +214,7 @@ print("システムスコア:", round(out.system_score, 4))
 - スコアはモデルごとに尺度が違う。異なる COMET モデルの値を比べてはいけない。モデル名を必ず報告する。
 - Colab では、インストール時に依存ライブラリのバージョンが入れ替わることがある。エラーが出たらランタイムを再起動する。
 
-## 参照訳なしで翻訳の品質を推定する (品質推定) {mt_quality_estimation}
+## 参照訳なしで翻訳の品質を推定する (品質推定) {mt_quality_estimation gpu}
 
 正解の訳 (参照訳) がない状況で、機械翻訳の出力がどれくらい良いかを見積もりたい。
 
@@ -251,13 +251,22 @@ df["長さの比"] = -np.abs(np.log(ratio / ratio.median()))
 ```
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # 方法 3: LLM に「正確で自然な訳か」を尋ね、「はい」と答える確率をスコアにする
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
 
 @torch.no_grad()
@@ -265,10 +274,10 @@ def p_good(src, mt):
     prompt = ("次の「英語の原文」を日本語に翻訳した「訳文」を評価してください。原文の意味を過不足なく伝えていて、日本語として自然なら「はい」、"
               f"誤訳・訳抜け・不自然な表現があれば「いいえ」と、一語で答えてください。\n\n英語の原文: {src}\n訳文: {mt}")
     text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
+    return float(llm(ids).logits[0, -1, YES_NO].float().softmax(-1)[0])
 
-sub = df.head(150).copy()                      # LLM は 1 件あたり数秒かかるので、150 件だけで比べる
+sub = df.head(150).copy()                      # LLM の判定は 150 件で比べる (T4 なら 1 件あたり 0.1 秒ほど、モデルの読み込みを含めて 1〜2 分)
 sub["LLM (はいの確率)"] = sub["llm"] = [p_good(s, m) for s, m in zip(sub["src"], sub["mt"])]
 ```
 
@@ -305,8 +314,8 @@ for label, corrupted in [("別の文の訳にすり替え", swapped), ("後半�
 ```
 
 - 品質推定 (quality estimation, QE) は、参照訳を使わずに原文と訳文だけから品質を予測する。翻訳結果をそのまま公開してよいか、人が後編集すべきかを振り分けるのに使われる。
-- この評価データは、最近の高品質な翻訳システムの出力で、ほとんどが 80 点以上。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった。
-- 一方、別の文の訳や訳抜けのような、はっきり壊れた訳は区別できる。簡易な方法は「明らかな失敗をはじく」用途に使い、細かい品質の順位付けには使わない。
+- この評価データは、最近の高品質な翻訳システムの出力で、ほとんどが 80 点以上。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった (150 件での Spearman は LLM が 0.15、長さの比が 0.08、埋め込みの類似度は −0.10。LLM は T4 と同じ float16 で実行した値)。LLM がほぼ確実に「はい」と答えたのに、人が 24 点を付けた訳もある。
+- 一方、別の文の訳や訳抜けのような、はっきり壊れた訳は区別できる (AUC は、すり替えで埋め込み 1.00 / LLM 0.99、後半の切り落としで 0.85 / 0.78。訳抜けのほうが見つけにくい)。簡易な方法は「明らかな失敗をはじく」用途に使い、細かい品質の順位付けには使わない。
 - 大きな LLM を使った判定は、専用の品質推定モデルに匹敵することが報告されている。小さなモデルで同じ結果は期待できない。
 - 専用のモデルとしては、人手評価で学習された CometKiwi が代表的 (利用にはライセンスへの同意が必要)。大量の文を安定して評価するなら、まずこれを検討する。
 - 文単位の人手評価はそもそも雑音が大きい。相関係数は 0.3〜0.5 程度でも「使える」とされることが多く、高い値を期待しすぎない。
@@ -1126,7 +1135,7 @@ for name_, kwargs in methods.items():
 - 複数の候補のうち最も良いものの質は、ほどほどに多様な設定 (ここでは温度 0.7) で最も高く、多様にしすぎると下がった。候補を出してから品質推定やリランキングで 1 つを選ぶ、という使い方ができる。
 - 順方向と逆方向 (文末から生成する) のモデルの出力を組み合わせる、言い換えモデルを通す、といった方法でも多様な訳が得られる。
 
-## 古文を現代語に訳す {classical_to_modern}
+## 古文を現代語に訳す {classical_to_modern gpu}
 
 古文を現代語に訳したい。LLM に訳させ、品詞分解の情報を与えると訳が良くなるかも試す。
 
@@ -1135,16 +1144,25 @@ for name_, kwargs in methods.items():
 ```
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 @torch.no_grad()
 def chat(prompt, max_new_tokens=160):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
 
@@ -1162,7 +1180,7 @@ data = [
 PLAIN = "次の古文を、意味を変えずに現代語に訳してください。訳文だけを 1 行で出力してください。\n\n古文: {}"
 FEWSHOT = ("古文を現代語に訳します。訳文だけを 1 行で出力してください。\n\n古文: いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに\n現代語訳: どの帝の御代であったか、女御や更衣が大勢お仕えしていらっしゃった中に\n\n"
            "古文: 月日は百代の過客にして、行きかふ年もまた旅人なり。\n現代語訳: 月日は永遠の旅人であり、過ぎ去ってはやって来る年もまた旅人である。\n\n古文: {}\n現代語訳:")
-for src, ref in data:
+for src, ref in data:                          # 6 文 × 2 通りの訳 (T4 ならモデルの読み込みを含めて 1〜2 分)
     print(f"{src}\n   訳 (指示のみ): {chat(PLAIN.format(src))}\n   訳 (例を示す): {chat(FEWSHOT.format(src))}\n   参考: {ref}")
 ```
 
@@ -1187,7 +1205,7 @@ print(chat(f"次の古文を現代語に訳してください。語釈を参考�
 
 - 古文から現代語への翻訳は、同じ言語の中での「時代をまたぐ翻訳」。語順はほぼ同じなので、難しさは語彙 (古今異義語)、助動詞の意味、省略された主語や敬語の解釈にある。
 - LLM は有名な作品の冒頭なら訳を覚えていることが多い。知られていない文での性能は、それより低いと考える。評価には、モデルが見たことのなさそうな文を使う。
-- この実験では、例を示しても訳は良くならなかった (chrF は「指示のみ」が 33.5〜35.5、「例を示す」が 33.8。6 文しかないので、この程度の差は実行する環境による揺れの範囲)。2 文目では、例として示した源氏物語の訳をそのまま出力する失敗も出た。一方、語釈を与えると「ものぐるほし」が正しく「気持ちが高ぶる」と訳された。訳文に英単語 (thoughts) が混ざる失敗も出ている。
-- 小さなモデルは、古語を現代語の似た語と取り違える (「あやし」を「怪しい」と訳す)。語釈や品詞分解の結果 (形態素解析の章の古文のレシピ) をプロンプトに入れると、誤訳を減らせることがある。
+- この実験では、例を示しても訳はほとんど変わらなかった (chrF は「指示のみ」が 35.0、「例を示す」が 36.4。T4 と同じ float16 で実行した値で、CPU (float32) では 35.9 と 36.0 だった。6 文しかないので、この程度の差は誤差や実行環境による揺れの範囲)。どちらの訳も「ものぐるほし」を「熱中してしまう」と訳したが、語釈を与えると正しく「気持ちが高ぶってくる」と訳された。ただしそのときの訳文には、英単語 (thoughts) が混ざる失敗も出ている。
+- 小さなモデルは、古語を現代語の似た語と取り違えることがある (「あやし」を「怪しい」と訳す、など)。語釈や品詞分解の結果 (形態素解析の章の古文のレシピ) をプロンプトに入れると、誤訳を減らせることがある。
 - 対訳データがあれば、この章のファインチューニングのレシピがそのまま使える。現代語の単語ベクトルを古文に適応させる、古文の単言語データで逆翻訳する、といった工夫が研究されている。
 - 参考訳は 1 つの解釈にすぎず、直訳か意訳かでも大きく変わる。自動評価の数値は目安にとどめる。

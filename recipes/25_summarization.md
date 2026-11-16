@@ -173,20 +173,29 @@ print(round(float(np.mean([scorer.score(r, h)["rougeL"].fmeasure for r, h in zip
 - ROUGE-1/2 は単語 1-gram / 2-gram の重なり、ROUGE-L は最長共通部分列。再現率・適合率・F 値のどれを報告しているかを明記する。
 - 日本語で「ROUGE が 0 になる」「異常に高い/低い」ときは、ほぼトークナイザの問題。
 
-## LLM で文章を要約する (長さと観点を指定する) {llm_summary}
+## LLM で文章を要約する (長さと観点を指定する) {llm_summary gpu}
 
-文章の内容を、自分の言葉でまとめ直した要約 (生成型要約) が欲しい。長さや、何に注目するかを指定したい。CPU で動かしたい。
+文章の内容を、自分の言葉でまとめ直した要約 (生成型要約) が欲しい。長さや、何に注目するかを指定したい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。CPU でも 1 要約あたり十数秒 (メモリ約 7GB)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。GPU (T4 など) で 1 要約あたり数秒〜10 秒ほど (VRAM 約 7GB)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def chat(prompt, max_new_tokens=150):
-    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -217,7 +226,7 @@ for focus in ["財源と費用に注目して、2 文で要約してください
 - 生成型要約は、文をつなぎ直したり言い換えたりできるので、抽出型より短く自然にまとまる。そのかわり、原文にないことを書く (ハルシネーション) おそれがある。数値と固有名詞は必ず原文と照らし合わせる (上の最初の出力でも、原文の「来年 4 月」が具体的な年に書き換えられている)。
 - 文字数の指定は目安にしかならない。厳密な上限が必要なら、生成後に文字数を確かめて、超えていたら「もっと短く」と再生成する。
 - 「誰のための、何のための要約か」を書くと質が上がる。同じ文章でも、目的が違えば残すべき情報が違う。
-- 小さいモデルは、長い入力の後半を見落としやすい。長い文書は「長い文書を分割して要約する」のレシピを参照。
+- 小さいモデルは、長い入力の後半を見落としやすい。長い文書は、この章の「長い文書を分割して要約する」を参照。
 
 ## ニュース記事を 3 行に要約する {three_line_summary}
 
@@ -225,11 +234,19 @@ for focus in ["財源と費用に注目して、2 文で要約してください
 
 ```python
 import re
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=160):
@@ -281,13 +298,16 @@ for text in articles:
 - 3 行要約は、1 行目に最も重要な事実、2 行目以降に補足、という構成が読みやすい。順序も指示できる。
 - 文字数の上限は守られないことが多い。厳密に必要なら、行ごとに検査して長い行だけ言い換えさせる。
 
-## 長い文書を分割して要約する {long_document_summary}
+## 長い文書を分割して要約する {long_document_summary gpu}
 
 モデルに一度に入らない (あるいは入れると後半を読み飛ばす) 長い文書を要約したい。分割して要約し、それをまとめ直す。
 
 ```python
 import io, re, urllib.request, zipfile
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def aozora(url):
@@ -299,10 +319,16 @@ def aozora(url):
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def chat(prompt, max_new_tokens=160):
-    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
@@ -323,7 +349,7 @@ print(len(text), "文字 →", len(chunks), "分割", [len(c) for c in chunks])
 ```
 
 ```python
-# 1. 分割ごとに要約する (map)
+# 1. 分割ごとに要約する (map)。T4 なら 4 分割で 30 秒〜1 分ほど
 partial = []
 for i, chunk in enumerate(chunks, 1):
     s = chat(f"次は小説の一部です。この部分で起きた出来事を、登場人物の名前を入れて 2〜3 文で要約してください。要約だけを出力してください。\n\n{chunk}", max_new_tokens=140)
@@ -340,7 +366,7 @@ print(final)
 
 - 「分割して要約 → 要約を要約」は map-reduce 型と呼ばれる。分割ごとの処理は独立なので、並列化もできる。
 - 部分要約の段階で落とした情報は、最終要約には戻らない。固有名詞や数値を残すよう、部分要約のプロンプトで指示する。
-- 3B クラスのモデルでは、部分要約に人名の誤りや、話の取り違えが混ざる (上の出力にもある)。誤りは最終要約にそのまま引き継がれるので、重要な用途ではより大きなモデルを使うか、次項の検査と組み合わせる。
+- 3B クラスのモデルでは、部分要約に話の取り違えや人名の誤りが混ざることがある (上の出力でも、短刀を持って王城に入り捕らえられたメロスが「王に短刀を差し出した」ことになり、最終要約では「短刀を差し出して抵抗する」に変わっている。妹の結婚式を翌日に繰り上げる場面は、部分要約の段階で「延期」と取り違え、最終要約にもそのまま残った)。誤りは最終要約にそのまま引き継がれるので、重要な用途ではより大きなモデルを使うか、次項の検査と組み合わせる。
 - 前の部分の要約を次の部分の入力に加えていく方法 (逐次的な洗練) だと、話のつながりは保ちやすいが、並列化はできず、誤りが後ろに伝わる。
 - 長い入力をそのまま読めるモデルでも、文書が長くなるほど中ほどの内容を見落としやすい。分割は今でも有効な方法。
 
@@ -353,7 +379,7 @@ import re
 import unicodedata
 import pandas as pd
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
 
 source = ("市は 14 日、来年 4 月から市内の全小中学校で給食費を無償化すると発表した。対象は約 1 万 2 千人で、年間の費用は約 6 億円を見込む。"
           "財源には、ふるさと納税の寄付金と、公共施設の統廃合で生じる削減分を充てる。"
@@ -367,7 +393,8 @@ summaries = {
 }
 
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 def nli_probs(premise, hypotheses):
@@ -401,7 +428,7 @@ for label, summary in summaries.items():
 - 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
 - 忠実であることと、良い要約であることは別。重要な内容を落としていないか (網羅性) は、参照要約との比較や人手で確かめる。
 
-## 記事の見出しを生成して実際の見出しと比べる {headline_generation}
+## 記事の見出しを生成して実際の見出しと比べる {headline_generation gpu}
 
 記事の本文から、内容を一言で表す見出し (タイトル) を作りたい。極端に短い要約として、生成結果を実際の見出しと比べたい。
 
@@ -412,7 +439,10 @@ for label, summary in summaries.items():
 ```python
 import io, tarfile, urllib.request
 import pandas as pd
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def load_livedoor():
@@ -432,16 +462,22 @@ df = df[df["label"].isin(["topic-news", "sports-watch"])].sample(12, random_stat
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 def headline(text):
     prompt = ("次のニュース記事に、30 字以内の見出しを 1 つ付けてください。体言止めにし、記事にない情報は入れないでください。見出しだけを出力してください。\n\n" + text[:600])
-    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**inputs, max_new_tokens=40, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0].strip("「」『』")
 
-df["generated"] = [headline(t) for t in df["text"]]
+df["generated"] = [headline(t) for t in df["text"]]   # T4 なら 12 記事で 1 分ほど
 df["lead"] = [t.strip().split("。")[0][:30] for t in df["text"]]      # ベースライン: 本文の最初の文の先頭 30 字
 for _, r in df.head(5).iterrows():
     print(f"実際: {r['title']}\n生成: {r['generated']}\n先頭: {r['lead']}\n")
@@ -478,11 +514,19 @@ for col, label in [("generated", "LLM の見出し"), ("lead", "本文の先頭 
 ```
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=200):
@@ -537,10 +581,11 @@ pd.DataFrame(rows)
 
 ```python
 # 2. 意味が保たれているか: 平易化した文章の内容が原文から言えるか (含意) と、原文の要点が残っているか (逆向きの含意)
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
 
 nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-nli_tok = AutoTokenizer.from_pretrained(nli_name)
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
 
 def entail(premise, hypothesis):
@@ -554,7 +599,7 @@ for src, out in zip(texts, simplified):
     print(f"付け足しなし {added:.2f} / 情報の保持 {kept:.2f} | {out[:40]}...")
 ```
 
-- テキスト平易化は「意味を保ったまま、やさしく書き換える」タスク。評価も、やさしさ・意味の保持・自然さの 3 つを分けて見る。
+- テキスト平易化は「意味を保ったまま、やさしく書き換える」タスク。評価も、やさしさ・意味の保持・自然さの 3 つを分けて見る。上の 2 つ目の文章では、原文にない「手続きを忘れないようにしてください」を書き足したため、「付け足しなし」が 0.00 になった。
 - やさしい日本語には、1 文を短く、漢語より和語、敬語や受け身を避ける、といった具体的な指針がある。それを条件として列挙し、書き換えの例を 1 つ見せると従いやすい。
 - 短く書き換える過程で、期限や持ち物のような大事な情報が落ちやすい。行政や防災の文章では、落ちていないかの確認が欠かせない。
 - 参照となる平易文がある場合は SARI (追加・削除・保持の適否を測る指標) がよく使われる。日本語のデータには SNOW T15/T23 (やさしい日本語対訳コーパス)、JADES などがある。

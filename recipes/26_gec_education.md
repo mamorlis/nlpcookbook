@@ -224,12 +224,19 @@ for name, hyp in systems.items():
 ```python
 import math
 import numpy as np
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from sentence_transformers import SentenceTransformer
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 lm_name = "rinna/japanese-gpt2-small"
 lm_tok = AutoTokenizer.from_pretrained(lm_name, use_fast=False)
+# transformers 5 系の T5Tokenizer は未知語 (大文字の英字など) を文末記号 (</s>) の ID にしてしまう。
+# 元の spiece.model から語彙とスコアを読み、未知語の ID を正しく扱う Unigram に差し替える
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(lm_name, "spiece.model"))
+lm_tok.backend_tokenizer.model = models.Unigram([(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id())
 lm = AutoModelForCausalLM.from_pretrained(lm_name).eval()
 embedder = SentenceTransformer("intfloat/multilingual-e5-small")
 
@@ -285,20 +292,29 @@ for s, c in miss:
 - 人手評価に合うように各観点のモデルを学習した指標に SOME、訂正前後の文から品質を推定する指標に IMPARA がある。本格的に使うなら、これらの公開モデルを検討する。
 - 文埋め込みの類似度は、助詞 1 つの違いのような小さな変更にはほとんど反応しない。「意味が大きく変わっていないか」の確認として使う。
 
-## LLM に訂正の良し悪しを判定させて人手評価と比べる (メタ評価) {gec_llm_evaluator}
+## LLM に訂正の良し悪しを判定させて人手評価と比べる (メタ評価) {gec_llm_evaluator gpu}
 
 複数の訂正システムの出力のうちどれが良いかを LLM に判定させたい。その判定が人の評価とどれくらい合うかを確かめる (評価指標の評価 = メタ評価)。
 
 ```python
 import itertools
 import numpy as np
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
 from scipy.stats import kendalltau, spearmanr
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 AB = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["A", "B"]]
 
 @torch.no_grad()
@@ -306,8 +322,8 @@ def prefer_a(source, a, b):
     prompt = ("日本語学習者が書いた「元の文」に対する 2 つの訂正 A と B があります。文法的に正しく、自然で、元の文の意味を変えていないほうを選び、"
               f"A か B の 1 文字だけで答えてください。\n\n元の文: {source}\n訂正 A: {a}\n訂正 B: {b}")
     text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, AB].softmax(-1)[0])
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
+    return float(llm(ids).logits[0, -1, AB].float().softmax(-1)[0])
 
 def compare(source, x, y):
     """提示順を入れ替えて 2 回聞き、平均する (x のほうが良い確率)"""
@@ -351,7 +367,7 @@ for k in np.argsort(-llm_mean):
 print("システム単位の Spearman:", round(spearmanr(-llm_mean, human_mean).statistic, 3))
 ```
 
-- メタ評価は「評価指標がどれくらい人の評価と合うか」を測る。文単位 (同じ元の文に対する訂正の順位) とシステム単位 (全体の平均での順位) の 2 つの粒度があり、結果が食い違うことがある。
+- メタ評価は「評価指標がどれくらい人の評価と合うか」を測る。文単位 (同じ元の文に対する訂正の順位) とシステム単位 (全体の平均での順位) の 2 つの粒度があり、結果が食い違うことがある。この実験では、文ごとの Kendall τ の平均が 0.42、全体の Spearman が 0.65、システム単位の Spearman が 0.8 だった (T4 と同じ float16 で実行した値)。3B のモデルは「訂正なし」を「流暢な書き直し」より高く評価している。
 - 総当たりの一対比較は、1〜5 の採点をさせるより小さなモデルでも安定する。ただし比較の回数は候補数の 2 乗で増える。
 - 大規模な LLM による評価は、文法誤り訂正でも従来の自動評価指標より人手評価に近いと報告されている。流暢な書き直しを正当に評価できる点が、編集の一致を数える指標との違い。
 - 人手評価のデータそのものにも設計上の問題がありうる (評価した時代のシステムが古い、文単位と編集単位の評価が混ざる)。メタ評価用のデータとして SEEDA が公開されている。
@@ -393,9 +409,9 @@ print(tokenizer.batch_decode(out, skip_special_tokens=True))
 - 系列変換型は書き換えすぎる (正しい文まで変える) ことがある。編集タグを予測する方式 (GECToR) は高速で、過剰訂正が少ない。
 - 現在は LLM による訂正が流暢性の面で強いが、必要以上に書き換える傾向がある。「最小限の訂正」を求める評価 (CoNLL-2014、BEA-2019) では専用モデルが有利なことも多い。
 
-## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm}
+## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
 
-日本語学習者の書いた文の誤りを訂正したい。CPU で動く LLM に訂正させ、参照訂正と比べて評価する。
+日本語学習者の書いた文の誤りを訂正したい。LLM (GPU を使う) に訂正させ、参照訂正と比べて評価する。
 
 ```python
 !pip install -q datasets
@@ -403,17 +419,26 @@ print(tokenizer.batch_decode(out, skip_special_tokens=True))
 
 ```python
 import difflib, re
+import sentencepiece as spm
 import torch
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 @torch.no_grad()
 def chat(prompt, max_new_tokens=80):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
 
@@ -455,6 +480,7 @@ def evaluate(system, n=100):
 
 import pandas as pd
 
+# 100 文 × 2 通りの指示で生成する。T4 で 5 分ほど
 results, outputs = {}, {}
 for label, system in [("何もしない", lambda s: s), ("LLM (最小限の訂正)", lambda s: clean(chat(MINIMAL.format(s)))), ("LLM (流暢な書き直し)", lambda s: clean(chat(FLUENT.format(s))))]:
     results[label], outputs[label] = evaluate(system)
@@ -467,9 +493,9 @@ for src, hyp, ref in outputs["LLM (最小限の訂正)"][:8]:
 ```
 
 - 「誤りだけを最小限に直す」のか「自然な文に書き直す」のかで、出力も評価も大きく変わる。指示で明確にする。学習者へのフィードバックには前者、文章の清書には後者が向く。
-- 出力の整形が評価を左右する。小さな LLM は「訂正後の文:」のような見出しや「（誤りはありません）」のような注釈を付けたり、助詞を重ねて (「がが」) 新しい誤りを作ったりする。見出しや注釈は機械的に取り除き、新しい誤りはそのまま評価に反映させる。
+- 出力の整形が評価を左右する。小さな LLM は「訂正後の文:」のような見出しや「（誤りはありません）」のような注釈を付けたり、助詞を重ねて (「駅のの近く」) 新しい誤りを作ったりする。見出しや注釈は機械的に取り除き、新しい誤りはそのまま評価に反映させる。訂正文に続けて説明を書き出す出力 (「…見に行きました。」が正しい文です。…」) は `clean` では取り除けないので、必要なら規則を足す。
 - 意味を変えてしまう訂正も出る (「レストランが夕食を食べました」→「レストランは夕食を食べませんでした」)。
-- LLM は直しすぎる傾向がある (正しい部分まで言い換える)。編集単位の適合率が下がるので、F0.5 のように適合率を重視する指標では不利になる。
+- LLM は直しすぎる傾向がある (正しい部分まで言い換える)。編集単位の適合率が下がるので、F0.5 のように適合率を重視する指標では不利になる。この実験では、流暢な書き直しは再現率が高い (0.519) が適合率が低く (0.418)、F0.5 は 0.435 で、最小限の訂正の 0.441 をわずかに下回った (T4 と同じ float16 で実行した値。100 文なので、この程度の差は誤差の範囲)。逆に、最小限の訂正は直すべき文を変えずに残すことがある (「公園に友達と遊びました。」)。
 - 参照訂正は 1 つとは限らない。複数の参照と比べないと、正しい訂正を誤りと数えてしまう。それでも参照にない正しい訂正は残る。
 - ここでは文字単位の差分で編集を作った。きちんと評価するなら、形態素単位で編集を取り出す (この章の ERRANT のレシピの日本語版にあたる処理)。
 - このデータは JFLEG にならって作られた公開データで、文が短く誤りも単純。実際の学習者の作文 (Lang-8 コーパス、TEC-JL など) はもっと難しい。
@@ -700,22 +726,31 @@ for s in clean:
 - 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
 - 逆翻訳 (正しい文 → 誤り文を生成するモデル) や、LLM に誤りを書かせる方法もある。
 
-## 訂正にフィードバックコメントを付ける {feedback_comment}
+## 訂正にフィードバックコメントを付ける {feedback_comment gpu}
 
 学習者に、誤りを直した結果だけでなく、「なぜ誤りなのか」「どう直せばよいか」の説明を返したい。
 
 ```python
 import difflib
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 @torch.no_grad()
 def chat(prompt, max_new_tokens=160):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True)
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
@@ -760,7 +795,8 @@ print(check(s, c, comment))
 
 - フィードバックコメント生成は、訂正 (何を直すか) とは別のタスクとして研究されている。学習効果のためには、答えを示すだけでなく、規則に気付かせる説明が重要とされる。
 - 訂正箇所を差分で明示してから説明させると、どの誤りについての説明かがぶれにくい。誤りが複数あるときは、1 か所ずつ説明させる。
-- 長さの指示は守られにくい。この実験でも、あいさつから始まる長い説明になり、字数の点検で引っかかった。英語が混ざる (destination) こともある。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
+- 長さの指示は守られにくい。この実験でも、3 つ目の説明は「150 字以内」の指示を大きく超えて 400 字近くになり、「recentness」のような英語まで混ざった。1 つ目も 150 字をわずかに超えている (下の点検は上限を 300 字にしているので通る)。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
+- 説明が訂正と食い違うこともある。2 つ目の説明は、訂正後の文 (「おいしかったです」) に反して「「ました」を使うのが正解」と書いている。
 - 小さな LLM は、もっともらしいが誤った文法説明を書くことがある (存在しない規則を作る、助詞の働きを取り違える)。学習者にそのまま見せる前に、教師による確認か、誤りの種類ごとに用意した説明文 (テンプレート) との併用を検討する。
 - 誤りの種類が分かっていれば (助詞の選択、時制、活用など)、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
 - 学習者のレベルに合わせて説明の言葉を変える (初級者には母語で、など) ことも、LLM への指示で行える。

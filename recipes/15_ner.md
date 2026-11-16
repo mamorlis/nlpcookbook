@@ -106,8 +106,17 @@ print([(e["word"], e["entity"]) for e in raw("鈴木一郎は愛知県で生ま�
 
 ```python
 from gliner import GLiNER
+from huggingface_hub import hf_hub_download
+from sentencepiece import sentencepiece_model_pb2
+from tokenizers import Regex, normalizers
 
 model = GLiNER.from_pretrained("urchade/gliner_multi-v2.1")
+# 中身は mDeBERTa。transformers 5 系の DebertaV2Tokenizer は文字の正規化 (全角→半角など) を組み込まずに作られ、
+# 全角の記号や英数字を [UNK] にしてしまう (issue #49622)。GLiNER の中のトークナイザーに、元の spm.model にある正規化の規則を戻す
+proto = sentencepiece_model_pb2.ModelProto()
+proto.ParseFromString(open(hf_hub_download(model.config.model_name, "spm.model"), "rb").read())
+model.data_processor.transformer_tokenizer.backend_tokenizer.normalizer = normalizers.Sequence([
+    normalizers.Strip(), normalizers.Precompiled(proto.normalizer_spec.precompiled_charsmap), normalizers.Replace(Regex(" {2,}"), " ")])
 
 text = "Dr. Sarah Chen, CTO of Anthropic, presented the Claude model at NeurIPS 2024 in Vancouver."
 for e in model.predict_entities(text, ["person", "job title", "company", "product", "conference", "city"], threshold=0.4):
@@ -129,6 +138,7 @@ for e in model.predict_entities(wakati.parse(text).strip(), labels, threshold=0.
 - 内部で空白区切りの単語を単位にしているため、日本語や中国語は分かち書きが必要 (そのまま渡すと文全体が 1 語扱いになる)。
 - ラベル名の言い回しで結果が変わる。`threshold` を下げると再現率が上がる。
 - LLM に抽出させる方法と比べて、高速で、原文中の位置 (`start`/`end`) が確実に得られるのが利点。
+- GLiNER はトークナイザーを内部で読み込み、元のモデル (`microsoft/mdeberta-v3-base`) には `tokenizer.json` もないので、`tokenizer.json` から読み直す方法 (Transformers の章の「2 つの文の含意関係を判定する (NLI)」の注意書きを参照) が使えない。そこで、読み込んだあとのトークナイザーの正規化の部分だけを差し替えている。上流 (transformers) で直れば不要になる。
 
 ## 辞書やルールで固有表現を追加する (EntityRuler) {entity_ruler}
 

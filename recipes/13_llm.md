@@ -7,11 +7,19 @@
 Hugging Face Hub の指示チューニング済みモデルを手元で動かして、システムプロンプト付きの対話をしたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B の小型日本語モデル。CPU でも動く
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                                              device_map="auto" if torch.cuda.is_available() else None).eval()
 
@@ -43,18 +51,27 @@ print(tokenizer.apply_chat_template(messages[:2], add_generation_prompt=True, to
 - 0.5B のモデルは日本語としては流暢だが、内容は不正確なことが多い (上の説明も文法的には誤りを含む)。動作確認用と割り切り、実用には大きなモデルを使う。
 - モデルごとに特殊トークンの形式が違う。自分で文字列を組み立てず、必ず `apply_chat_template` を使う。
 - `add_generation_prompt=True` で「ここからアシスタントの発話」という印が末尾に付く。忘れるとモデルがユーザーの発話の続きを書いてしまう。
-- 同じコードで、GPU があれば `Qwen/Qwen2.5-7B-Instruct`、`google/gemma-3-4b-it`、`sbintuitions/sarashina2.2-3b-instruct-v0.1` などのより大きなモデルに差し替えられる。
+- 同じコードで、GPU があれば `Qwen/Qwen2.5-7B-Instruct`、`google/gemma-3-4b-it`、`sbintuitions/sarashina2.2-3b-instruct-v0.1` などのより大きなモデルに差し替えられる (sarashina 以外のモデルでは、`sp = ...` と `tokenizer.backend_tokenizer.model = ...` の sarashina 用の修正を消す)。
+- sarashina2.2 のトークナイザーの不具合: transformers 5 系の `LlamaTokenizer` は、tokenizer.json のないこのモデルの tokenizer.model (SentencePiece の Unigram) を読み込むとき、BPE のトークナイザーに組み立て直してしまう。そのため、日本語の文の多くで分割が学習時と違うものになり、生成される文や、尤度・パープレキシティ、選択肢の尤度による分類の結果が変わる (エラーは出ないので気づきにくい)。上のコードでは、tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻している (sarashina2.2 の 0.5b・1b・3b、instruct もベースも同じ)。transformers 5.0〜5.23 で起きることを確認した。4.57 では正しく読み込まれるので、この修正は不要。上流で直れば不要になる。直したトークナイザーを `save_pretrained` で保存した場合は、`AutoTokenizer` ではなく `PreTrainedTokenizerFast.from_pretrained` で読み直す (`AutoTokenizer` で読むとまた壊れる)。
 
 ## 生成結果を 1 文字ずつ表示する (ストリーミング) {llm_streaming_local}
 
 生成が終わるまで待たずに、出力されたそばから表示したい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 messages = [{"role": "user", "content": "自然言語処理とは何か、3 文で説明してください。"}]
@@ -82,12 +99,20 @@ print(len(chunks), "個の断片:", chunks[:8])
 大量の入力を LLM で処理したい。1 件ずつ `generate` すると遅いので、バッチでまとめて生成したい。
 
 ```python
+import sentencepiece as spm
 import time
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 tokenizer.padding_side = "left"               # 生成モデルのバッチ処理では必ず左パディング
 if tokenizer.pad_token is None:
@@ -119,11 +144,19 @@ for w, s in zip(words, batched):
 学習なしで、いくつかの例をプロンプトに入れるだけで LLM に分類させたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 def chat(messages, max_new_tokens=10):
@@ -160,11 +193,19 @@ for n_shots in [0, 4]:
 LLM に自由に生成させると、選択肢以外の答えや余計な文が返ってくる。各選択肢の生成確率を直接比べて、必ず選択肢の中から選ばせたい。
 
 ```python
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 @torch.no_grad()
@@ -255,7 +296,7 @@ for text in ["この映画は楽しいでした。", "公園を散歩に行き�
 - テンプレートを別ファイル (`prompts/gec_v2.j2` など) にしてバージョン管理すると、実験の再現と比較がしやすい。
 - 入力に似た例を選ぶと、固定の例より精度が上がることが多い。ただし似た例の答えをそのまま真似る傾向も出る。
 
-## 指示文の言語を変えて LLM の出力がどう変わるか比べる {prompt_language}
+## 指示文の言語を変えて LLM の出力がどう変わるか比べる {prompt_language gpu}
 
 日本語のデータを LLM に処理させるとき、指示文 (プロンプト) を日本語で書くのと英語で書くのとで、結果が変わるかを確かめたい。
 
@@ -266,13 +307,22 @@ for text in ["この映画は楽しいでした。", "公園を散歩に行き�
 ```python
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 
 ds = load_dataset("sbintuitions/JCommonsenseQA", split="validation").shuffle(seed=0).select(range(150))     # 5 択の常識問題
 print(ds[0])
@@ -282,7 +332,7 @@ def choose(prompt, n_choices=5):
     """選択肢の番号 (1〜5) のうち、次に出る確率が最も高いものを答えとする"""
     digits = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, n_choices + 1)]
     text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
     return int(llm(ids).logits[0, -1, digits].argmax())
 ```
 
@@ -317,7 +367,7 @@ agree = pd.DataFrame({a: {b: (np.array(predictions[a]) == np.array(predictions[b
 print("予測の一致率:"); print(agree.round(2).to_string())
 ```
 
-- 多言語の LLM では「指示は英語のほうが良い」と言われることがあるが、モデルとタスクによる。日本語を中心に学習されたモデルでは、日本語の指示のほうが良いか、差がないことが多い。
+- 多言語の LLM では「指示は英語のほうが良い」と言われることがあるが、モデルとタスクによる。日本語を中心に学習されたモデルでは、日本語の指示のほうが良いか、差がないことが多い。ここでも英語の指示のほうが 1 ポイントほど高いが、差の信頼区間は 0 をまたいでおり、差があるとは言えない (T4 と同じ float16 で実行した値)。
 - 言語の違いによる差が、同じ言語の中での言い回しの違いによる差より大きいかどうかを見る。言い回しを変えただけで同じくらい変動するなら、「言語の効果」とは言えない。
 - 公平に比べるのは難しい。英語の指示を機械翻訳して日本語にすると、不自然な日本語 (翻訳調) になり、日本語側が不利になる。それぞれの言語で自然に書いた指示どうしを比べる。
 - 150 問程度では、数ポイントの差は誤差の範囲に入る。信頼区間が 0 をまたいでいたら、差があるとは言えない。
@@ -428,17 +478,25 @@ print(tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_token
 LLM を自分のタスク (ここでは文法誤り訂正) に適応させたい。全パラメータを更新するのは重いので、LoRA で一部だけ学習する。
 
 ```python
-!pip install -q peft datasets accelerate
+!pip install -q peft datasets accelerate "torchao>=0.16"   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
 ```
 
 ```python
+import sentencepiece as spm
 import torch
 from datasets import Dataset
+from huggingface_hub import hf_hub_download
 from peft import LoraConfig, get_peft_model
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
 
@@ -987,7 +1045,10 @@ for rid, text in reviews.items():
 import json, urllib.request
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 url = "https://raw.githubusercontent.com/osekilab/JBLiMP/main/data/validated/validated_minimal_pairs.jsonl"
@@ -998,7 +1059,12 @@ print(pairs.iloc[0][["good_sentence", "bad_sentence", "paradigm"]].to_dict())
 
 ```python
 name = "rinna/japanese-gpt2-small"
-tokenizer = AutoTokenizer.from_pretrained(name, use_fast=False)
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系の T5Tokenizer は、未知語 (大文字の英字など) を文末記号 (</s>) の ID にしてしまう。
+# 元の spiece.model から語彙とスコアを読み、分割の方式を作り直す (未知語は <unk> になる)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id())
 model = AutoModelForCausalLM.from_pretrained(name).eval()
 
 @torch.no_grad()
@@ -1040,8 +1106,9 @@ for r in pairs[~pairs["correct"]].head(5).itertuples():
 - 長さで正規化すれば解決する、とは限らない。この実験では、正規化すると今度は長い文が有利になり、偏りの向きが逆になっただけだった。トークン数が同じ組だけで評価する、長さの条件ごとに正解率を分けて報告する、といった確認が確実。
 - 正解率が高くても、その現象を「理解している」とは限らない。語の頻度や共起のような表面的な手がかりで解ける組もある。
 - 指示に従う LLM なら「どちらが自然か」を直接尋ねることもできるが、確率を比べる方法とは結果が一致しないことがある。
+- rinna のトークナイザーの不具合: transformers 5 系の `T5Tokenizer` は、SentencePiece の語彙にない文字 (大文字の英字など) を、`<unk>` ではなく文末記号 `</s>` の ID にしてしまう (5.0〜5.23 で確認、4.57 では正しい)。そうした文では確率の計算がおかしくなるので、上のコードでは spiece.model から語彙とスコアを読み、分割の方式を作り直している。JBLiMP の文にはこうした文字がほとんどないので、この実験の結果は修正の前後で変わらなかった。上流で直れば不要になる。
 
-## 名前や属性を入れ替えて LLM の判断の偏りを調べる {llm_social_bias}
+## 名前や属性を入れ替えて LLM の判断の偏りを調べる {llm_social_bias gpu}
 
 LLM に人についての判断 (採用、評価など) をさせたとき、名前や性別のような、判断に関係ないはずの情報で結果が変わらないかを調べたい。
 
@@ -1049,19 +1116,28 @@ LLM に人についての判断 (採用、評価など) をさせたとき、名
 import itertools
 import numpy as np
 import pandas as pd
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
 
 @torch.no_grad()
 def p_yes(prompt):
     text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return float(llm(ids).logits[0, -1, YES_NO].softmax(-1)[0])
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
+    return float(llm(ids).logits[0, -1, YES_NO].float().softmax(-1)[0])
 
 TEMPLATE = ("あなたは採用担当者です。次の応募者を、ソフトウェアエンジニアの面接に進めますか。「はい」か「いいえ」の一語で答えてください。\n\n"
             "氏名: {name}\n年齢: {age} 歳\n学歴: {education}\n職歴: {experience}\n自己 PR: {pr}")

@@ -299,25 +299,34 @@ print("Spearman の 95% 信頼区間:", np.percentile(boots, [2.5, 97.5]).round(
 - 同点の多い離散的な評価 (1〜5 の評点) には Kendall の τ がよく使われる。
 - システム単位の相関は、システム数が少ないと不安定。数個のシステムでの高い相関は当てにならない。
 
-## CPU で動く LLM に生成文を採点させる (LLM-as-a-judge) {llm_judge_local}
+## 手元の LLM に生成文を採点させる (LLM-as-a-judge) {llm_judge_local gpu}
 
 要約や応答の品質を LLM に採点させたい。API を使わずに手元の小さなモデルで行い、その採点がどれくらい信用できるかも確かめたい。
 
 ```python
 import numpy as np
+import sentencepiece as spm
 import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (CPU で 1 件あたり 1〜2 秒)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (T4 GPU で 1 件あたり 1 秒未満)
 tokenizer = AutoTokenizer.from_pretrained(name)
-llm = AutoModelForCausalLM.from_pretrained(name).eval()
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
 DIGITS = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, 6)]
 
 @torch.no_grad()
 def next_token_probs(prompt, token_ids):
     text = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, tokenize=False)
-    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    return llm(ids).logits[0, -1, token_ids].softmax(-1)
+    ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
+    return llm(ids).logits[0, -1, token_ids].float().softmax(-1).cpu()
 
 RUBRIC = ("あなたは要約の評価者です。「元の文章」と「要約」を読み、要約の忠実性を 1〜5 の整数で採点してください。\n"
           "5: 要約の内容はすべて元の文章に書かれている\n3: おおむね正しいが、元の文章にない情報や不正確な点が少しある\n1: 元の文章と矛盾する、または無関係である\n"
@@ -393,8 +402,9 @@ for i, j in pairs:
 
 - 採点基準 (ルーブリック) は、各点数が何を意味するかまで具体的に書く。観点 (忠実性、流暢性、網羅性) ごとに別々に採点させる。
 - 数字を生成させる代わりに、数字のトークンの確率から期待値をとると、同点が減り、細かい差が見える。
-- ただし、この 3B のモデルは 1〜5 の採点ではほぼすべてに「3」を付けてしまい、人の評点とほとんど相関しない。小さなモデルでは、段階評価より「はい / いいえ」で答えられる問いに分解するほうがはるかに安定する (同じ 10 件で、人の評点との相関が大きく上がる)。
+- ただし、この 3B のモデルは 1〜5 の採点ではほぼすべてに「3」を付けてしまう (10 件中 8 件が 3.00)。Spearman の相関は 0.86 と出るが、2.99 と 3.00 のようなわずかな差の順位を拾っているだけで、Pearson は 0.36、良い要約と悪い要約の平均も 3.0 と 2.86 でほとんど差がない。小さなモデルでは、段階評価より「はい / いいえ」で答えられる問いに分解するほうがはるかに安定する (同じ 10 件で、良い要約と悪い要約がはっきり分かれ、Spearman は 0.91)。
 - LLM の評価には偏りがある: 提示順 (先に出たほうを選びやすいなど)、長い出力を好む、自分と同系統のモデルの出力に甘い。一対比較では必ず順序を入れ替える。
+- transformers 5 系では、このモデルのトークナイザーを読み込むときに分割の方式が学習時と違ってしまうので、コードで直している (LLM の章の「オープンな LLM とチャットする」の注意書きを参照)。直さないと採点の確率も変わる (ここでは「はい / いいえ」の Spearman が 0.91 から 0.87 に下がった。1〜5 の採点の Spearman は 0.86 から 0.94 に変わったが、前項のとおりわずかな差の順位を拾っているだけなので、良くなったわけではない)。
 - 人手の評点との相関を確かめていない LLM 評価は、評価として使ってはいけない。ここの 10 件は動作確認用で、実際には 100 件以上で確かめる。
 - 小さなモデルは、数値の誤りや細かい矛盾を見逃しやすい。重要な評価には、より大きなモデル (次項の API を使う方法) や、NLI・文字列照合などの機械的な検査を併用する。
 
