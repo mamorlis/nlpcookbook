@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。プロンプトと推論の工夫 (Chain-of-Thought)、ベンチマークでの比較とデータ汚染の確認、構造化出力と、生成した広告文のプログラムによる検証、量子化と LoRA・DPO による調整、LLM の性質を調べる方法、LLM が生成した文章の検出と透かし。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。プロンプトと推論の工夫 (Chain-of-Thought)、ベンチマークでの比較とデータ汚染の確認、自信のない誤答の検出、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証、量子化と LoRA・DPO による調整、LLM の性質を調べる方法、LLM が生成した文章の検出と透かし。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする（チャットテンプレート） {llm_chat_local}
 
@@ -1045,6 +1045,254 @@ print(pd.DataFrame(tests).T.to_string())
 - 結論を強くするには、新しく作った問題や非公開の問題で点数が保たれるかを見るのがいちばん確かである。学習データが公開されているモデルなら、評価データと学習データを n-gram などで直接照合できる。ここで調べたのは評価データの 300 問だけで、JCommonsenseQA の学習データを指示チューニングに使ったかどうか（同じ形式の問題で有利になりうる）は確かめていない。
 - データは JCommonsenseQA (CC BY-SA 4.0)、モデルは sarashina2.2（SB Intuitions、MIT ライセンス）と rinna/japanese-gpt2-small（rinna、MIT ライセンス、日本語の CC-100 と Wikipedia で学習）。追加学習は語彙の埋め込みと出力層を固定し、GPU メモリを最大 12.4 GB 使った（追加学習と検出の間の最大値。T4 と同じ float16 の混合精度で実行した値）。sarashina2.2 のトークナイザーは、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きのとおりに直して使う。rinna のトークナイザーも、transformers 5 系では未知語の扱いが壊れるので、コードのとおりに直す。
 
+## LLM が自信なく間違える質問を見つける（トークンの確率、self-consistency、semantic entropy） {llm_uncertainty gpu}
+
+答えの決まったクイズで、手元の LLM の答えのうち間違っていそうなものを、正解を見ずに見分けたい。答えのトークンの確率、何回も答えさせたときの答えの一致度、意味の同じ答えをまとめたエントロピー（semantic entropy）を比べ、自信の低い質問に答えないことにすると、残りの正解率がどれだけ上がるかも確かめたい。
+
+```python
+!pip install -q datasets
+```
+
+```python
+import re, time, unicodedata
+from collections import Counter
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+torch.manual_seed(0)
+# AI王（クイズ AI 日本一決定戦）のクイズ 1000 問（第 2 版の検証データ）に、SB Intuitions が人手で別解を加えたもの。CC BY-SA 4.0
+aio = load_dataset("sbintuitions/aio-extended-answers", split="validation")
+shots = aio.select(range(5))                      # 先頭の 5 問は few-shot の例にする
+N = 300                                           # 時間の都合で、続く 300 問を評価に使う
+quiz = aio.select(range(5, 5 + N))
+print(quiz[0]["question"], quiz[0]["answers"])
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"       # MIT ライセンス
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+INSTRUCTION = "次のクイズに答えてください。答えとなる語句だけを書き、文や説明は書かないでください。"
+def prompt(question):
+    msgs = []
+    for ex in shots:        # 例は「ユーザーの問題 → アシスタントの答え」の対話として前に置く
+        msgs += [{"role": "user", "content": f"{INSTRUCTION}\n\n問題: {ex['question']}"}, {"role": "assistant", "content": ex["answers"][0]}]
+    msgs.append({"role": "user", "content": f"{INSTRUCTION}\n\n問題: {question}"})
+    return tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+
+def clean(text):
+    """答えの部分だけを取り出す: 1 行目だけにし、括弧の補足とかぎ括弧、「です」を除く"""
+    text = text.strip().split("\n")[0]
+    text = re.sub(r"[（(][^）)]*[）)]?", "", text)
+    return re.sub(r"(です|だ)?[。.]?$", "", text.strip("「」『』 ")).strip("「」『』 ")
+
+def normalize(text):
+    """表記の揺れを吸収して比べるための形: NFKC、小文字、空白・記号と長音記号を除く（「コンピューター」と「コンピュータ」を同じにする）。
+    長音記号を全部消すので、「ビール」と「ビル」のような別の語も同じになる（下の出力の「エンパイアステトビル」も同じ理由）"""
+    return re.sub(r"[\s・･。、,.!?！？「」『』\-ー〜~]", "", unicodedata.normalize("NFKC", text).lower())
+
+print(clean("アイザック・ニュートン\n\n（説明：万有引力の…"), clean("「君たちはどう生きるか」です。"), normalize("エンパイア・ステート・ビル"))
+```
+
+```python
+# 答えは 1 行目だけを使うので、改行が出たら生成を止める。このモデルの改行はバイトのトークン <0x0A> の 1 つだけなので、終了の記号として渡す
+# （stop_strings=["\n"] でも止められるが、generate を呼ぶたびに準備の時間がかかる）
+STOP = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<0x0A>")]
+
+@torch.no_grad()
+def generate(texts, n_samples=1, bs=30, **kwargs):
+    """各プロンプトに n_samples 個の答えを生成し、答えの文字列と、生成したトークンの平均対数尤度を返す"""
+    answers, mean_logp = [], []
+    step = max(1, bs // n_samples)
+    for i in range(0, len(texts), step):
+        enc = tokenizer(texts[i:i + step], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        out = model.generate(**enc, max_new_tokens=16, num_return_sequences=n_samples, eos_token_id=STOP,
+                             repetition_penalty=1.0, pad_token_id=tokenizer.pad_token_id, output_logits=True, return_dict_in_generate=True, **kwargs)
+        gen = out.sequences[:, enc["input_ids"].shape[1]:]
+        # output_logits は温度や top-p を掛ける前の、モデルそのものの予測。各ステップで実際に選ばれたトークンの対数確率を取る
+        logp = torch.stack([l.float().log_softmax(-1).gather(1, gen[:, t:t + 1])[:, 0] for t, l in enumerate(out.logits)], 1)
+        mask = (gen != tokenizer.pad_token_id).float()          # 答えの終わり（</s> か改行）より後はパディング
+        mean_logp += ((logp * mask).sum(1) / mask.sum(1)).tolist()
+        answers += [clean(t) for t in tokenizer.batch_decode(gen, skip_special_tokens=True)]
+    return np.array(answers, dtype=object).reshape(len(texts), n_samples), np.array(mean_logp).reshape(len(texts), n_samples)
+
+texts = [prompt(ex["question"]) for ex in quiz]
+golds = [{normalize(a) for a in ex["answers"]} for ex in quiz]
+
+# (1) 貪欲法で 1 回答えさせる。この答えの正誤を、正解を見ずに予測するのが目標（Colab の T4 で 1〜2 分程度）
+t = time.time()
+greedy, greedy_logp = generate(texts, do_sample=False)
+greedy, greedy_logp = greedy[:, 0], greedy_logp[:, 0]
+correct = np.array([normalize(a) in g for a, g in zip(greedy, golds)])        # 正規化した答えが正解（別解を含む）のどれかと一致
+# 参考: 文で答えた場合も拾う甘い採点（正解を含めば正解。数値の正解は前後に数字が続かないこと、それ以外は 2 文字以上）。複数の候補を並べた答えも正解になる
+def contains(a, g):
+    return any(re.search(rf"(?<!\d){x}(?!\d)", normalize(a)) if x.isdigit() else len(x) >= 2 and x in normalize(a) for x in g)
+loose = correct | np.array([contains(a, g) for a, g in zip(greedy, golds)])
+print(f"貪欲法: {time.time() - t:.0f} 秒, 正解率 {correct.mean():.3f} ({correct.sum()}/{N}), 正解を含めば正解とすると {loose.mean():.3f}")
+
+# (2) 温度 1.0 でサンプリングして 10 回ずつ答えさせる（Colab の T4 で 6〜8 分程度）
+K = 10
+t = time.time()
+torch.manual_seed(0)
+samples, _ = generate(texts, n_samples=K, do_sample=True, temperature=1.0, top_p=0.9, top_k=50)
+print(f"サンプリング {K} 回: {time.time() - t:.0f} 秒, GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+for i in range(3):
+    print(quiz[i]["answers"], "| 貪欲法:", greedy[i], f"({greedy_logp[i]:.2f})", "| サンプル:", dict(Counter(samples[i])))
+```
+
+```python
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
+
+# 意味の同じ答えをまとめる 2 つの方法: (a) 正規化した文字列の完全一致、(b) NLI で双方向に含意するか
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"     # 多言語の NLI モデル（MIT ライセンス）
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name, device_map="auto").eval()
+ENTAIL = nli.config.label2id["entailment"]
+
+# 問題ごとに、サンプルと貪欲法の答えのうち表記の違うものの全ての順序対について、「質問 + 答え A」が「質問 + 答え B」を含意するかを調べる
+pairs = []
+for i, ex in enumerate(quiz):
+    forms = {}
+    for a in [greedy[i], *samples[i]]:
+        forms.setdefault(normalize(a), a)
+    pairs += [(i, a, b) for a in forms.values() for b in forms.values() if normalize(a) != normalize(b)]
+entails = {}
+t = time.time()
+with torch.no_grad():
+    for j in range(0, len(pairs), 128):
+        batch = pairs[j:j + 128]
+        enc = nli_tok([f"質問: {quiz[i]['question']} 答え: {a}" for i, a, b in batch],
+                      [f"質問: {quiz[i]['question']} 答え: {b}" for i, a, b in batch], return_tensors="pt", padding=True, truncation=True).to(nli.device)
+        pred = nli(**enc).logits.argmax(-1).tolist()
+        entails.update({(i, normalize(a), normalize(b)): p == ENTAIL for (i, a, b), p in zip(batch, pred)})
+print(f"NLI: {len(pairs)} 組, {time.time() - t:.0f} 秒")
+# NLI が「同じ意味」（双方向に含意）と判定した、表記の違う答えの組の例
+same = [(quiz[i]["answers"][0], a, b) for i, a, b in pairs if a < b and entails[i, normalize(a), normalize(b)] and entails[i, normalize(b), normalize(a)]]
+print(len(same), "組:", same[:12])
+
+def cluster(i, answers, use_nli):
+    """答えのリストに意味のクラスタの番号を振る。NLI では、各クラスタの最初の答えと双方向に含意すれば同じクラスタとする"""
+    reps, ids = [], []
+    for a in answers:
+        a = normalize(a)
+        for c, r in enumerate(reps):
+            if a == r or (use_nli and entails[i, a, r] and entails[i, r, a]):
+                ids.append(c); break
+        else:
+            reps.append(a); ids.append(len(reps) - 1)
+    return ids
+
+def entropy(ids):
+    p = np.array(list(Counter(ids).values())) / len(ids)
+    return float(-(p * np.log(p)).sum())
+
+scores = {}   # 値が大きいほど「自信がある」向きにそろえる
+scores["平均対数尤度"] = greedy_logp
+scores["一致度（完全一致）"] = np.array([np.mean([normalize(s) == normalize(g) for s in row]) for g, row in zip(greedy, samples)])
+scores["一致度 (NLI)"] = np.array([np.mean([c == 0 for c in cluster(i, [g, *row], True)[1:]]) for i, (g, row) in enumerate(zip(greedy, samples))])
+scores["−semantic entropy（完全一致）"] = -np.array([entropy(cluster(i, row, False)) for i, row in enumerate(samples)])
+scores["−semantic entropy (NLI)"] = -np.array([entropy(cluster(i, row, True)) for i, row in enumerate(samples)])
+n_clusters = {m: np.array([len(set(cluster(i, row, m))) for i, row in enumerate(samples)]) for m in [False, True]}
+print(f"10 個のサンプルの意味のクラスタの数（平均）: 完全一致 {n_clusters[False].mean():.2f} / NLI {n_clusters[True].mean():.2f}")
+```
+
+```python
+from sklearn.metrics import roc_auc_score
+
+# 誤答を見分ける AUROC: 「自信のなさ」（= −スコア）で誤答（正例）を上位に並べられるか。0.5 なら偶然、1 なら完全
+rng = np.random.default_rng(0)
+boot = rng.integers(0, N, (2000, N))
+wrong = ~correct
+
+def auroc_ci(s, wrong=wrong):
+    vals = [roc_auc_score(wrong[b], -s[b]) for b in boot]
+    return roc_auc_score(wrong, -s), *np.percentile(vals, [2.5, 97.5])
+
+def coverage_curve(s):
+    """自信の高い順に並べ、上位の割合（カバレッジ）だけに答えるとしたときの正解率。一致度などは同点が多いので、同点は平均対数尤度の高い順にする"""
+    order = np.lexsort((-greedy_logp, -s))
+    return np.cumsum(correct[order]) / np.arange(1, N + 1)
+
+rows = {}
+for c, s in scores.items():
+    a, lo, hi = auroc_ci(s)
+    curve = coverage_curve(s)
+    rows[c] = {"AUROC": f"{a:.3f} [{lo:.3f}, {hi:.3f}]", "AUROC（甘い採点）": "{:.3f} [{:.3f}, {:.3f}]".format(*auroc_ci(s, ~loose)), "AURAC": round(curve.mean(), 3),
+               **{f"正解率 @{p}%": round(curve[int(N * p / 100) - 1], 3) for p in [100, 80, 60, 40, 20]}}
+pd.set_option("display.width", 200)
+print(pd.DataFrame(rows).T.to_string())
+print(f"（誤答 {wrong.sum()} 問 / {N} 問。AURAC はカバレッジ 1/N〜100% の正解率の平均。甘い採点は、正解を含めば正解とした場合）")
+
+# 差は偶然の範囲か: 全問での AUROC の差と、同じブートストラップの標本で求めた差の 95% 信頼区間
+def diff_ci(a, b):
+    point = roc_auc_score(wrong, -scores[a]) - roc_auc_score(wrong, -scores[b])
+    d = np.array([roc_auc_score(wrong[i], -scores[a][i]) - roc_auc_score(wrong[i], -scores[b][i]) for i in boot])
+    print(f"{a} − {b}: {point:+.3f} [{np.percentile(d, 2.5):+.3f}, {np.percentile(d, 97.5):+.3f}]")
+
+for c in ["一致度（完全一致）", "−semantic entropy（完全一致）", "−semantic entropy (NLI)"]:
+    diff_ci(c, "平均対数尤度")
+diff_ci("−semantic entropy (NLI)", "−semantic entropy（完全一致）")
+```
+
+```python
+import matplotlib.pyplot as plt
+
+# カバレッジと正解率のトレードオフ（左）と、確率として読めるスコアの較正（右）
+labels = {"平均対数尤度": "mean log-likelihood", "一致度（完全一致）": "agreement (exact match)",
+          "−semantic entropy（完全一致）": "-semantic entropy (exact match)", "−semantic entropy (NLI)": "-semantic entropy (NLI)"}
+fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+cov = np.arange(1, N + 1) / N
+for c, l in labels.items():
+    ax[0].plot(cov, coverage_curve(scores[c]), label=l)
+ax[0].axhline(correct.mean(), color="gray", ls="--", label="answer all")
+ax[0].set_xlabel("coverage (fraction of questions answered)"); ax[0].set_ylabel("accuracy"); ax[0].legend()
+
+def ece(conf, ok, n_bins=10):
+    """2 値の ECE: 確信度で 10 区間に分け、|正解率 − 平均確信度| を件数で重み付けして平均する（評価指標と統計的検定の章の較正のレシピと同じ考え方）"""
+    idx = np.minimum((conf * n_bins).astype(int), n_bins - 1)
+    return sum((idx == b).mean() * abs(ok[idx == b].mean() - conf[idx == b].mean()) for b in range(n_bins) if (idx == b).any())
+
+probs = {"トークンの確率（平均対数尤度の exp）": np.exp(greedy_logp), "一致度 (NLI)": scores["一致度 (NLI)"]}
+ax[1].plot([0, 1], [0, 1], "k--", label="perfect")
+for (c, p), l in zip(probs.items(), ["token probability", "agreement (NLI)"]):
+    idx = np.minimum((p * 10).astype(int), 9)
+    ax[1].plot([p[idx == b].mean() for b in range(10) if (idx == b).any()], [correct[idx == b].mean() for b in range(10) if (idx == b).any()], "o-", label=l)
+    print(f"{c}: 平均確信度 {p.mean():.3f}（正解率 {correct.mean():.3f}）, ECE {ece(p, correct):.3f}")
+ax[1].set_xlabel("confidence"); ax[1].set_ylabel("accuracy"); ax[1].legend()
+plt.tight_layout(); plt.show()
+```
+
+```python
+# 自信のない誤答と、自信のある誤答を見る（一致度 (NLI) の低い順・高い順）
+df = pd.DataFrame({"問題": [ex["question"][:40] for ex in quiz], "正解": [ex["answers"][0] for ex in quiz], "貪欲法": [a[:20] for a in greedy],
+                   "正解を含む": loose, "一致度": scores["一致度 (NLI)"], "平均対数尤度": greedy_logp.round(2),
+                   "サンプル（多い順に 3 つ）": [", ".join(f"{a[:15]}×{n}" for a, n in Counter(r).most_common(3)) for r in samples]})
+print("--- 自信のない誤答"); print(df[wrong].sort_values("一致度", kind="stable").head(5).to_string())
+print("--- 自信のある誤答"); print(df[wrong].sort_values(["一致度", "平均対数尤度"], ascending=False, kind="stable").head(8).to_string())
+print("--- 一致度ごとの問題数と正解率"); print(df.assign(正解か=correct).groupby(pd.cut(df["一致度"], [-0.01, 0.2, 0.5, 0.8, 0.99, 1.0]), observed=True)["正解か"].agg(["count", "mean"]).round(3).to_string())
+```
+
+- 3 つの確信度: 平均対数尤度は、貪欲法の答えの各トークンの対数確率を平均したもの（長さで割らないと長い答えほど低くなる）。一致度は、温度 1.0 で 10 回答えさせて貪欲法の答えと同じ答えが出た割合で、self-consistency (Wang et al., 2023) の考え方（答えがどれだけそろうか）を確信度に使う（この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の注意書きでも、票の集まり方が確信度の目安になった）。semantic entropy は Kuhn et al. (ICLR 2023) が提案し、Farquhar et al. (Nature, 2024) が幻覚（作話）の検出に使った方法で、意味の同じ答えを 1 つのクラスタにまとめてから、クラスタの分布のエントロピーを測る。ここでは Farquhar et al. にならって、10 回のサンプリングを温度 1、top-p 0.9、top-k 50 で行い、各クラスタの確率をサンプルの数の割合で近似する「離散の semantic entropy」を使った（論文では、正誤を判定する答えは温度 0.1 で生成している。ここでは貪欲法）。
+- 誤答を見分ける AUROC は、平均対数尤度 0.818 [0.766, 0.865]、一致度（完全一致）0.850 [0.804, 0.891]、semantic entropy（完全一致）0.842 [0.795, 0.886] だった（正解率 64.0%、誤答 108 問 / 300 問）。同じ問題で比べた差は、一致度 − 平均対数尤度が +0.032 [+0.001, +0.065] で、0 をかろうじて外れる程度、semantic entropy − 平均対数尤度は +0.024 [−0.007, +0.057] で偶然の範囲だった。サンプリングは生成の量が 10 倍になる（検証の GPU で貪欲法 17 秒、サンプリング約 160 秒）ので、1 回の生成で得られるトークンの確率も十分に使える手がかりである。`generate` で `repetition_penalty=1.0` を明示しているのは、このモデルの generation_config の既定値 1.05 を使わないためである。
+- 意味の同じ答えを NLI でまとめると、10 個のサンプルのクラスタの数は平均 3.42 から 2.77 に減った。「サラウンド」と「surround sound」、「2人」と「二人」のような言い換えはまとまる一方で、「開けっ放し」と「開口一番」、「酢または醤油」と「酢や梅肉」のような別の答えもまとめてしまい、semantic entropy の AUROC は完全一致でまとめた場合より 0.026 [0.003, 0.050] 低かった（0.817）。使った NLI のモデルは MNLI と XNLI（日本語を含まない）で学習したもので、この結果からは、日本語の短い答えの同値判定は苦手と考えられる。semantic entropy の効き目は、意味が同じかどうかの判定の質で決まる。Farquhar et al. も主な実験では GPT-3.5 に判定させている。日本語の NLI データ（JNLI など）で学習したモデルや、より大きな LLM に判定させる方法（評価指標と統計的検定の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」）を試すとよい。
+- 自信の低い質問に答えないことにすると、残りの正解率は上がる。全問に答えると 64.0% のところ、一致度（完全一致）の高い 60% に答えると 83.9%、40% では 92.5% になった（平均対数尤度では 82.2%、88.3%）。AURAC（Farquhar et al. の指標で、カバレッジを変えたときの正解率の平均）はどのスコアも 0.84〜0.86 で、差は小さい。一致度は 11 段階しかなく同点が多いので、カバレッジの曲線では同点を平均対数尤度で並べている。実際に使うときは、答えないしきい値を評価とは別の検証データで決める。
+- 較正との違い: AUROC は誤答を上位に並べられるか（順位）だけを見て、確信度の値が正解率と合っているかは見ない。それを見るのが ECE である（評価指標と統計的検定の章の「モデルの確信度が当てになるか調べる（較正、ECE）」）。トークンの確率（平均対数尤度の exp）は平均 0.813 で、正解率 0.640 より高い自信過剰で ECE は 0.173、一致度 (NLI) は平均 0.732 で ECE 0.115 だった。右の図では、どちらも確信度 0.8 以上の区間で対角線より下にある。確率として表示したりしきい値を「確率 90%」のように決めたりするなら、検証データで較正（temperature scaling や isotonic 回帰）してから使う。300 問を 10 区間に分けているので、区間ごとの正解率はばらつきが大きい。
+- 確信度で見分けられるのは「自信のない誤答」だけである。一致度 (NLI) が 1（10 回とも貪欲法の答えと同じ意味と判定）の 134 問でも 10.4% は誤りで、「侘び茶の創始者」に「千利休」（正解は村田珠光）、「1 リットルは何デシリットル」に「100」と、毎回同じ誤りを答える。Farquhar et al. も、対象は答えが毎回ばらつく作話 (confabulation) で、誤ったデータで学習したことなどによる一貫した誤りには役立たないとしている。一方、自信のない誤答のサンプルには、正解（「獅子身中の虫」）が混ざっていることもある。
+- 採点の誤りにも注意する。正規化した文字列と正解（別解を含む）の完全一致で採点しているので、「パラジウムの原子番号は46」のように文で答えたものや、「ボッティチェッリ」（正解の表記はボッティチェリ）は誤答になる。逆に `normalize` は長音記号を除くので、「ビール」と「ビル」のような別の語を正解にしてしまうこともある。正解を含めば正解とする甘い採点では正解率は 68.3% になり、AUROC は完全一致でまとめた一致度 (0.858) と semantic entropy (0.852) が上位なのは同じだった。「自信のある誤答」の表は、まず採点の誤りを探すのにも使える。
+- データとモデル: sbintuitions/aio-extended-answers は、AI王（クイズ AI 日本一決定戦）のデータセット第 2 版の検証データ 1000 問に、SB Intuitions が人手で別解を加えたもので、データセットカードによると CC BY-SA 4.0 である。モデルは sbintuitions/sarashina2.2-3b-instruct-v0.1（MIT ライセンス）と MoritzLaurer/mDeBERTa-v3-base-mnli-xnli（MIT ライセンス）。クイズは公開されているので、事前学習のデータに含まれていれば正解率は実力より高く出る（この章の「ベンチマークの評価データが学習に漏れていないかを調べる（データ汚染の検出）」）。LLM の生成での GPU メモリの最大は 11.3 GB で、T4 (15GB) に収まる。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
 ## LLM の出力から JSON を取り出して検証する {llm_json_output}
 
 LLM に JSON で答えさせて、プログラムで扱いたい。余計な文や壊れた JSON が返ってきても落ちないようにしたい。
@@ -1105,7 +1353,242 @@ print(json.dumps(Review.model_json_schema(), ensure_ascii=False)[:150], "...")  
 ```
 
 - プロンプトには、スキーマ (`model_json_schema()`) と出力例を入れる。
-- 可能なら、API やライブラリの「構造化出力」機能を使うのが確実（文法的に正しい JSON しか生成できないように制約される）。Gemini API・Claude API の例は、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」と「Claude に決まった形式（JSON スキーマ）で出力させる」を参照。ローカルモデルなら `outlines` などの制約付きデコードのライブラリがある。
+- 可能なら、API やライブラリの「構造化出力」機能を使うのが確実（文法的に正しい JSON しか生成できないように制約される）。Gemini API・Claude API の例は、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」と「Claude に決まった形式（JSON スキーマ）で出力させる」を参照。ローカルモデルなら `outlines` などの制約付きデコードのライブラリがある（この章の「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」を参照）。
+
+## 制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines) {constrained_decoding gpu}
+
+手元の LLM に JSON や決まった形式で答えさせるとき、生成してから取り出すのではなく、生成の途中で形式に合わないトークンを禁止して、必ず形式どおりの出力を得たい。形式の違反がどれだけ減るか、内容は正しくなるのか、速度はどうかも確かめたい。
+
+```python
+!pip install -q outlines==1.3.3 datasets
+```
+
+```python
+import json, re, time
+from typing import Literal
+import numpy as np
+import pandas as pd
+import outlines
+import sentencepiece as spm
+import torch
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from outlines.types import Regex
+from pydantic import BaseModel, Field, ValidationError
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+torch.manual_seed(0)
+name = "sbintuitions/sarashina2.2-1b-instruct-v0.1"       # SB Intuitions、MIT ライセンス
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+om = outlines.from_transformers(model, tokenizer)        # outlines (Apache 2.0) のモデル。生成は model.generate に制約の logits_processor を足して行う
+
+def run(output_type, prompts, max_new_tokens):
+    """output_type=None なら制約なし。全件を 1 回のバッチで生成し、出力と速度を返す"""
+    t = time.perf_counter()
+    gen = outlines.Generator(om, output_type)           # ここで形式を受理するオートマトンを作り、語彙の各トークンと対応づける
+    t_build = time.perf_counter() - t
+    t = time.perf_counter()
+    outs = gen.batch(prompts, max_new_tokens=max_new_tokens, do_sample=False)
+    elapsed = time.perf_counter() - t
+    n_tok = [len(tokenizer(o, add_special_tokens=False)["input_ids"]) for o in outs]
+    # バッチ生成のステップ数は、いちばん長い出力のトークン数で決まる。1 ステップあたりの時間で比べる
+    return outs, {"準備の秒数": t_build, "1 件あたりの秒数": elapsed / len(prompts),
+                  "出力のトークン数（平均）": np.mean(n_tok), "出力のトークン数（最大）": max(n_tok),
+                  "1 ステップあたりのミリ秒": elapsed / max(n_tok) * 1000}
+
+rng = np.random.default_rng(0)
+def diff_ci(x, y, n_boot=2000):
+    """同じ問題で比べる対応のあるブートストラップで、正解率の差 (x − y) と 95% 信頼区間を求める"""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    idx = rng.integers(0, len(x), (n_boot, len(x)))
+    d = x[idx].mean(1) - y[idx].mean(1)
+    return f"{(x.mean() - y.mean()) * 100:+.1f} ポイント [{np.percentile(d, 2.5) * 100:+.1f}, {np.percentile(d, 97.5) * 100:+.1f}]"
+
+chat = lambda content: tokenizer.apply_chat_template([{"role": "user", "content": content}], add_generation_prompt=True, tokenize=False)
+```
+
+```python
+# 1. JSON スキーマ: この章の「LLM の出力から JSON を取り出して検証する」と同じ課題（レビュー → 感情・点数・観点）。
+# 内容の正しさを測れるように、観点は 6 つから選ぶ形にした。レビューと正解は、このレシピのために作った 40 件
+ASPECTS = ["料理", "接客", "価格", "雰囲気", "立地", "待ち時間"]
+class Review(BaseModel):
+    sentiment: Literal["positive", "negative", "neutral"]
+    score: int = Field(ge=1, le=5)
+    aspects: list[Literal["料理", "接客", "価格", "雰囲気", "立地", "待ち時間"]]
+
+P, N, U = "positive", "negative", "neutral"
+data = [
+    ("料理がとても美味しくて、店員さんも親切でした。また来ます。", P, "料理 接客"), ("駅から歩いてすぐで、落ち着いた雰囲気のお店でした。", P, "立地 雰囲気"),
+    ("この値段でこの味なら大満足です。", P, "価格 料理"), ("注文してから5分で料理が出てきて驚きました。味も申し分ない。", P, "待ち時間 料理"),
+    ("スタッフの気配りが行き届いていて、記念日を気持ちよく過ごせました。", P, "接客"), ("窓からの夜景がきれいで、デートにぴったりの雰囲気です。", P, "雰囲気"),
+    ("ランチセットが千円以下で、味も量も満足。", P, "価格 料理"), ("予約なしでもすぐに案内してもらえ、店員さんの対応も丁寧でした。", P, "待ち時間 接客"),
+    ("焼きたてのパンが絶品。少し高いけれど、それだけの価値はあります。", P, "料理 価格"), ("店内は清潔で明るく、子ども連れでも入りやすかった。", P, "雰囲気"),
+    ("会社の近くにあるので重宝しています。日替わり定食がおいしい。", P, "立地 料理"), ("行列ができていたが、回転が速くて10分ほどで入れた。ラーメンも最高。", P, "待ち時間 料理"),
+    ("苦手な食材を伝えたら、快く対応してくれました。", P, "接客"), ("静かで落ち着けるので、一人でゆっくり食事を楽しめた。", P, "雰囲気"),
+    ("料金は良心的で、店主の人柄も温かい。", P, "価格 接客"),
+    ("1 時間待たされた上に、注文を間違えられた。", N, "待ち時間 接客"), ("値段のわりに量が少なくてがっかり。", N, "価格 料理"),
+    ("店員の態度が悪く、二度と行きたくない。", N, "接客"), ("スープがぬるく、麺も伸びていた。", N, "料理"),
+    ("駅から遠いうえに、看板がなくて迷った。", N, "立地"), ("隣の席の声がうるさく、店内も狭くて落ち着かない。", N, "雰囲気"),
+    ("料理が出てくるまで40分もかかった。", N, "待ち時間"), ("この味でこの値段は高すぎる。", N, "料理 価格"),
+    ("テーブルがべたべたで、店内も薄暗かった。", N, "雰囲気"), ("呼んでも店員が来ず、料理も冷めていた。", N, "接客 料理"),
+    ("刺身が生臭く、食べられなかった。", N, "料理"), ("会計を間違えられたのに謝罪もなかった。", N, "接客"),
+    ("駐車場がなく、最寄り駅からも徒歩20分かかる。", N, "立地"), ("予約していたのに30分も待たされ、席も狭かった。", N, "待ち時間 雰囲気"),
+    ("メニューの写真と違う料理が出てきて、しかも高い。", N, "料理 価格"),
+    ("可もなく不可もなく、といったところ。", U, ""), ("料理は普通。値段も相場どおり。", U, "料理 価格"),
+    ("料理はおいしいが、店員の態度は残念だった。", U, "料理 接客"), ("雰囲気は良いが、料理の味は平凡だった。", U, "雰囲気 料理"),
+    ("駅前で便利だが、いつも混んでいて待たされる。", U, "立地 待ち時間"), ("特に印象に残らない普通の定食屋。", U, ""),
+    ("安いけれど、味はそれなり。", U, "価格 料理"), ("接客は丁寧だが、料理が出てくるのが遅い。", U, "接客 待ち時間"),
+    ("量は多いが、味付けが濃すぎる。", U, "料理"), ("店内はおしゃれだが、値段が高め。", U, "雰囲気 価格"),
+]
+reviews, gold_sent, gold_asp = [d[0] for d in data], [d[1] for d in data], [set(d[2].split()) for d in data]
+
+def extract_json(text):
+    """「LLM の出力から JSON を取り出して検証する」と同じ: 前後の説明文やコードブロックがあっても最初の JSON オブジェクトを取り出す"""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("JSON が見つかりません")
+    return json.JSONDecoder().raw_decode(text[start:])[0]
+
+def parse(text):
+    try:
+        return Review.model_validate(extract_json(text)), "OK"
+    except json.JSONDecodeError:
+        return None, "JSON として読めない"
+    except ValueError as e:                     # ValidationError も ValueError の一種
+        return None, "JSON がない" if "見つかりません" in str(e) else "スキーマに合わない"
+
+SCHEMA = json.dumps(Review.model_json_schema(), ensure_ascii=False)
+FULL = ("次の飲食店のレビューを分析し、JSON だけを出力してください。sentiment は感情（positive / negative / neutral）、score は 1〜5 の評価、"
+        f"aspects はレビューが触れている観点を {'、'.join(ASPECTS)} から選んだリストです。\nスキーマ: {SCHEMA}\n\nレビュー: ")
+SHORT = "次の飲食店のレビューを分析して、JSON で答えてください。\n\nレビュー: "    # スキーマも観点の候補も書かない短い指示
+
+def evaluate(outs):
+    parsed = [parse(o) for o in outs]
+    ok = [r for r, s in parsed if r]
+    tp = sum(len(set(r.aspects) & g) for (r, _), g in zip(parsed, gold_asp) if r)
+    n_pred, n_gold = sum(len(set(r.aspects)) for r in ok), sum(len(g) for g in gold_asp)
+    return parsed, {"形式の違反": 1 - len(ok) / len(outs),
+                    "感情の正解率": np.mean([bool(r) and r.sentiment == g for (r, _), g in zip(parsed, gold_sent)]),   # 違反は不正解として数える
+                    "観点の F1": 2 * tp / (n_pred + n_gold),
+                    "感情と点数の矛盾": np.mean([r.sentiment == P and r.score <= 2 or r.sentiment == N and r.score >= 4 for r in ok])}
+
+# 各条件を 40 件まとめて生成する（Colab の T4 で 1〜2 分程度）
+results, parsed_all = {}, {}     # parsed_all[条件] は（出力, Review か None, 状態）のリスト
+for label, prefix, output_type in [("生成して取り出す", FULL, None), ("制約あり", FULL, Review), ("制約あり（短い指示）", SHORT, Review)]:
+    outs, speed = run(output_type, [chat(prefix + r) for r in reviews], max_new_tokens=150)
+    parsed, metrics = evaluate(outs)
+    results[label] = {**metrics, **speed}
+    parsed_all[label] = [(o, r, s) for o, (r, s) in zip(outs, parsed)]
+pd.set_option("display.width", 200)
+print(pd.DataFrame(results).round(3).to_string())
+correct = {l: [bool(r) and r.sentiment == g for (_, r, _), g in zip(parsed_all[l], gold_sent)] for l in results}
+print("感情の正解率の差（制約あり − 生成して取り出す）:", diff_ci(correct["制約あり"], correct["生成して取り出す"]))
+for label in results:
+    print(f"--- {label}: 違反の内訳", pd.Series([s for _, _, s in parsed_all[label]]).value_counts().to_dict())
+    print("    例:", [o for o, _, s in parsed_all[label] if s != "OK"][:2] or parsed_all[label][0][0])
+```
+
+```python
+# 感情の誤りの中身: 形式は守れていても、内容が正しいとは限らない
+rows = []
+for i, (rv, g) in enumerate(zip(reviews, gold_sent)):
+    answers = []
+    for label in results:
+        _, r, status = parsed_all[label][i]
+        answers.append(r.sentiment if r else status)    # 違反なら違反の種類を表示する
+    rows.append((rv, g, *answers))
+table = pd.DataFrame(rows, columns=["レビュー", "正解", *results])
+print(table[table["制約あり"] != table["正解"]].to_string(max_colwidth=30))
+print(pd.crosstab(table["正解"], table["制約あり"]).to_string())
+```
+
+```python
+# 2. 選択肢と正規表現
+# 選択肢: Literal を渡すと、出力はそのどれか 1 つになる（同じ 40 件の感情だけを答えさせる）
+ask = "次の飲食店のレビューの感情を positive、negative、neutral のどれか 1 語で答えてください。\n\nレビュー: "
+for label, output_type in [("制約なし", None), ("選択肢", Literal["positive", "negative", "neutral"])]:
+    outs, speed = run(output_type, [chat(ask + r) for r in reviews], max_new_tokens=20)
+    print(f"{label}: 選択肢どおりの出力 {np.mean([o.strip() in (P, N, U) for o in outs]):.2f} / "
+          f"正解率 {np.mean([o.strip() == g for o, g in zip(outs, gold_sent)]):.3f} / 例 {outs[:3]}")
+
+# 正規表現: 文中の日付を YYYY-MM-DD に直させる。日付のない文（後ろの 4 件）を混ぜておく
+dates = [("2024年3月5日に予約しました。", "2024-03-05"), ("会議は2023年11月20日の午後に開かれる。", "2023-11-20"),
+         ("令和6年4月1日から新しい制度が始まる。", "2024-04-01"), ("平成31年4月30日に退位の儀式が行われた。", "2019-04-30"),
+         ("2022年の大晦日に家族で集まった。", "2022-12-31"), ("締め切りは2025年1月10日です。", "2025-01-10"),
+         ("昭和64年1月7日は昭和最後の日である。", "1989-01-07"), ("2020年2月29日はうるう日だった。", "2020-02-29"),
+         ("明日は雨が降るらしい。", "不明"), ("来週の会議の場所が変わった。", "不明"),
+         ("この店の料理は本当においしい。", "不明"), ("毎年春になると桜を見に行く。", "不明")]
+ask = "次の文に書かれている日付を YYYY-MM-DD の形式で答えてください。和暦は西暦に直してください。日付が書かれていなければ「不明」と答えてください。\n\n文: "
+DATE = r"\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
+for label, output_type in [("制約なし", None), ("日付だけ", Regex(DATE)), ("日付か「不明」", Regex(f"{DATE}|不明"))]:
+    outs, speed = run(output_type, [chat(ask + s) for s, _ in dates], max_new_tokens=60)
+    found = [m.group(0) if (m := re.search(f"{DATE}|不明", o)) else None for o in outs]   # 制約なしは出力から取り出す
+    print(f"{label}: 形式どおり {np.mean([re.fullmatch(f'{DATE}|不明', o.strip()) is not None for o in outs]):.2f} / "
+          f"正解（日付あり 8 件）{sum(f == g for f, (_, g) in zip(found[:8], dates))} / 正解（日付なし 4 件）{sum(f == '不明' for f in found[8:])}")
+    print("   ", [f"{s[:8]}→{o.strip()[:20]}" for (s, _), o in zip(dates, outs)])
+```
+
+```python
+# 3. 強すぎる制約: 算数の文章題で、答えだけの JSON に縛ると考える過程を書けなくなる
+# MGSM (Shi et al., 2022) の日本語の先頭 50 問。CC BY 4.0（Hugging Face のメタデータは CC BY-SA 4.0）。
+# この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」と同じデータ
+mgsm = load_dataset("juletxara/mgsm", "ja", split="test").select(range(50))
+gold = np.array(mgsm["answer_number"], dtype=float)
+
+class Answer(BaseModel):
+    answer: int
+class ReasonThenAnswer(BaseModel):
+    reasoning: str
+    answer: int
+class AnswerThenReason(BaseModel):
+    answer: int
+    reasoning: str
+
+THINK = "次の問題に答えてください。ステップごとに考えて途中の計算を書き、最後に答えを書いてください。"
+def last_number(text):
+    found = re.findall(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+    return float(found[-1]) if found else np.nan
+
+def answer_of(text, schema):
+    if schema is None:                        # 制約なしは、出力の最後に出てきた数値を答えとする
+        return last_number(text)
+    try:
+        return float(schema.model_validate_json(text).answer)
+    except ValidationError:                   # 上限のトークン数で打ち切られて JSON が閉じていない
+        return np.nan
+
+# 4 条件 × 50 問（Colab の T4 で 4〜6 分程度）
+math_res, hits = {}, {}
+for label, schema in [("制約なし (CoT)", None), ("answer だけ", Answer), ("reasoning → answer", ReasonThenAnswer), ("answer → reasoning", AnswerThenReason)]:
+    hint = "" if schema is None else f"\n出力は次の JSON スキーマに従ってください: {json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
+    outs, speed = run(schema, [chat(f"{THINK}{hint}\n\n問題: {q}") for q in mgsm["question"]], max_new_tokens=400)
+    pred = np.array([answer_of(o, schema) for o in outs])
+    hits[label] = pred == gold
+    math_res[label] = {"正解率": (pred == gold).mean(), "答えが取れない": np.isnan(pred).mean(), **speed}
+    print(f"--- {label}（正解 {gold[1]:g}）:", outs[1][:200].replace("\n", " "))
+print(pd.DataFrame(math_res).round(3).to_string())
+for label in list(math_res)[1:]:
+    print(f"正解率の差（{label} − 制約なし (CoT)）:", diff_ci(hits[label], hits["制約なし (CoT)"]))
+print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+- 制約付きデコーディングは、生成の各ステップで、形式（JSON スキーマ、正規表現、選択肢）に合わない続きになるトークンの確率を 0 にしてから次のトークンを選ぶ方法である。outlines（dottxt、Apache 2.0）は、形式を正規表現（有限オートマトン）に直し、語彙の各トークンがどの状態から受理されるかを前もって索引にしておく (Willard and Louf, 2023)。transformers のモデルでは `model.generate` に logits_processor を足すだけなので、生成の設定（貪欲法、`max_new_tokens` など）はそのまま使える。ここでは版を 1.3.3 に固定した。裏側の実装は xgrammar (Apache 2.0) や llguidance (MIT) にも切り替えられる。lm-format-enforcer (MIT) も同じ目的のライブラリである。
+- JSON（40 件）: 生成してから取り出す方式では 10%（4 件）がスキーマに合わなかった（表示した例は、観点に候補にない「味」「子ども連れfriendly」を書いたもの）。制約ありでは違反は 0 件で、観点の F1 も 0.656 から 0.759 に上がった。感情の正解率は 72.5% と 77.5% で、差の +5.0 ポイント [+0.0, +12.5] は違反を不正解に数えた分にあたり、この件数では偶然と区別しにくい。制約ありの出力は改行のない JSON だけ（平均 16.4 トークン）で、取り出す方式は改行や説明が付いて平均 34.9 トークンだった。
+- 制約で守られるのは形式だけである。良い点と悪い点が混じった neutral の 10 件のうち、制約ありは 9 件を negative と答えた（取り出す方式も 7 件が negative、2 件が違反）。指示を短くしてスキーマを書かないと、制約ありでも 40%（16 件）の出力が `score` に 8 や 10 を入れてスキーマに合わず、違反を不正解に数えた感情の正解率は 40% に下がった（形式どおりの 24 件では 16 件が正解）。制約があるので、この 16 件はどれも `score` の範囲だけが違反である。outlines_core 0.2.14 は、JSON スキーマの `minimum` / `maximum`（pydantic の `ge` / `le`）を正規表現に反映しない（`build_regex_from_schema` で確かめた）。制約を掛けても pydantic での検証は残し、範囲を必ず守らせたいなら `Literal[1, 2, 3, 4, 5]` のような列挙にする。指示とスキーマの説明はプロンプトにも書く。
+- 選択肢: 感情だけを答えさせると、制約なしでも 97% が選択肢どおりの 1 語で、正解率は制約の有無によらず 80.0% だった。選択肢の制約は、各ステップで許されたトークンのうち最も確率の高いものを選ぶだけで、選択肢の全体の尤度を比べるわけではない（この章の「選択肢の尤度を比べて LLM に分類させる」とは結果が違いうる）。
+- 正規表現（12 文）: 制約なしでは「与えられた文に書かれている日付は…」のように説明から始まり、YYYY-MM-DD だけの出力は 0 件、日付のある 8 文から取り出せた正解は 3 件だった。日付の形式だけを許すと 8 文中 7 文が正解になったが、日付のない 4 文すべてに、文に書かれていない日付（2023-05-14 など）を作った。「不明」も許すと 4 文中 3 文で「不明」と答えた（「毎年春になると…」は 2023-04-01）。昭和64年1月7日は、どちらでも形式は正しいが 1 日ずれた 1989-01-08 になった。答えがない場合の逃げ道を形式に入れておかないと、制約がもっともらしい誤りを作らせる。
+- 強すぎる制約（MGSM の 50 問）: 自由に考えさせて最後の数値を取ると正解率 36%、答えだけの JSON に縛ると 6%（差 −30.0 ポイント [−44.0, −16.0]）だった。同じく `answer` を先に、`reasoning` を後に置くと 4% で、例の問題のように、先に書いた答え (2) と後の推論 (3) が食い違う。`reasoning` を先に置くと 14% まで戻るが、自由な CoT よりはまだ低かった（−22.0 ポイント [−36.0, −6.0]。原因は調べていない）。形式の制約で推論の課題の性能が下がることは Tam et al. (2024) も報告している。推論が要る課題では、自由に考えさせたあとで別の呼び出しで構造化するか、推論のフィールドを先に置く。
+- 速度: バッチ生成では、ステップ数がいちばん長い出力のトークン数で決まるので、表の「1 ステップあたりのミリ秒」で比べる。出力の最大の長さがほぼ同じ MGSM の 2 条件では、`reasoning` → `answer` が 295 ミリ秒、自由な CoT が 61 ミリ秒で、制約ありは 1 ステップが約 5 倍遅かった。各ステップで、バッチの 1 件ずつ索引から許されるトークンのマスクを作り、GPU に送って logits に掛ける処理が加わるためと考えられる（内訳は測っていない）。出力が短い条件はプロンプトの処理などの固定の時間が大きく、1 ステップあたりでは比べにくいが、出力が短くなる分、1 件あたりでは速くなりうる（短い指示の JSON は 0.047 秒、取り出す方式は 0.104 秒）。形式ごとの準備（オートマトンの構築）は 0.3〜0.7 秒だった。時間は共有の GPU で測った目安である。GPU メモリは最大 5.7 GB（T4 と同じ float16 で実行した値）。
+- データは、レビュー 40 件と日付の 12 文をこのレシピのために作り、正解も付けた（neutral の判断などには異論がありうる）。MGSM は先頭の 50 問だけなので、信頼区間の幅は 30 ポイント近くある。モデルは sarashina2.2-1b-instruct（SB Intuitions、MIT ライセンス）。API のモデルでは、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」「Claude に決まった形式（JSON スキーマ）で出力させる」の機能を使う。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
 ## 検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ {ad_text_generation gpu}
 
