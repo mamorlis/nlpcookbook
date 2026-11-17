@@ -1,6 +1,6 @@
 # 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、見出し生成、テキスト平易化、文体の変換と、その評価。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成、テキスト平易化、文体の変換と、その評価。
 
 ## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
 
@@ -428,6 +428,487 @@ for label, summary in summaries.items():
 - NLI は桁違いの数値 (6 億と 60 億) のような誤りを見逃すことがある。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
 - 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
 - 忠実であることと、良い要約であることは別。重要な内容を落としていないか (網羅性) は、参照要約との比較や人手で確かめる。
+
+## 会議の書き起こしから議事録を作る (決定事項・ToDo を JSON で抜き出す) {meeting_minutes gpu}
+
+話者付きの会議の書き起こしから、決定事項・ToDo (担当者と期限)・論点を JSON で抜き出し、議事録にまとめたい。書き起こしにない担当者や期限を作っていないかも確かめたい。
+
+```python
+import re
+import unicodedata
+
+# 架空の会議の書き起こし (このレシピのために作ったもの)。実際には文字起こしの結果を (話者, 発言) の列にして使う
+transcript = [
+    ("田中", "それでは、学習アプリ「まなぶん」のリリース準備会議を始めます。今日は、リリース日、対応する端末、料金、残っている作業の分担を決めたいと思います。"),
+    ("佐藤", "開発の状況から報告します。主な機能はほぼできていますが、パスワードを再設定するとまれにログインできなくなる不具合が残っています。"),
+    ("田中", "その不具合は、リリースまでに直せそうですか。"),
+    ("佐藤", "原因の見当はついているので、11 月 28 日までには直せると思います。私が担当します。"),
+    ("伊藤", "品質保証の立場から言うと、その修正のあとに回帰テストを 1 週間はやりたいです。"),
+    ("田中", "そうすると、当初予定していた 12 月 3 日のリリースは厳しいですね。"),
+    ("高橋", "営業としては、年内にはどうしても出したいです。12 月の第 2 週に、展示会で発表の場がありますので。"),
+    ("佐藤", "修正が 28 日、テストが 1 週間だとすると、12 月 5 日ごろにテストが終わります。"),
+    ("田中", "では、リリース日は 12 月 10 日にしましょう。展示会にも間に合います。皆さん、よろしいですか。"),
+    ("鈴木", "異論ありません。"),
+    ("伊藤", "それなら大丈夫です。"),
+    ("田中", "リリース日は 12 月 10 日で決定とします。伊藤さん、テスト計画を作っていただけますか。"),
+    ("伊藤", "はい、11 月 25 日までにテスト計画をまとめて共有します。"),
+    ("田中", "次に、対応する端末です。iOS と Android を同時に出すかどうか。"),
+    ("佐藤", "Android 版は、通知の機能がまだ不安定です。同時に出すと、テストの手間が倍になります。"),
+    ("高橋", "お客様の半分くらいは Android を使っているので、できれば同時がいいのですが。"),
+    ("伊藤", "正直なところ、両方を 1 週間でテストするのは無理です。"),
+    ("田中", "初回のリリースは iOS 版だけにして、Android 版は来年 2 月を目標にしましょう。高橋さん、お客様への説明をお願いできますか。"),
+    ("高橋", "わかりました。主なお客様 5 社には、私から直接説明します。"),
+    ("田中", "続いて料金です。無料版と有料版を分ける方針は前回決めましたが、有料版の月額をいくらにするか。"),
+    ("高橋", "競合が月額 800 円なので、500 円にして安さを打ち出したいです。"),
+    ("鈴木", "ただ、500 円だと、サーバーの費用を考えると赤字にならないでしょうか。"),
+    ("佐藤", "利用者が 1 万人を超えるまでは、500 円だと赤字になる計算です。"),
+    ("田中", "料金は今日は決めきれませんね。経理の意見も聞いてから、次回の会議で決めます。高橋さん、競合の料金表をまとめておいてもらえますか。"),
+    ("高橋", "はい、まとめておきます。"),
+    ("田中", "次はデザインです。鈴木さん、アイコンはどうなっていますか。"),
+    ("鈴木", "今の案は社内の評判があまりよくないので、作り直そうと思っています。来週の月曜までに、新しい案を 3 つ出します。"),
+    ("田中", "お願いします。ストアに載せる紹介用の画像も必要ですね。"),
+    ("鈴木", "画像はアイコンが決まってから作ります。"),
+    ("田中", "それから、プレスリリースの文案も誰かが書かないといけません。"),
+    ("高橋", "営業部でも書けますが、広報に頼んだほうがいいかもしれません。"),
+    ("田中", "担当は広報と相談してから決めましょう。"),
+    ("伊藤", "一つ気になっているのですが、利用者の学習記録を海外のサーバーに保存する点について、個人情報の扱いを法務に確認しましたか。"),
+    ("佐藤", "まだです。利用規約の文面にも関わりますね。"),
+    ("田中", "それは確認が必要です。佐藤さん、法務への確認をお願いします。リリースに関わるので、11 月 30 日までに結果を教えてください。"),
+    ("佐藤", "承知しました。"),
+    ("伊藤", "すみません、先ほどのテスト計画ですが、ログインの修正方針を見てから作りたいので、期限を 11 月 27 日に延ばしてもいいでしょうか。"),
+    ("田中", "はい、27 日で構いません。"),
+    ("田中", "最後に確認します。リリースは 12 月 10 日、初回は iOS 版のみ、料金は次回決定です。次回の会議は 12 月 1 日です。お疲れさまでした。"),
+]
+lines = [f"[{i}] {who}: {text}" for i, (who, text) in enumerate(transcript, 1)]   # 発言番号を付けて、根拠として指させるようにする
+speakers = sorted({who for who, _ in transcript})
+
+def make_chunks(lines, max_chars=600):
+    """発言の途中で切らないように、発言単位で max_chars 文字ずつにまとめる"""
+    chunks, cur = [], []
+    for line in lines:
+        if cur and sum(map(len, cur)) + len(line) > max_chars:
+            chunks.append(cur); cur = []
+        cur.append(line)
+    return chunks + [cur]
+
+chunks = make_chunks(lines)
+print(sum(map(len, lines)), "文字 /", len(lines), "発言 / 参加者", speakers)
+print(len(chunks), "分割:", [(c[0].split("]")[0] + "]", c[-1].split("]")[0] + "]", sum(map(len, c))) for c in chunks])
+```
+
+```python
+import json
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from pydantic import BaseModel, ValidationError, field_validator
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (MIT ライセンス)。VRAM 約 7GB
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (大規模言語モデルの章の「オープンな LLM とチャットする (チャットテンプレート)」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+def chat(messages, max_new_tokens=700):
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    with torch.no_grad():
+        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+class Item(BaseModel):
+    content: str
+    evidence: list[int]          # 根拠の発言番号
+
+class Todo(BaseModel):
+    task: str
+    owner: str | None            # 発言に担当者がなければ null
+    due: str | None              # 発言に期限がなければ null
+    evidence: list[int]
+
+    @field_validator("owner", "due")
+    @classmethod
+    def none_if_unknown(cls, v):    # 「未定」「なし」などと文字で書いてきたものも null として扱う
+        return None if v is None or re.match(r"\s*(未定|なし|特になし|不明|null)", v) else v
+
+class Minutes(BaseModel):
+    decisions: list[Item]
+    todos: list[Todo]
+    issues: list[Item]           # 結論が出ていない論点
+
+INSTRUCTION = """次は会議の書き起こしの一部です。各行は「[発言番号] 話者: 発言」です。
+決定事項 (decisions)、ToDo (todos)、結論が出ていない論点 (issues) を、例と同じ形の JSON で抜き出してください。
+- 誰かが頼まれて引き受けたこと、自分からやると言ったこと、担当が決まっていないがやる必要があることは ToDo にする
+- evidence には根拠となる発言番号を入れる
+- ToDo の owner (担当者) と due (期限) は、発言の中で明示されたときだけ書く。明示されていなければ null にする。推測で補わない
+- 該当するものがなければ空のリスト [] にする
+- JSON 以外は出力しない"""
+EXAMPLE_IN = """[1] 山田: 新しい名刺のデザインは A 案に決めます。
+[2] 木村: 印刷会社への発注は私がやります。金曜までに済ませます。
+[3] 山田: 配布の方法は、また今度考えましょう。社内報に載せる記事も、誰かに書いてもらわないと。"""
+EXAMPLE_OUT = json.dumps({
+    "decisions": [{"content": "名刺のデザインを A 案にする", "evidence": [1]}],
+    "todos": [{"task": "印刷会社に発注する", "owner": "木村", "due": "金曜", "evidence": [2]},
+              {"task": "社内報の記事を書く", "owner": None, "due": None, "evidence": [3]}],
+    "issues": [{"content": "名刺の配布方法", "evidence": [3]}]}, ensure_ascii=False)
+
+def extract_json(text):
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+    obj, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+    return obj
+
+def extract(chunk, max_retries=2):
+    """(抜き出した結果, 出し直した回数) を返す。出し直しを使い切っても検証を通らなければ (None, 回数) を返す"""
+    messages = [{"role": "user", "content": f"{INSTRUCTION}\n\n{EXAMPLE_IN}"}, {"role": "assistant", "content": EXAMPLE_OUT},
+                {"role": "user", "content": f"{INSTRUCTION}\n\n" + "\n".join(chunk)}]
+    for retry in range(max_retries + 1):
+        out = chat(messages)
+        try:
+            return Minutes.model_validate(extract_json(out)), retry
+        except (ValueError, ValidationError) as e:   # 壊れた JSON は、エラーを伝えて出し直させる
+            messages += [{"role": "assistant", "content": out}, {"role": "user", "content": f"出力が不正です: {str(e)[:200]}\n例と同じ形の JSON だけを出力し直してください。"}]
+    return None, max_retries
+
+# 1. 分割ごとに抜き出す (map)。T4 なら、モデルのダウンロード (約 7GB) を除いて数分ほど
+parts = []
+for k, chunk in enumerate(chunks, 1):
+    m, retry = extract(chunk)
+    if m is None:    # 黙って空の結果にすると、その分割の決定事項や ToDo が消えたことに気づけない
+        print(f"--- 分割 {k}: 出し直し {retry} 回でも有効な JSON が得られなかった。この分割は手で確かめる")
+        continue
+    parts.append(m)
+    print(f"--- 分割 {k} (出し直し {retry} 回)")
+    for t in m.todos:
+        print("  ToDo:", t.model_dump())
+```
+
+```python
+import pandas as pd
+
+# 2. 分割ごとの結果を 1 つにまとめる (reduce)。ToDo は根拠の発言番号の順に並べるだけで、LLM には渡さない
+decisions = [d for m in parts for d in m.decisions]
+issues = [d for m in parts for d in m.issues]
+todos = sorted([t for m in parts for t in m.todos], key=lambda t: min(t.evidence or [0]))
+
+# 3. 抜き出した担当者と期限が、根拠の発言に本当に書かれているかを機械的に確かめる
+norm = lambda s: unicodedata.normalize("NFKC", s).replace(" ", "")
+
+def check_todo(todo):
+    problems = []
+    ev = [transcript[i - 1] for i in todo.evidence if 1 <= i <= len(transcript)]
+    if len(ev) < len(todo.evidence) or not ev:
+        problems.append("発言番号が不正")
+    ev_text = norm(" ".join(f"{who} {text}" for who, text in ev))
+    if todo.owner is not None:
+        owner = norm(todo.owner).removesuffix("さん")
+        if owner not in speakers:
+            problems.append("担当者が参加者にいない")
+        elif owner not in ev_text:            # 根拠の発言の話者か本文に、担当者の名前が出てくるか
+            problems.append("担当者が根拠の発言にない")
+    if todo.due is not None:
+        due = norm(todo.due)
+        nums = re.findall(r"\d+", due)
+        if due not in ev_text and not (nums and all(n in re.findall(r"\d+", ev_text) for n in nums)):
+            problems.append("期限が根拠の発言にない")
+    return problems
+
+# 検査が働くことを、わざと作った誤り (書き起こしにない期限、参加者でない担当者) で確かめる
+fakes = [Todo(task="プレスリリースの文案を書く", owner="高橋", due="12 月 1 日", evidence=[30, 31]),
+         Todo(task="法務に確認する", owner="山本", due="11 月 30 日", evidence=[35])]
+for t in fakes:
+    print(t.task, t.owner, t.due, "→", check_todo(t))
+
+rows = [{"ToDo": t.task, "担当": t.owner, "期限": t.due, "根拠": t.evidence, "検査": "、".join(check_todo(t)) or "OK"} for t in todos]
+pd.set_option("display.max_colwidth", 40)
+pd.DataFrame(rows)
+```
+
+```python
+# 4. 書き起こしを作った人 (ここではレシピの作者) が付けた正解と比べる。task に含まれる語で対応を取る
+gold = [("不具合|パスワード", "佐藤", "11月28日"), ("テスト計画", "伊藤", "11月27日"), ("説明", "高橋", None), ("料金表", "高橋", None),
+        ("アイコン", "鈴木", "来週の月曜"), ("法務|個人情報", "佐藤", "11月30日"), ("プレスリリース", None, None)]
+def same_due(a, b):
+    """期限が同じか。どちらも None なら同じ。文字列が同じか、含まれる数字の並びが同じ (「11/27」と「11月27日」) なら同じとみなす"""
+    if a is None or b is None:
+        return a is None and b is None
+    nums_a, nums_b = re.findall(r"\d+", norm(a)), re.findall(r"\d+", norm(b))
+    return norm(a) == norm(b) or (nums_a != [] and nums_a == nums_b)
+
+for key, owner, due in gold:
+    found = [t for t in todos if re.search(key, t.task)]
+    if not found:
+        print(f"{key:<14} 見落とし")
+    for t in found:
+        print(f"{key:<14} 担当 {'○' if t.owner == owner else '×'} ({t.owner})  期限 {'○' if same_due(t.due, due) else '×'} ({t.due})  {t.task}")
+print("正解にない ToDo:", [t.task for t in todos if not any(re.search(key, t.task) for key, _, _ in gold)])
+```
+
+```python
+# 5. 議事録の形に整え、全体の要約を付ける。要約の入力は書き起こしではなく、抜き出した JSON にする
+def bullet(items):
+    return "\n".join(f"- {d.content} (発言 {', '.join(map(str, d.evidence))})" for d in items) or "- なし"
+
+digest = json.dumps({"decisions": [d.content for d in decisions], "todos": [f"{t.task} (担当: {t.owner or '未定'}、期限: {t.due or '未定'})" for t in todos],
+                     "issues": [d.content for d in issues]}, ensure_ascii=False)
+summary = chat([{"role": "user", "content": f"次は会議で決まったこと、ToDo、残った論点の一覧です。会議の内容を 3 文で要約してください。一覧にないことは書かないでください。\n\n{digest}"}], max_new_tokens=200)
+
+def todo_line(t):
+    line = f"- {t.task} / 担当: {t.owner or '未定'} / 期限: {t.due or '未定'}"
+    problems = check_todo(t)
+    if problems:     # 検査に引っかかったものには印を付けて、人が確かめるようにする
+        line += f"  ※要確認 ({'、'.join(problems)})"
+    return line
+
+todo_lines = "\n".join(todo_line(t) for t in todos)
+print(f"# 議事録: リリース準備会議\n参加者: {'、'.join(speakers)}\n\n## 要約\n{summary}\n\n## 決定事項\n{bullet(decisions)}\n\n## ToDo\n{todo_lines}\n\n## 論点 (未決)\n{bullet(issues)}")
+```
+
+- 書き起こしに発言番号を付け、抜き出した項目ごとに根拠の発言番号 (evidence) を答えさせる。人が確かめるときにすぐ原文に戻れるうえ、担当者や期限がその発言に本当に書かれているかを機械的に検査できる。JSON の取り出しと、壊れていたら出し直させる方法は、大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」と同じ (上の出力でも、分割 1 は 1 回目の出力が検証を通らず出し直している)。出し直しを使い切った分割は、空の結果にせずに知らせる。
+- 書き起こしを発言の途中で切らないように分割し、分割ごとに抜き出してからまとめる (map-reduce。この章の「長い文書を分割して要約する」と同じ考え方)。議事録では、ある分割で決まった期限が後の分割で変わることがある。上の出力では、伊藤さんのテスト計画は [13] の 11 月 25 日が [37]〜[38] で 27 日に延びており、ToDo には期限なし [12]・11/25 [13]・11/27 [37] の 3 件が並んだ。期限なしの 1 件は、依頼 [12] が分割 1 の末尾に、引き受けと期限 [13] が分割 2 の先頭に分かれたために出た重複である (前の分割の末尾の数発言を重ねて入れると減らせる)。つなげただけでは重複や古い期限が残る (要約も 11 月 25 日と書いている) ので、同じ内容の ToDo は根拠の発言番号を見比べて人が見直す。
+- 担当者と期限の検査は、担当者が参加者にいるか、担当者の名前と期限 (の数字) が根拠の発言に出てくるかを確かめるだけの簡単なものである。上の出力では引っかかる ToDo はなく、わざと作った誤り (参加者でない「山本」、書き起こしにない「12 月 1 日」) は検出できた。一方、[31] の話者が高橋さんなので「プレスリリースの担当: 高橋」という誤りは通ってしまう。根拠の発言番号そのものの正しさ、「来週の月曜」のような相対的な日付、仕事の内容 (task) までは確かめられない。
+- 検査は「書いたものに根拠があるか」しか見ないので、見落としや、決定でないものを決定とする誤りは見つからない。正解と比べると、7 件の ToDo のうち、法務への確認 ([35]) と担当未定のプレスリリースの文案 ([30]〜[32]) を ToDo として拾えなかった (どちらも論点としては出ているが、法務への確認は [35] で担当と期限まで決まっているので、ToDo から落ちたのは痛い)。逆に、誰も引き受けていない「Android 版のテスト戦略を決定する」を ToDo にしている ([18] で初回は iOS 版だけと決まっている。プロンプトの「担当が決まっていないがやる必要があることは ToDo にする」が、こうした項目を出しやすくしている可能性がある)。また、高橋さんの提案にすぎない [21] を「有料版の月額を 500 円とする」という決定事項にしている (実際は [24] で次回に持ち越し)。重要な会議では、決定事項は根拠の発言を人が読んで確かめるか、より大きなモデルを使う。
+- 要約は書き起こし全体ではなく、抜き出した一覧から作っている。入力は短くて済むが、一覧の誤りはそのまま要約に入る (上の出力の要約も「有料版の月額を 500 円とすることが決定された」と書いている)。上の出力では「3 文で」と指示しても 4 文になっている。要約と原文の照合は、この章の「要約が原文と食い違っていないか検査する」を参照。
+- 書き起こしはこのレシピのために作った架空の会議である。公開されている会議録には国立国会図書館の国会会議録検索システム (API あり) があるが、その利用条件によると、発言の著作権は原則として個々の発言者にあり、政治上の演説や陳述の利用、情報解析などの権利制限規定に当たる場合を除いて許諾が必要とされているので、使い方に応じて確かめる。社内の会議の書き起こしを外部の API に送るときは、社内の規程も確かめる。
+
+## 規約の新旧を条項ごとに比べ、改定の要点をまとめる {contract_diff gpu}
+
+利用規約や契約書の新旧 2 つの版を比べて、追加・削除・変更された条項を一覧にし、変更の要点を短くまとめたい。条番号がずれても正しく対応づけ、「できる」が「しなければならない」に変わるような小さな変更も見落とさないようにしたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import re
+import unicodedata
+import pandas as pd
+
+# 説明のために作った架空の規約 (実在のサービスの規約ではない)。新版は条番号を全角で書いてある
+OLD = """サンプル会員サービス利用規約 (2025 年 4 月 1 日版)
+第1条（適用）
+本規約は、当社が提供するサンプル会員サービス（以下「本サービス」といいます。）の利用に関する条件を定めるものです。
+第2条（会員登録）
+本サービスの利用を希望する者は、当社の定める方法により会員登録を申請することができます。登録は、当社が申請を承認した時点で完了します。
+第3条（料金及び支払方法）
+会員は、本サービスの利用料金として月額500円（税込）を、当社が指定する方法により支払うものとします。
+第4条（禁止事項）
+会員は、本サービスの利用にあたり、次の行為をしてはなりません。
+(1) 法令に違反する行為
+(2) 他の会員の情報を収集する行為
+(3) 本サービスの運営を妨げる行為
+第5条（パスワードの管理）
+会員は、自己の責任においてパスワードを管理するものとします。パスワードが第三者に知られたおそれがある場合、会員は当社に通知することができます。
+第6条（本サービスの変更）
+当社は、会員に事前に通知することにより、本サービスの内容を変更することができます。
+第7条（退会）
+会員は、当社所定の方法により届け出ることにより、いつでも退会することができます。会員が第4条に違反した場合、当社はその会員を退会させることができます。
+第8条（ポイント）
+当社は、本サービスの利用に応じて会員にポイントを付与します。ポイントの有効期限は、付与日から1年間とします。
+第9条（免責）
+当社は、本サービスに関して会員に生じた損害について、当社に故意又は重大な過失がある場合を除き、責任を負いません。
+第10条（準拠法及び管轄）
+本規約には日本法を適用し、本サービスに関する紛争については、東京地方裁判所を第一審の専属的合意管轄裁判所とします。
+"""
+
+NEW = """サンプル会員サービス利用規約 (2026 年 4 月 1 日版)
+第１条（適用）
+本規約は、当社が提供するサンプル会員サービス（以下「本サービス」といいます。）の利用に関する条件を定めるものです。
+第２条（定義）
+本規約において「会員」とは、第３条に基づき会員登録が完了した者をいい、「投稿データ」とは、会員が本サービスに投稿した文章、画像その他の情報をいいます。
+第３条（会員登録）
+本サービスの利用を希望する者は、当社の定める方法により会員登録を申請することができます。登録は、当社が申請を承認した時点で完了します。
+第４条（料金及び支払方法）
+会員は、本サービスの利用料金として月額550円（税込）を、当社が指定する方法により支払うものとします。
+第５条（禁止事項）
+会員は、本サービスの利用にあたり、次の行為をしてはなりません。
+(1) 法令に違反する行為
+(2) 他の会員の情報を収集する行為
+(3) 本サービスの運営を妨げる行為
+(4) 本サービスで提供される情報を、当社の許可なく機械学習に利用する行為
+第６条（パスワードの管理）
+会員は、自己の責任においてパスワードを管理するものとします。パスワードが第三者に知られたおそれがある場合、会員は当社に通知しなければなりません。
+第７条（本サービスの変更）
+当社は、会員に事前に通知することにより、本サービスの内容を変更することができます。
+第８条（退会）
+会員は、当社所定の方法により届け出ることにより、いつでも退会することができます。会員が第５条に違反した場合、当社はその会員を退会させることができます。
+第９条（免責事項）
+当社は、本サービスに関して会員に生じた損害について、当社に故意がある場合を除き、責任を負いません。
+第１０条（準拠法及び管轄）
+本規約には日本法を適用し、本サービスに関する紛争については、東京地方裁判所を第一審の専属的合意管轄裁判所とします。
+"""
+
+def parse_articles(doc):
+    """「第N条（見出し）」の行で区切り、条番号・見出し・本文の一覧にする。全角の数字や括弧は NFKC で半角にそろえる"""
+    doc = unicodedata.normalize("NFKC", doc)
+    parts = re.split(r"^第(\d+)条\s*\((.+?)\)\s*$", doc, flags=re.M)
+    return [{"no": int(n), "title": t, "body": "\n".join(l.strip() for l in b.strip().splitlines())}
+            for n, t, b in zip(parts[1::3], parts[2::3], parts[3::3])]
+
+old, new = parse_articles(OLD), parse_articles(NEW)
+print(len(old), "条 →", len(new), "条")
+
+# 素朴な方法: 同じ条番号どうしを比べる
+old_by_no, new_by_no = {a["no"]: a for a in old}, {a["no"]: a for a in new}
+pd.DataFrame([{"条": n, "旧": old_by_no.get(n, {}).get("title"), "新": new_by_no.get(n, {}).get("title"),
+               "本文が同じか": old_by_no.get(n, {}).get("body") == new_by_no.get(n, {}).get("body")} for n in sorted(old_by_no | new_by_no)])
+```
+
+```python
+import difflib
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from sentence_transformers import SentenceTransformer
+
+emb_model = SentenceTransformer("intfloat/multilingual-e5-small")   # MIT ライセンス
+
+def mask_refs(s):
+    return re.sub(r"第\d+条", "第N条", s)        # 対応づけの段階では、条番号への参照を伏せる
+
+def view(a):
+    return f"{a['title']}\n{mask_refs(a['body'])}"
+
+E_old = emb_model.encode(["query: " + view(a) for a in old], normalize_embeddings=True)
+E_new = emb_model.encode(["query: " + view(a) for a in new], normalize_embeddings=True)
+emb_sim = E_old @ E_new.T                       # 意味の近さ (言い換えや見出しの変更に強い)
+char_sim = np.array([[difflib.SequenceMatcher(None, view(a), view(b), autojunk=False).ratio() for b in new] for a in old])   # 文字列の重なり
+score = (emb_sim + char_sim) / 2
+
+# 割当問題として解き、スコアの合計が最大になる 1 対 1 の組を選ぶ (ハンガリアン法などで解ける問題)
+rows, cols = linear_sum_assignment(-score)
+THRESHOLD = 0.75                                # これより低い組は対応なし (削除と新設) とみなす
+pairs = [(i, j) for i, j in zip(rows, cols) if score[i, j] >= THRESHOLD]
+# 対応した組と、それ以外の組の類似度の差を、3 つの尺度で比べる
+is_pair = np.zeros_like(score, dtype=bool)
+for i, j in pairs:
+    is_pair[i, j] = True
+for label, m in [("文埋め込み", emb_sim), ("文字列", char_sim), ("平均", score)]:
+    print(f"{label}: 対応した組の最小 {m[is_pair].min():.2f} / それ以外の最大 {m[~is_pair].max():.2f}")
+pd.DataFrame(score.round(2), index=[f"旧{a['no']} {a['title']}" for a in old], columns=[f"新{a['no']}" for a in new])
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+o2n = {old[i]["no"]: new[j]["no"] for i, j in pairs}
+
+def remap_refs(s):
+    """旧版の「第N条」を、対応する新版の条番号に読み替える (番号の繰り下げだけによる差分を消す)"""
+    return re.sub(r"第(\d+)条", lambda m: f"第{o2n.get(int(m.group(1)), m.group(1))}条", s)
+
+def word_diff(a, b):
+    """形態素の単位で差分を取り、削除を [-…-]、追加を {+…+} で示す"""
+    wa, wb = [w.white_space + w.surface for w in tagger(a)], [w.white_space + w.surface for w in tagger(b)]
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
+        if op == "equal":
+            out.append("".join(wa[i1:i2]))
+        else:
+            out.append(("[-" + "".join(wa[i1:i2]) + "-]") * (i2 > i1) + ("{+" + "".join(wb[j1:j2]) + "+}") * (j2 > j1))
+    return "".join(out)
+
+# 権利や義務の強さを決める語句と、数値。文全体の類似度ではほとんど変わらないので、別に数えて比べる
+KEY_PATTERNS = {"義務": r"しなければな(?:らない|りません)", "禁止": r"してはな(?:らない|りません)", "できる(権利・任意)": r"ことができ(?:る|ます)",
+                "努力義務": r"努め(?:る|ます)", "免責": r"責任を負(?:わない|いません)", "故意": r"故意", "重大な過失": r"重大な過失",
+                "事前に": r"事前に", "直ちに": r"直ちに", "いつでも": r"いつでも"}
+
+def key_terms(s):
+    c = Counter({k: len(re.findall(p, s)) for k, p in KEY_PATTERNS.items()})
+    c.update(re.findall(r"\d+(?:\.\d+)?(?:円|%|日|か月|年間|年|時間|件)", mask_refs(s)))
+    return +c
+
+def term_changes(a, b):
+    ca, cb = key_terms(a), key_terms(b)
+    return ", ".join([f"-{k}" for k in (ca - cb)] + [f"+{k}" for k in (cb - ca)])
+
+def row(old_no, new_no, status, title, old_text, new_text, terms="", diff=""):
+    return {"旧": old_no, "新": new_no, "区分": status, "見出し": title, "要注意の語句": terms, "差分": diff,
+            "old_text": old_text, "new_text": new_text}
+
+report = []
+for i, j in sorted(pairs, key=lambda p: p[1]):
+    a, b = old[i], new[j]
+    a_body = remap_refs(a["body"])
+    title = b["title"] if a["title"] == b["title"] else f"{a['title']}→{b['title']}"
+    if (a["title"], a_body) == (b["title"], b["body"]):
+        report.append(row(a["no"], b["no"], "変更なし", title, a_body, b["body"]))
+    else:
+        report.append(row(a["no"], b["no"], "変更", title, a_body, b["body"],
+                          term_changes(a_body, b["body"]), word_diff(a_body, b["body"])))
+matched_old, matched_new = {i for i, _ in pairs}, {j for _, j in pairs}
+report += [row(None, b["no"], "新設", b["title"], "", b["body"]) for j, b in enumerate(new) if j not in matched_new]
+report += [row(a["no"], None, "削除", a["title"], a["body"], "") for i, a in enumerate(old) if i not in matched_old]
+report = pd.DataFrame(report).astype({"旧": "Int64", "新": "Int64"})
+
+# 変更のあった条の差分は、切れないように全文を表示する
+for _, r in report[report["区分"] == "変更"].iterrows():
+    print(f"旧{r['旧']}→新{r['新']} {r['見出し']}\n{r['差分']}\n")
+report.drop(columns=["差分", "old_text", "new_text"])
+```
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+torch.manual_seed(0)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # SB Intuitions、MIT ライセンス。初回はダウンロード (約 6.4GB) を含めて数分。VRAM 約 7GB
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+def chat(prompt, max_new_tokens=150):
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    with torch.no_grad():
+        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+def summarize_change(r):
+    if r["区分"] == "新設":
+        return chat(f"利用規約の改定で、次の条項が新しく設けられました。何が定められたかを 1 文で書いてください。\n\n（{r['見出し']}）{r['new_text']}")
+    if r["区分"] == "削除":
+        return chat(f"利用規約の改定で、次の条項が削除されました。何がなくなったかを 1 文で書いてください。\n\n（{r['見出し']}）{r['old_text']}")
+    return chat("利用規約の条項が改定されました。旧版と新版、差分 ([-削除-] {+追加+})、機械的に検出した語句の変化を示します。"
+                "何がどう変わったかを 1 文で、会員にとって有利か不利かを 1 文で書いてください。差分に表れた変更は、小さなものでも省かないでください。\n\n"
+                f"旧版: {r['old_text']}\n新版: {r['new_text']}\n差分: {r['差分']}\n語句の変化: {r['要注意の語句'] or 'なし'}")
+
+changed = report[report["区分"] != "変更なし"].copy()
+changed["要点"] = [summarize_change(r) for _, r in changed.iterrows()]   # 6 条の生成はモデルの読み込みと合わせて A5000 で約 10 秒 (キャッシュ済み)。T4 ではこれより遅い
+
+def no(x):
+    return "-" if pd.isna(x) else x
+
+for _, r in changed.iterrows():
+    print(f"[{r['区分']}] 旧{no(r['旧'])}→新{no(r['新'])} {r['見出し']}  {r['要注意の語句']}")
+    print(f"   {r['要点']}")
+```
+
+```python
+# 条ごとの要点から、改定全体の要約を作る
+items = "\n".join(f"- {r['区分']} ({r['見出し']}): {r['要点']}" for _, r in changed.iterrows())
+print(chat(f"利用規約の改定内容を条項ごとにまとめたものです。会員への影響が大きい順に、5 項目以内の箇条書きにしてください。各項目は 1 文にしてください。\n\n{items}", max_new_tokens=400))
+```
+
+- 条番号だけで対応づけると、条項を 1 つ新設しただけで、新設と削除の間にある条 (ここでは第2〜9条) がすべて「変更」に見える (最初の表。第10条は削除で番号のずれが打ち消されて一致した)。見出しと本文の類似度で対応づけ、`scipy.optimize.linear_sum_assignment` で割当問題を解いて 1 対 1 の組を選ぶと、番号のずれ、新設、削除を区別できる。
+- 類似度は、文埋め込みと文字列の重なり (difflib) の平均にした。multilingual-e5-small のコサイン類似度は無関係な条どうしでも高く、上の出力では対応した組の最小 0.98 に対しそれ以外の最大が 0.94 だった。平均を取ると 0.90 と 0.66 に開くので、しきい値 (ここでは 0.75) を置きやすい。見出しや言い回しを大きく書き換えた条では値が下がるので、しきい値は表を見て決める。
+- 本文中の「第4条に違反した場合」のような条番号の参照は、番号が繰り下がっただけでも差分になる。対応づけでは伏せ、比べるときは旧版の番号を新版の番号に読み替えると、実質的な変更だけが残る (上の退会の条は「変更なし」になった)。
+- 「することができます」→「しなければなりません」は文全体の類似度にほとんど表れない (パスワードの条を含め、対応した組の文埋め込みはすべて 0.98 以上) が、任意の通知が義務に変わる重要な改定である。変更の有無は文字列の一致で判定し、義務・禁止・免責などの語句と数値の数の変化を「要注意の語句」の列に出しておく。ただし、号の追加のように語句の数が変わらない変更はこの列に表れない (上の禁止事項の条)。差分の全文も確かめる。
+- LLM には差分と語句の変化も渡し、どこが変わったかを先に示しておく。それでも細部は落ちる。上の出力では、免責の条の要点が旧版を「重大な過失がない限り」と説明して「故意又は」を落とし、全体の要約にもその誤りが引き継がれた。全体の要約には「月額料金が50円から増額され」という崩れた表現も混ざり、「各項目は 1 文」の指示も守られていない。有利・不利の判断もモデルの意見にすぎないので、最終的な判断は差分の一覧で行う。
+- 実際の規約では、PDF や HTML から条の区切りを正しく取り出すのに手間がかかることが多い (このレシピでは試していない)。項や号 (「2」「(1)」) の単位まで分けると、どこが変わったかをさらに細かく示せる。
+- データとモデルの出典とライセンス: 新旧の規約は説明のために作った架空のもの。intfloat/multilingual-e5-small (MIT)、sbintuitions/sarashina2.2-3b-instruct-v0.1 (SB Intuitions、MIT)。sarashina のトークナイザーを直すコードについては、大規模言語モデルの章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書きを参照。
 
 ## 記事の見出しを生成して実際の見出しと比べる {headline_generation gpu}
 

@@ -265,7 +265,9 @@ def dump(nb: dict, path: Path) -> None:
 
 def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
     total = sum(len(rs) for _, _, rs in chapters)
-    lines = [f"全 {total} レシピ。タイトルをクリックすると GitHub 上で、"
+    main_total = sum(len(rs) for _, _, rs in chapters if rs and isinstance(rs[0].chapter_no, int))
+    count = f"全 {main_total} レシピ (付録を含めると {total} レシピ)" if main_total != total else f"全 {total} レシピ"
+    lines = [f"{count}。タイトルをクリックすると GitHub 上で、"
              "バッジをクリックすると Google Colab で開きます。", ""]
     for title, _, rs in chapters:
         if rs:

@@ -1,6 +1,6 @@
 # 意味解析
 
-「誰が何をどうした」「この語はどの意味か」「それは何を指すか」を取り出す。構文の一歩先の解析。
+「誰が何をどうした」「この語はどの意味か」「それは何を指すか」を取り出す。構文の一歩先の解析。文を一階述語論理の式に変換するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## 日本語の述語項構造解析をする (KWJA) {pas_kwja}
 
@@ -660,64 +660,3 @@ print(pd.crosstab(pd.Series(gold, name="正解"), pd.Series(pred, name="予測 (
 - 接続表現は 1 トークンとは限らない (「だから」は「だ / から」)。トークンを 1 つずつ隠して予測させる疑似対数尤度で、長さの違う表現を比べられるようにしている。ただし、表現によってスコアの出やすさが大きく違い、補正しないと特定の関係 (ここでは原因・理由) ばかりが選ばれる。評価に使わない少数の組で関係ごとの平均スコアを求め、差し引いてから比べる。
 - 「また」「そして」のような付加の表現は頻度が高く、モデルの予測もそこに偏る。関係ごとに事前確率で割る、関係ごとの再現率を見る、といった補正を検討する。
 - 注釈付きのデータとしては、英語の Penn Discourse Treebank、日本語の京都大学ウェブ文書リードコーパスの談話関係注釈がある。精度が必要なら、これらで分類器を学習する。
-
-## 文を一階述語論理の式に変換して真偽を確かめる (NLTK) {logic_semantics}
-
-「すべての少女が犬を追いかける」のような文の意味を、論理式として厳密に表したい。モデル (世界の状態) の上で真偽を計算し、推論もしたい。
-
-```python
-import nltk
-nltk.download("book_grammars", quiet=True)
-
-# 各規則に意味表現 (ラムダ式) が付いた素性文法。構文木を下から合成して、文全体の論理式を得る
-parser = nltk.load_parser("grammars/book_grammars/simple-sem.fcfg", trace=0)
-for sent in ["Irene walks", "a dog barks", "Angus chases a dog", "every girl chases a dog", "Angus sees Irene"]:
-    for tree in parser.parse(sent.split()):
-        print(f"{sent:26} {tree.label()['SEM']}")
-```
-
-```python
-# 文法の中身を見る: 限定詞や動詞に対応するラムダ式
-print(nltk.data.load("grammars/book_grammars/simple-sem.fcfg", format="text")[430:1300])
-```
-
-```python
-# モデル (個体の集合と、述語の解釈) を定義して、式の真偽を評価する
-val = nltk.Valuation.fromstring("""
-    angus => a
-    irene => i
-    girl => {i, j}
-    boy => {a}
-    dog => {d1, d2}
-    walk => {i, a}
-    bark => {d1}
-    chase => {(i, d1), (j, d2), (a, d1)}
-    see => {(a, i)}
-""")
-model = nltk.Model(val.domain, val)
-g = nltk.Assignment(val.domain)
-
-for sent in ["Irene walks", "every girl chases a dog", "every girl walks", "a dog barks", "Irene sees Angus"]:
-    sem = next(parser.parse(sent.split())).label()["SEM"]
-    print(f"{model.evaluate(str(sem), g)!s:6} {sent:26} {sem}")
-```
-
-```python
-# 量化子のスコープの曖昧性: 「どの少女も (それぞれ別の) 犬を追う」と「ある 1 匹の犬を全員が追う」
-read = nltk.sem.Expression.fromstring
-wide_every = read("all x.(girl(x) -> exists y.(dog(y) & chase(x,y)))")
-wide_some = read("exists y.(dog(y) & all x.(girl(x) -> chase(x,y)))")
-print("∀ が広いスコープ:", model.evaluate(str(wide_every), g), " ∃ が広いスコープ:", model.evaluate(str(wide_some), g))
-
-# 定理証明器で含意関係を確かめる (モデルによらず、論理的に必ず成り立つか)
-prover = nltk.ResolutionProver()
-print("∃∀ ならば ∀∃:", prover.prove(wide_every, [wide_some]))
-print("∀∃ ならば ∃∀:", prover.prove(wide_some, [wide_every]))
-premises = [read("all x.(dog(x) -> animal(x))"), read("all x.(animal(x) -> mortal(x))"), read("dog(pochi)")]
-print("ポチは死すべきものである:", prover.prove(read("mortal(pochi)"), premises))
-```
-
-- 構成性の原理: 文の意味は、部分の意味とその組み合わせ方から決まる。ラムダ計算は、その「組み合わせ」を関数適用として表す道具。
-- `every girl chases a dog` には 2 通りの読みがあるが、この文法が出すのは片方だけ。両方を得るには、Cooper storage などスコープを後から決める仕組みが要る。
-- 手書きの文法が扱える文はごく一部。広い範囲の文を論理式にするには、CCG パーザに基づく ccg2lambda や、AMR などの意味表現へのニューラルなパージングが使われる。
-- 自然言語推論を「埋め込みの類似度」ではなく「証明」で行うアプローチは、否定や数量を含む推論に強い。

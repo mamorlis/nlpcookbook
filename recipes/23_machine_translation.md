@@ -1,6 +1,6 @@
 # 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、モデルを学習・微調整する、訳し方を制御する。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、モデルを学習・微調整する、訳し方を制御する。文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## 対訳コーパスを取得して中身を確認する {parallel_corpus}
 
@@ -319,83 +319,6 @@ for label, corrupted in [("別の文の訳にすり替え", swapped), ("後半�
 - 大きな LLM を使った判定は、専用の品質推定モデルに匹敵することが報告されている。小さなモデルで同じ結果は期待できない。
 - 専用のモデルとしては、人手評価で学習された CometKiwi が代表的 (利用にはライセンスへの同意が必要)。大量の文を安定して評価するなら、まずこれを検討する。
 - 文単位の人手評価はそもそも雑音が大きい。相関係数は 0.3〜0.5 程度でも「使える」とされることが多く、高い値を期待しすぎない。
-
-## 文埋め込みから翻訳の評価指標を自分で学習する {mt_metric_regression}
-
-BLEU のような文字列の一致ではなく、意味の近さで翻訳を評価したい。人手評価のデータから、評価指標そのものを学習する。
-
-```python
-!pip install -q datasets sentence-transformers "sacrebleu[ja]"
-```
-
-```python
-import numpy as np
-import pandas as pd
-from datasets import load_dataset
-from scipy.stats import kendalltau
-
-df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
-df = df[(df["lp"] == "en-ja") & (df["mt"].str.len().between(10, 150))].sample(6000, random_state=0).reset_index(drop=True)
-
-# 同じ原文の訳が学習と評価の両方に入らないよう、原文単位で分ける
-sources = df["src"].drop_duplicates().sample(frac=1, random_state=0)
-test_src = set(sources[:len(sources) // 5])
-train, test = df[~df["src"].isin(test_src)].reset_index(drop=True), df[df["src"].isin(test_src)].reset_index(drop=True)
-print(len(train), "件で学習 /", len(test), "件で評価")
-```
-
-```python
-from sentence_transformers import SentenceTransformer
-
-embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-encode = lambda texts: embedder.encode(["query: " + t for t in texts], normalize_embeddings=True, batch_size=64)
-
-def features(d):
-    """訳文 h と参照訳 r の埋め込みから、[h, r, |h − r|, h × r] を特徴量にする"""
-    h, r = encode(d["mt"].tolist()), encode(d["ref"].tolist())
-    return np.hstack([h, r, np.abs(h - r), h * r]), (h * r).sum(axis=1)
-
-X_train, _ = features(train)
-X_test, cos_test = features(test)
-print(X_train.shape)
-```
-
-```python
-from sklearn.linear_model import Ridge
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVR
-
-# 人手のスコアを予測する回帰モデル (RBF カーネルのサポートベクター回帰)。線形の回帰とも比べる
-regressor = make_pipeline(StandardScaler(), SVR(C=10, epsilon=1.0)).fit(X_train, train["score"])
-learned = regressor.predict(X_test)
-linear = make_pipeline(StandardScaler(), Ridge(alpha=100.0)).fit(X_train, train["score"]).predict(X_test)
-```
-
-```python
-import sacrebleu
-
-# 比較対象: 文字列の一致に基づく指標と、学習なしの埋め込み類似度
-bleu = [sacrebleu.sentence_bleu(h, [r], tokenize="ja-mecab").score for h, r in zip(test["mt"], test["ref"])]
-chrf = [sacrebleu.sentence_chrf(h, [r]).score for h, r in zip(test["mt"], test["ref"])]
-
-rows = [{"指標": name, "Kendall τ": kendalltau(test["score"], s).statistic, "Pearson": np.corrcoef(test["score"], s)[0, 1]}
-        for name, s in [("文単位の BLEU", bleu), ("chrF", chrf), ("埋め込みのコサイン類似度 (学習なし)", cos_test), ("学習した回帰モデル (線形)", linear), ("学習した回帰モデル (SVR)", learned)]]
-print(pd.DataFrame(rows).round(3).to_string(index=False))
-
-# 文字列はあまり一致しないが、学習した指標が高く評価した例
-test["chrF"], test["learned"] = chrf, learned
-for r in test[test["chrF"] < 25].sort_values("learned", ascending=False).head(3).itertuples():
-    print(f"人 {r.score:.2f} / chrF {r.chrF:.0f} / 学習 {r.learned:.2f}\n   訳: {r.mt[:70]}\n   参照: {r.ref[:70]}")
-```
-
-- 訳文と参照訳をそれぞれ文埋め込みにし、その組み合わせから人手のスコアを回帰する。RUSE という指標の考え方で、のちの BLEURT や COMET (学習型の評価指標) につながった。
-- 特徴量に差の絶対値と要素ごとの積を入れるのは、2 つの文の関係を学習するときの定番 (自然言語推論のモデルと同じ)。
-- 回帰モデルの選び方で結果が大きく変わる。この実験では、線形の回帰は学習なしのコサイン類似度にも負け、非線形の SVR にして初めて上回った。高次元の特徴量に対して学習データが数千件しかないので、過学習しやすい。
-- 相関の絶対値は低い (Kendall の τ で 0.2 前後)。最近の翻訳システムの出力は質が高くて差が小さく、文単位の人手評価の雑音も大きいため。
-- 学習型の指標は、学習データと同じ言語対・同じ年の評価では強いが、分野や翻訳システムの種類が変わると当てにならなくなることがある。原文単位で分割して、見たことのない文で評価する。
-- 文単位の BLEU は人手評価との相関が低い。文単位で比べたいときは、chrF か学習型の指標を使う。
-- 実用では、自分で学習するより公開されている COMET を使う (この章の COMET のレシピ)。ここでの目的は、学習型の指標が何をしているかを理解すること。
 
 ## Moses で統計的機械翻訳システムを作る {moses_smt}
 

@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。プロンプトと推論の工夫 (Chain-of-Thought)、ベンチマークでの比較とデータ汚染の確認、構造化出力、量子化と LoRA・DPO による調整、LLM の性質を調べる方法、LLM が生成した文章の検出と透かし。API で大きなモデルを使う方法は「LLM の API (Gemini と Claude)」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。プロンプトと推論の工夫 (Chain-of-Thought)、ベンチマークでの比較とデータ汚染の確認、構造化出力と、生成した広告文のプログラムによる検証、量子化と LoRA・DPO による調整、LLM の性質を調べる方法、LLM が生成した文章の検出と透かし。API で大きなモデルを使う方法は「LLM の API (Gemini と Claude)」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする (チャットテンプレート) {llm_chat_local}
 
@@ -1107,6 +1107,240 @@ print(json.dumps(Review.model_json_schema(), ensure_ascii=False)[:150], "...")  
 - プロンプトには、スキーマ (`model_json_schema()`) と出力例を入れる。
 - 可能なら、API やライブラリの「構造化出力」機能を使うのが確実 (文法的に正しい JSON しか生成できないように制約される)。Gemini API・Claude API の例は、LLM の API の章の「Gemini に決まった形式 (JSON スキーマ) で出力させる」と「Claude に決まった形式 (JSON スキーマ) で出力させる」を参照。ローカルモデルなら `outlines` などの制約付きデコードのライブラリがある。
 
+## 検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ {ad_text_generation gpu}
+
+商品やサービスの説明から、検索連動型広告の見出し (半角 30 文字・全角 15 文字まで) を LLM で何本も作り、文字数の超過、重複、キーワードの有無、説明にない数値や誇大な表現を自動でチェックして良いものを選びたい。公開データで、人が作った見出しとの類似度による自動評価も試したい。
+
+```python
+!pip install -q rouge-score sacrebleu fugashi unidic-lite
+```
+
+```python
+import re, unicodedata
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+torch.manual_seed(0)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"       # MIT ライセンス
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+RULES = ("検索連動型広告の見出しを 1 つ作ってください。\n"
+         "- 全角 15 文字 (半角 30 文字) 以内にする\n- 検索キーワードの語をなるべく含める\n"
+         "- 説明に書かれていない数値、実績、「No.1」「最安」などの表現は使わない\n- 見出しだけを出力する")
+
+def prompt(kw, desc, shots=()):
+    msgs = []
+    for s_kw, s_desc, s_title in shots:       # 例は「ユーザーの依頼 → アシスタントの見出し」の対話として前に置く
+        msgs += [{"role": "user", "content": f"{RULES}\n\n検索キーワード: {s_kw}\n説明: {s_desc}"}, {"role": "assistant", "content": s_title}]
+    msgs.append({"role": "user", "content": f"{RULES}\n\n検索キーワード: {kw}\n説明: {desc}"})
+    return tokenizer.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+
+def clean(text):
+    """1 行目だけを取り、前後の記号 (かぎかっこ、箇条書きの印、番号) を除く"""
+    line = text.strip().split("\n")[0].strip()
+    line = re.sub(r"^(?:[-・*●]|\d+[.．)）])\s*", "", line)
+    line = re.sub(r"[（(\[［【][^）)\]］】]*文字[^）)\]］】]*[）)\]］】]", "", line).strip()   # 「（全角15文字）」のような注記を除く
+    return line.strip("「」『』\"' 　")
+
+@torch.no_grad()
+def generate(prompts, n=1, bs=32, max_new_tokens=32):
+    """プロンプトごとに n 本の見出しを返す。n=1 なら貪欲法、n>1 ならサンプリング (左パディングのバッチ生成は、この章の「複数のプロンプトをまとめてバッチ生成する」と同じ)"""
+    outs, step = [], max(1, bs // n)
+    for i in range(0, len(prompts), step):
+        enc = tokenizer(prompts[i:i + step], return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+        sample = dict(do_sample=True, temperature=1.0, top_p=0.95) if n > 1 else dict(do_sample=False)
+        out = llm.generate(**enc, max_new_tokens=max_new_tokens, num_return_sequences=n, pad_token_id=tokenizer.pad_token_id, **sample)
+        outs += [clean(t) for t in tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return [outs[j * n:(j + 1) * n] for j in range(len(prompts))]
+
+def width(s):
+    """全角 (East Asian Width が F か W) を 2、それ以外を 1 と数える。Google 広告の見出しの上限は 30"""
+    return sum(2 if unicodedata.east_asian_width(c) in "FW" else 1 for c in s)
+
+def shorten(cands, limit=30, rounds=3):
+    """上限を超えた見出しだけを、今の長さを伝えて LLM に短く言い換えさせる (貪欲法)。最大 rounds 回くり返す"""
+    cands = list(cands)
+    for _ in range(rounds):
+        long = [i for i, c in enumerate(cands) if width(c) > limit]
+        if not long:
+            break
+        ask = [tokenizer.apply_chat_template([{"role": "user", "content":
+                   f"次の広告の見出しは全角に換算して {width(cands[i]) / 2:g} 文字あり、上限の {limit / 2:g} 文字を超えています。"
+                   f"意味を保ったまま {limit / 2:g} 文字以内に短くしてください。新しい情報は加えず、短くした見出しだけを出力してください。\n\n{cands[i]}"}],
+                   add_generation_prompt=True, tokenize=False) for i in long]
+        for i, (c,) in zip(long, generate(ask)):
+            cands[i] = c
+    return cands
+```
+
+```python
+# チェックの関数: キーワード、説明にない数値、誇大になりやすい表現、重複 (文字幅の width は前のセル)
+norm = lambda s: unicodedata.normalize("NFKC", s).lower().replace(",", "")
+def kw_coverage(text, kw):
+    """検索キーワードの語 (空白で区切る) のうち、見出しに含まれる割合"""
+    words = norm(kw).split()
+    return sum(w in norm(text) for w in words) / len(words) if words else 0.0
+
+def unsupported_numbers(text, source):
+    """見出しに出てくる数値のうち、説明にないもの"""
+    return [x for x in re.findall(r"\d+(?:\.\d+)?", norm(text)) if x not in re.findall(r"\d+(?:\.\d+)?", norm(source))]
+
+HYPE = r"no\.?1|ナンバーワン|日本一|業界一|世界一|日本初|業界初|世界初|最安|最高|最大|最短|唯一|絶対|必ず|完全|100%|永久|誰でも"
+def hype_words(text, source):
+    """誇大になりやすい表現のうち、説明に出てこないもの (使ってよいかは根拠しだいなので、人が確かめる印として使う)"""
+    return [w for w in re.findall(HYPE, norm(text)) if w not in norm(source)]
+
+def bigrams(s):
+    s = norm(re.sub(r"\s", "", s))
+    return {s[i:i + 2] for i in range(len(s) - 1)} or {s}
+def similar(a, b):
+    """文字 2-gram のジャッカード係数"""
+    return len(bigrams(a) & bigrams(b)) / len(bigrams(a) | bigrams(b))
+
+def check(cands, kw, source, limit=30):
+    rows = []
+    for c in cands:
+        rows.append({"見出し": c, "幅": width(c), "幅OK": 0 < width(c) <= limit, "KW": round(kw_coverage(c, kw), 2),
+                     "説明にない数値": unsupported_numbers(c, source), "誇大表現": hype_words(c, source)})
+    df = pd.DataFrame(rows)
+    df["要確認"] = df["説明にない数値"].map(bool) | df["誇大表現"].map(bool)
+    # 合格した候補どうしの類似度の平均 (多くの候補と内容が共通する、無難な候補ほど高い。最小ベイズリスク復号の考え方)
+    ok = df["幅OK"] & ~df["要確認"]
+    df["合意"] = [np.mean([similar(c, d) for j, d in enumerate(df["見出し"]) if j != i and ok[j]] or [0]) for i, c in enumerate(df["見出し"])]
+    return df
+
+def select(df, k=3, max_sim=0.5):
+    """合格した候補を KW の割合 → 合意の順に並べ、すでに選んだものと似すぎるもの (重複) を飛ばして k 本選ぶ"""
+    picked = []
+    for _, r in df[df["幅OK"] & ~df["要確認"]].sort_values(["KW", "合意"], ascending=False).iterrows():
+        if all(similar(r["見出し"], p) < max_sim for p in picked):
+            picked.append(r["見出し"])
+        if len(picked) == k:
+            break
+    return picked
+
+# 架空のサービスで試す
+kw = "オンライン英会話 初心者"
+desc = ("オンライン英会話「ことばラボ」。講師は全員日本語で説明できるので、英語が初めての方も安心。"
+        "1 回 25 分、月 8 回で月額 6,980 円 (税込)。無料体験レッスンは 2 回まで。朝 6 時から深夜 1 時まで予約できる。")
+torch.manual_seed(0)
+cands = generate([prompt(kw, desc)], n=16)[0]
+pd.set_option("display.width", 200); pd.set_option("display.unicode.east_asian_width", True)
+print("生成した候補の幅:", [width(c) for c in cands], cands[:3])
+table = check(shorten(cands), kw, desc)      # 上限を超えたものを短くさせてから、もう一度チェックする
+print(table.drop(columns="合意").to_string())
+print("選んだ見出し:", select(table))
+```
+
+```python
+# CAMERA (CyberAgent): 実際の検索広告から作った日本語の広告文生成のデータセット (Mita et al., 2024)。CC BY-NC-SA 4.0 (非商用に限る)
+# 入力は検索キーワード (kw) と LP (広告のリンク先のページ) の説明文 (lp_meta_description)。
+# テストデータは 1 件に 4 本の参照の見出しがある (title_org は実際の広告、title_ne1〜3 は全角 15 文字以内で人が書き足したもの)
+def camera(split):
+    path = hf_hub_download("cyberagent/camera", f"without-lp-images/{split}-00000-of-00001.parquet", repo_type="dataset")
+    return pd.read_parquet(path).drop(columns="parsed_full_text_annotation")
+
+test = camera("test").sample(120, random_state=0).reset_index(drop=True)      # 時間の都合で 872 件から 120 件
+# few-shot の例は架空のものを自分で書く (CAMERA の学習・開発データには、キーワードと LP の内容が合わない組も混じるため)
+shots = [("家計簿 アプリ 無料", "レシートを撮るだけで自動で記帳できる家計簿アプリ「マネノート」。基本機能は無料。銀行口座やカードと連携でき、グラフで支出を確認できる。",
+          "レシート撮影で家計簿が自動に"),
+         ("渋谷 ヨガ 体験", "渋谷駅から徒歩 3 分のヨガスタジオ「アサナ渋谷」。初心者向けのクラスが中心で、体験レッスンは 1,000 円。マットやウェアは無料で借りられる。",
+          "渋谷駅3分のヨガ 体験1000円")]
+print([(t, width(t)) for *_, t in shots])
+
+# 貪欲法で 1 本と、サンプリングで 8 本ずつ。上限を超えた候補は短くさせる (Colab の T4 で 10 分程度)
+prompts = [prompt(k, d, shots) for k, d in zip(test["kw"], test["lp_meta_description"])]
+greedy = [c[0] for c in generate(prompts)]
+torch.manual_seed(0)
+samples = generate(prompts, n=8)
+flat = shorten([c for cs in samples for c in cs])                  # 全候補をまとめて短くさせる (バッチにするため)
+shortened = [flat[j * 8:(j + 1) * 8] for j in range(len(samples))]
+def pick(cands_list):
+    checked = [check(c, k, d) for c, k, d in zip(cands_list, test["kw"], test["lp_meta_description"])]
+    # 合格がなければ、幅OK → KW の順で最上位のもの (実際には人が書くか、生成し直す)
+    return checked, [(select(t, k=1) or [t.sort_values(["幅OK", "KW"], ascending=False)["見出し"].iloc[0]])[0] for t in checked]
+checked0, picked0 = pick(samples)
+checked, picked = pick(shortened)
+print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+for i in range(4):
+    print(f"KW: {test['kw'][i]} / 実際の広告: {test['title_org'][i]} / 貪欲: {greedy[i]} / 選択: {picked[i]}")
+```
+
+```python
+# 8 本の候補のチェック結果の集計: 幅の超過、重複、要確認の割合
+for label, ch in [("短くする前", checked0), ("短くした後", checked)]:
+    a = pd.concat(ch, ignore_index=True)
+    print(f"{label}: 幅の超過 {1 - a['幅OK'].mean():.1%}  要確認 {a['要確認'].mean():.1%}  1 本も合格しなかった入力 {np.mean([not select(t, k=1) for t in ch]):.1%}")
+allc = pd.concat(checked, ignore_index=True)      # 短くした後の全候補
+distinct = np.mean([len(set(map(norm, c))) / len(c) for c in samples])
+near_dup = np.mean([np.mean([similar(a, b) >= 0.5 for i, a in enumerate(c) for b in c[i + 1:]]) for c in samples])
+print(f"短くする前の {len(allc)} 本: 完全に同じ候補を除くと残る割合 {distinct:.1%}  "
+      f"よく似た組 (2-gram の類似度 0.5 以上) の割合 {near_dup:.1%}")
+print(f"短くした後: 説明にない数値 {allc['説明にない数値'].map(bool).mean():.1%}  誇大表現 {allc['誇大表現'].map(bool).mean():.1%}")
+print("短くした例:", [(a, b) for a, b in zip(samples[0], shortened[0]) if a != b][:3])
+print("説明にない数値を含む候補の例:", allc.loc[allc["説明にない数値"].map(bool), "見出し"].head(5).tolist())
+print("誇大表現を含む候補の例:", allc.loc[allc["誇大表現"].map(bool), "見出し"].head(5).tolist())
+```
+
+```python
+# 参照との自動評価: 人が書いた title_ne1〜3 を参照にし、実際の広告 (title_org) も同じ参照で採点して人の目安にする
+from fugashi import Tagger
+from rouge_score import rouge_scorer
+from sacrebleu.metrics import CHRF
+
+tagger = Tagger()
+class Tok:
+    def tokenize(self, text):
+        return [w.surface for w in tagger(text)]
+rouge = rouge_scorer.RougeScorer(["rouge1"], tokenizer=Tok())
+chrf = CHRF()
+refs = test[["title_ne1", "title_ne2", "title_ne3"]].values.tolist()
+
+def scores(hyps):
+    return pd.DataFrame({
+        "ROUGE-1": [rouge.score_multi(r, h)["rouge1"].fmeasure for r, h in zip(refs, hyps)],      # 参照ごとの F の最大
+        "chrF": [chrf.sentence_score(h, r).score / 100 for r, h in zip(refs, hyps)],
+        "幅OK": [0 < width(h) <= 30 for h in hyps],
+        "KW": [kw_coverage(h, k) for h, k in zip(hyps, test["kw"])],
+        "要確認": [bool(unsupported_numbers(h, d) or hype_words(h, d)) for h, d in zip(hyps, test["lp_meta_description"])]})
+
+systems = {"貪欲法 1 本": greedy, "サンプリング 1 本目": [c[0] for c in samples], "8 本からチェックして選ぶ": picked0,
+           "8 本を短くしてから選ぶ": picked, "実際の広告 (title_org)": test["title_org"].tolist()}
+results = {s: scores(h) for s, h in systems.items()}
+print(pd.DataFrame({s: r.mean() for s, r in results.items()}).T.round(3).to_string())
+
+rng = np.random.default_rng(0)
+def diff_ci(a, b, col, n_boot=2000):
+    """同じ入力で比べる対応のあるブートストラップで、平均の差の 95% 信頼区間"""
+    d = (results[a][col] - results[b][col].astype(float)).to_numpy(dtype=float)
+    boot = d[rng.integers(0, len(d), (n_boot, len(d)))].mean(axis=1)
+    print(f"{a} − {b} ({col}): {d.mean():+.3f} [{np.percentile(boot, 2.5):+.3f}, {np.percentile(boot, 97.5):+.3f}]")
+
+for col in ["ROUGE-1", "chrF", "KW"]:
+    diff_ci("8 本を短くしてから選ぶ", "貪欲法 1 本", col)
+diff_ci("8 本を短くしてから選ぶ", "実際の広告 (title_org)", "ROUGE-1")
+```
+
+- 見出しの文字数の上限は、Google 広告のヘルプでは半角 30 文字で、全角 1 文字を半角 2 文字と数える (全角だけなら 15 文字)。ここでは Unicode の East Asian Width が F (全角) か W (広い) の文字を 2 と数えた。「※」「…」のような幅が文脈で変わる文字 (A) を媒体がどう数えるかは確かめていないので、入稿の前に媒体の画面で確かめる。媒体や広告の種類ごとに上限が違うので、`limit` と `width` をそれに合わせる。
+- このモデル (3B) では、「全角 15 文字以内」と指示しても文字数はほとんど守られなかった。架空のサービスの例では 16 本すべてが上限を超え (幅 48〜82)、今の長さを伝えて 3 回短くさせた後も 15 本が超えたままだった。CAMERA の 120 件でも、サンプリングした候補の 80.1%、貪欲法の見出しの 71.7% が超えた。最大 3 回短くさせても、上限に収まらない候補が 56.5% 残った。それでも候補を 8 本作っておけば、合格が 1 本もない入力は 41.7% から 11.7% に減り、選んだ見出しの 89.2% が上限に収まった (実際の広告は 94.2%)。文字数は生成のあとに必ずプログラムで数え、超えたものは捨てるか人が直す。上限で切り詰めると、文の途中で切れてしまう。
+- 候補は、完全に同じものを除いても 93.0% 残ったが、組の 27.7% は文字 2-gram の類似度が 0.5 以上で、言い回しが少し違うだけのものが多い。`select` のように、すでに選んだ見出しと似すぎるものを飛ばすと、レスポンシブ検索広告のように複数の見出しを入稿するとき、訴求の違うものをそろえやすい。合格した候補の中では、キーワードの語の割合、ほかの候補との類似度の平均 (多くの候補と共通する無難な内容ほど高い) の順で並べた。クリック率のような効果は、配信して確かめるしかない。
+- 説明にない数値や「No.1」「最安」のような表現は、根拠がなければ景品表示法の優良誤認・有利誤認にあたるおそれがあり、広告主の信用も損なう。「説明にない数値を使わない」と指示しても、短くした後の候補の 2.0% が説明にない数値で、0.2% が誇大になりやすい表現で引っかかった。本当に説明と違う例には、説明の「インターネット割引最大20,000円」を「割引最大15,000円」と書いた候補や、指示の「15文字以内」を書き写した候補があった。一方で、ここでの判定は「説明の文字列に出てこない」という印にすぎず、説明の「30,000円」を「3万」、英語の説明の「213,000 courses and 57 million students」を「21万コース、5,700万人」と書いた候補のような表記の違いも引っかかる。「人気No.1」の 2 本は、説明の「ブランド認知度No.01」を言い換えたもので、表記が違うので文字列の照合では通らなかったが、「認知度」が「人気」に変わって根拠の範囲も変わっている。逆に説明にある「日本初」は通る (説明が正しいかは確かめない)。実際の広告 (title_org) でも 7.5% が引っかかった。LP の説明文 (meta description) はページの一部なので、人が書いた見出しには、ページのほかの部分にある数値も入る。引っかかったものは、広告主の資料と照らして人が確かめる。
+- 参照との自動評価では、方法の違いがほとんど見えなかった。人が書いた 3 本の参照に対する ROUGE-1 (参照ごとの F の最大) は、どの方法も 0.18〜0.22 で、短くしてから選んだ見出しと貪欲法の差は −0.011 [−0.034, +0.013] (対応のあるブートストラップの 95% 信頼区間。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照) だった。chrF は −0.013 [−0.027, −0.000] とわずかに下がったが、信頼区間の端が 0 に接する程度である。実際の広告 (0.184) との差も +0.026 [−0.007, +0.059] で、人が書いた見出しも LLM と同じくらい参照と重ならない。広告文は同じ商品でも訴求の仕方がいくつもあるので、参照との重なりは良し悪しの目安にしかならない。CAMERA の論文 (Mita et al., 2024) も、BLEU-4、ROUGE-1、BERTScore のほかに、キーワードを含む割合と文字数の規定を守る割合を指標にし、人手評価との比較では、魅力 (attractiveness) の順位を既存の自動評価指標で再現するのは難しかったと報告している。記事の本文から見出しを生成して実際の見出しと比べる例は、要約と平易化の章の「記事の見出しを生成して実際の見出しと比べる」にある。
+- キーワードの語を含む割合は、LLM の見出し (0.80〜0.86) のほうが実際の広告 (0.32) よりずっと高く、実際の広告はキーワードの語をそのまま含まないことが多い。ただし、CAMERA のキーワード (kw) は検索語なので、「は な さくせい めい ほけん」のように分かち書きが崩れたものや、LP や参照と内容が合わないもの (「東京 銀座 バイト」に対して実際の広告が池袋の求人) も混じるので、実際の広告の低さには、キーワードと広告が合わない組の影響も含まれる。件数も 120 件なので、細かな差は読み取らない。
+- データは CAMERA (CyberAgent、CC BY-NC-SA 4.0)。非商用に限られ、改変したものも同じライセンスで公開する必要がある。商用の広告文生成のモデルの学習や評価には使えない。ここでは LP の画像を含まない without-lp-images のテストデータ (872 件) の parquet だけを読み込んでいる。モデルは sarashina2.2 (SB Intuitions、MIT ライセンス) で、T4 と同じ float16 で実行したとき GPU メモリを最大 10.8 GB 使った。トークナイザーの修正については、この章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書きを参照。
+
 ## LLM を 4bit 量子化して少ないメモリで動かす {llm_4bit gpu norun}
 
 7B クラスのモデルを Colab の T4 GPU (16GB) で余裕を持って動かしたい。
@@ -1714,69 +1948,46 @@ print(pd.DataFrame(T > th).replace({True: "AI", False: "人"}).set_index(pd.Inde
 - 生成の条件を変えると、尤度にもとづく方法は大きく崩れた。温度 1.0 では、パープレキシティが 0.566、Fast-DetectGPT が 0.580 になった (温度 1.0 の文は英字の混じる割合が 0.66 と高く、崩れた文も多い)。別のモデルの文では、それぞれ 0.455 と 0.440 で、0.5 を下回った (人の文のほうが AI らしく見える)。言い換え (Qwen2.5 1.5B に書き直させたもの) では、それぞれ 0.546 と 0.540、Binoculars も 0.892 に下がった。各条件 100 件なので AUC には ±0.05 程度の幅がある。Krishna et al. (2023) は、言い換え用のモデルで書き直すだけで、DetectGPT を含む複数の検出器をすり抜けられることを示している。
 - 人の文章を AI と誤判定する危険がある。Wikipedia の人の文の 5% を誤判定するしきい値で、筆者が書いた 150 字の文 5 つを判定すると、事務所移転の通知と利用規約のような定型文は、5 つの方法すべてで AI と判定された。やさしい語彙の短い文の連続 (日本語学習者の作文を模したもの) と挨拶文は、2 つの分類器だけが AI と判定した。これは「です・ます」や敬語で書かれているためである。英語では、非母語話者の作文が AI と誤判定されやすいことが報告されている (Liang et al., 2023)。数例の結果だが、検出器の出力だけを根拠に、人が不正をしたと判断してはいけない。
 - 人の文章には Wikipedia のダンプの先頭 200 記事を使った。よく知られた項目が多く、Wikipedia は多くの言語モデルの学習データに含まれるので、モデルが記憶していて人の文なのに尤度が高く出ることがある。長さや括弧書きのような表面的な違いで見分けないよう、両方から括弧書きを除き、同じ文字数にそろえた。
-- sarashina2.2 のトークナイザーは、この章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書きのとおりに直して使う。生成する側が協力できるなら、この章の「LLM の出力に透かしを入れ、あとから統計的に検出する」のように、生成時に透かしを埋め込み、後から検出する方法もある。
+- sarashina2.2 のトークナイザーは、この章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書きのとおりに直して使う。生成する側が協力できるなら、この章の「LLM の出力に透かしを入れて検出する (transformers の WatermarkingConfig と SynthID)」のように、生成時に透かしを埋め込み、後から検出する方法もある。
 
-## LLM の出力に透かしを入れ、あとから統計的に検出する {llm_watermark gpu}
+## LLM の出力に透かしを入れて検出する (transformers の WatermarkingConfig と SynthID) {llm_watermark gpu}
 
-LLM が生成した文章に、読んでもわからない「透かし」(ウォーターマーク) を入れておき、あとから文章だけを見て、自分のモデルが生成したものかを統計的に判定したい。
+自分たちが公開する LLM の生成文に、読んでもわからない「透かし」(ウォーターマーク) を入れておき、あとから文章だけを見て、自分のモデルが生成したものかを判定したい。transformers に組み込みの透かしと検出器を使い、検出のしやすさ、文章の質、短い文章や言い換えへの強さを確かめる。
 
 ```python
-# Colab の T4 で 2 分程度
+# Colab の T4 で 2〜3 分程度 (モデルのダウンロードを含む)
 import math
 import re
 import numpy as np
 import pandas as pd
 import sentencepiece as spm
 import torch
+import transformers
 from huggingface_hub import hf_hub_download
 from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
+from transformers import AutoModelForCausalLM, AutoTokenizer, WatermarkDetector, WatermarkingConfig
 
+print("transformers", transformers.__version__, "/ torch", torch.__version__)   # 検出には、生成時と同じ版で同じ乱数の表を作れることが要る
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 DTYPE = torch.bfloat16 if BF16 else torch.float16
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # SB Intuitions、MIT ライセンス
 
-def fix_sarashina_tokenizer(tokenizer, name):
-    """transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-    元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)"""
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
     sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
     tokenizer.backend_tokenizer.model = models.Unigram(
         [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    tokenizer.padding_side = "left"
     return tokenizer
 
-tokenizer = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(name), name)   # 詳しくはこの章の「オープンな LLM とチャットする」の注意書き
-tokenizer.padding_side = "left"
-model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="cuda").eval()
+tokenizer = load_tokenizer(name)
+model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+DEVICE = model.device
 
-KEY = 15485863   # 透かしの鍵。transformers の WatermarkingConfig の既定値で公開されている値。実際には乱数で選んで秘密にする
-
-def is_green(prev, cur, gamma, key=KEY):
-    """直前のトークン prev と鍵から決まる擬似乱数で、次のトークン cur が green かどうかを決める (語彙の約 γ が green)"""
-    x = (prev * 1_000_003 + cur + key) & 0xFFFFFFFF
-    for _ in range(3):                                   # 整数のハッシュ (ビットをよく混ぜる)
-        x = ((x ^ (x >> 16)) * 0x45D9F3B) & 0xFFFFFFFF
-    return x.double() / 2**32 < gamma
-
-class GreenListWatermark(LogitsProcessor):
-    """green のトークンのロジットに δ を足して、green のトークンを選ばれやすくする"""
-    def __init__(self, gamma, delta):
-        self.gamma, self.delta = gamma, delta
-    def __call__(self, input_ids, scores):
-        vocab = torch.arange(scores.shape[1], device=scores.device)
-        green = is_green(input_ids[:, -1:], vocab[None, :], self.gamma)    # (バッチ, 語彙) の green / red の表
-        return scores + self.delta * green.to(scores.dtype)
-
-def hf_encode(text):
-    return tokenizer(text, add_special_tokens=False)["input_ids"]
-
-def detect(text, gamma, encode=hf_encode):
-    """文章だけから green のトークンの割合を数え、z 検定をする (モデルもプロンプトも要らない。鍵と、生成時と同じトークン化とハッシュが要る)"""
-    ids = torch.tensor(encode(text))
-    T = len(ids) - 1                                    # 最初のトークンは直前のトークンがないので数えない
-    if T < 1:
-        return float("nan")
-    n_green = int(is_green(ids[:-1], ids[1:], gamma).sum())
-    return (n_green - gamma * T) / math.sqrt(T * gamma * (1 - gamma))   # 透かしがなければ、ほぼ標準正規分布に従う
+KEY = 73519   # 透かしの鍵。実際には乱数で選んで秘密にする (hashing_key の既定値 15485863 は公開されているので使わない)
+wm = WatermarkingConfig(greenlist_ratio=0.25, bias=2.0, hashing_key=KEY, seeding_scheme="lefthash")   # greenlist_ratio が γ、bias が δ
 
 TOPICS = ["猫", "富士山", "コーヒー", "地震", "梅雨", "将棋", "新幹線", "お盆", "俳句", "温泉", "桜", "寿司", "台風", "図書館", "自転車",
           "歌舞伎", "火山", "味噌", "電子レンジ", "マラソン", "民泊", "花粉症", "城", "相撲", "お茶", "漫画", "雪", "米作り", "神社", "地下鉄",
@@ -1787,58 +1998,112 @@ prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{t}�
                                          add_generation_prompt=True, tokenize=False) for t in TOPICS]
 
 @torch.no_grad()
-def generate(gamma=0.25, delta=0.0, seed=0, max_new_tokens=200):
+def generate(watermarking_config=None, seed=0, max_new_tokens=200, **kwargs):
     torch.manual_seed(seed)
-    enc = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
-    # generate に渡した処理は、generate が作る温度の処理より前に適用される。温度で割ったあとに δ を足したいので、温度の処理を自分で先に置き、
-    # generate 側は temperature=1.0 にする。モデルの generation_config (temperature 0.7, top_p 0.9, repetition_penalty 1.05) も明示して打ち消す
-    procs = [TemperatureLogitsWarper(0.7)] + ([GreenListWatermark(gamma, delta)] if delta > 0 else [])
-    out = model.generate(**enc, do_sample=True, temperature=1.0, top_p=1.0, top_k=0, repetition_penalty=1.0, max_new_tokens=max_new_tokens,
-                         logits_processor=LogitsProcessorList(procs), pad_token_id=tokenizer.pad_token_id)
+    enc = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(DEVICE)
+    # モデルの generation_config (temperature 0.7, top_p 0.9, repetition_penalty 1.05) のうち温度だけを使い、ほかは打ち消す (top_p は下で比べる)
+    sampling = dict(do_sample=True, temperature=0.7, top_p=1.0, top_k=0, repetition_penalty=1.0) | kwargs
+    out = model.generate(**enc, watermarking_config=watermarking_config, max_new_tokens=max_new_tokens,
+                         pad_token_id=tokenizer.pad_token_id, **sampling)
     gen = out[:, enc["input_ids"].shape[1]:]
     return tokenizer.batch_decode(gen, skip_special_tokens=True), gen
 
-plain, _ = generate()                                      # 透かしなし
-marked, marked_ids = generate(gamma=0.25, delta=2.0)       # 透かしあり (γ = 0.25, δ = 2)
+def encode(texts, tok=tokenizer):
+    return [tok(t, add_special_tokens=False)["input_ids"] for t in texts]
+
+def kgw_z(id_lists, config, device=DEVICE, ignore_repeated_ngrams=True):
+    """文章のトークン列だけから green のトークンの数を数え、z を返す。モデルの重みもプロンプトも要らないが、
+    透かしの設定 (鍵を含む)、語彙数、トークナイザー、デバイスは生成時と同じにする。
+    ignore_repeated_ngrams=True で、同じ n-gram (green を決める文脈と候補の組) は何度出ても 1 回だけ数える
+    (原著の実装 jwkirchenbauer/lm-watermarking が検出で必ず使うよう勧める設定。transformers の既定は False)"""
+    detector = WatermarkDetector(model_config=model.config, device=device, watermarking_config=config,
+                                 ignore_repeated_ngrams=ignore_repeated_ngrams)
+    return np.array([detector(torch.tensor([ids], device=device), return_dict=True).z_score[0] if len(ids) > config.context_width + 1
+                     else np.nan for ids in id_lists])
+
+plain, _ = generate()                     # 透かしなし
+marked, marked_ids = generate(wm)         # 透かしあり (γ = 0.25, δ = 2)
 for label, text in [("透かしなし", plain[0]), ("透かしあり", marked[0])]:
-    print(f"[{label}] z = {detect(text, 0.25):.2f}\n{text[:150]}…\n")
+    print(f"[{label}] z = {kgw_z(encode([text]), wm)[0]:.2f}\n{text[:150]}…\n")
 ```
 
 ```python
-# 60 件ずつの z スコアの分布を比べる。z > 4 なら「透かしあり」と判定する (偶然 z > 4 になる確率は約 3e-5)
-z_plain = np.array([detect(t, 0.25) for t in plain])
-z_marked = np.array([detect(t, 0.25) for t in marked])
+# 60 件ずつの z の分布を比べる。z > 4 なら「透かしあり」と判定する (透かしのない文章が偶然 z > 4 になる確率は約 3e-5)
+z_plain, z_marked = kgw_z(encode(plain), wm), kgw_z(encode(marked), wm)
 print(pd.DataFrame({"透かしなし": z_plain, "透かしあり": z_marked}).describe().round(2).T.to_string())
 print(f"z > 4 の割合: 透かしなし {np.mean(z_plain > 4):.2f} / 透かしあり {np.mean(z_marked > 4):.2f}")
+z_rep = kgw_z(encode(plain), wm, ignore_repeated_ngrams=False)
+print(f"繰り返す n-gram も毎回数える (transformers の既定) と: 透かしなしの z の平均 {z_rep.mean():.2f}, 最大 {z_rep.max():.2f}")
 
-# 生成したトークン列のまま数えると z はもっと高い。文章に直してトークン化し直すと、分割が変わる箇所があり、透かしが弱まる
-def generated_tokens(row):
-    return [i for i in row.tolist() if i not in (tokenizer.pad_token_id, tokenizer.eos_token_id)]
-def z_ids(ids, gamma=0.25):
-    ids = torch.tensor(ids)
-    T = len(ids) - 1
-    return (int(is_green(ids[:-1], ids[1:], gamma).sum()) - gamma * T) / math.sqrt(T * gamma * (1 - gamma))
-
-raw_tokenizer = AutoTokenizer.from_pretrained(name)          # 比較用: 直さない (transformers 5 のまま) トークナイザー
-gen_ids = [generated_tokens(row) for row in marked_ids]
-fixed_ids = [hf_encode(t) for t in marked]
-raw_ids = [raw_tokenizer(t, add_special_tokens=False)["input_ids"] for t in marked]
-z_raw = np.array([z_ids(i) for i in raw_ids])
-print(f"z の平均: 生成したトークン列 {np.mean([z_ids(g) for g in gen_ids]):.2f} / 直したトークナイザー {z_marked.mean():.2f} / transformers 5 のまま {z_raw.mean():.2f}")
+# 検出は文章をトークン化し直して行う。生成したトークン列のまま数えた場合や、直さない (transformers 5 のまま) トークナイザーと比べる
+gen_ids = [[i for i in row.tolist() if i not in (tokenizer.pad_token_id, tokenizer.eos_token_id)] for row in marked_ids]
+raw_ids = encode(marked, AutoTokenizer.from_pretrained(name))
+z_raw = kgw_z(raw_ids, wm)
+print(f"z の平均: 生成したトークン列 {np.nanmean(kgw_z(gen_ids, wm)):.2f} / 直したトークナイザー {z_marked.mean():.2f} / transformers 5 のまま {z_raw.mean():.2f}")
 print(f"z > 4 の割合: 直したトークナイザー {np.mean(z_marked > 4):.2f} / transformers 5 のまま {np.mean(z_raw > 4):.2f}")
-print(f"生成と同じトークン列に戻った文章の割合: 直したトークナイザー {np.mean([g == f for g, f in zip(gen_ids, fixed_ids)]):.2f}"
+print(f"生成と同じトークン列に戻った文章の割合: 直したトークナイザー {np.mean([g == f for g, f in zip(gen_ids, encode(marked))]):.2f}"
       f" / transformers 5 のまま {np.mean([g == r for g, r in zip(gen_ids, raw_ids)]):.2f}")
-j = next(j for j, (g, f) in enumerate(zip(gen_ids, fixed_ids)) if g != f)       # 直しても同じ列に戻らない文章の例
-k = next(i for i, (a, b) in enumerate(zip(gen_ids[j], fixed_ids[j])) if a != b)
-print("生成:", tokenizer.convert_ids_to_tokens(gen_ids[j][k - 2:k + 4]), "\nトークン化し直し:", tokenizer.convert_ids_to_tokens(fixed_ids[j][k - 2:k + 4]))
+
+# 設定やデバイスが生成時と違うと、green の表が変わって検出できない
+print(f"鍵が違う: z の平均 {kgw_z(encode(marked[:20]), WatermarkingConfig(greenlist_ratio=0.25, bias=2.0, hashing_key=KEY + 1)).mean():.2f}")
+print(f"CPU で検出 (生成は {DEVICE}): z の平均 {kgw_z(encode(marked[:20]), wm, device='cpu').mean():.2f}")
 ```
 
 ```python
-# δ と γ を変えて、検出のしやすさと文章の質 (大きなモデルで測ったパープレキシティ) の釣り合いを見る。Colab の T4 で 5〜10 分程度 (3B のモデルのダウンロードを含む)
-oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価用の大きなモデル (SB Intuitions、MIT ライセンス)
-oracle_tok = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(oracle_name), oracle_name)
-oracle_tok.padding_side = "left"
-oracle = AutoModelForCausalLM.from_pretrained(oracle_name, dtype=DTYPE, device_map="cuda").eval()
+# 透かしの強さ (δ、γ、方式) と、検出のしやすさ・文章の質 (大きなモデルで測ったパープレキシティ) の釣り合いを見る。
+# 幅 (context_width) の意味は方式で違う (transformers 5.22.1 の実装): selfhash では候補のトークン自身を含む末尾の「幅」個のトークンから
+# green が決まる (幅 4 なら直前の 3 トークン + 候補)。lefthash では幅を変えても直前の 1 トークンしか使わない。
+# SynthID Text (Google DeepMind) も同じ条件で比べる。Colab の T4 で 10〜15 分程度 (3B のモデルのダウンロードを含む)
+from transformers import SynthIDTextWatermarkingConfig
+
+# 鍵は 20 個 (深さ 20)。実際には大きな乱数を選んで秘密にする
+synthid = SynthIDTextWatermarkingConfig(keys=np.random.default_rng(KEY).integers(0, 2**31, size=20).tolist(), ngram_len=5)
+
+def synthid_z(id_lists, config=synthid, device=DEVICE):
+    """SynthID の g 値 (直前の 4 トークン、候補のトークン、鍵から決まる 0/1) の平均を z にする。透かしがなければ g はほぼ確率 0.5 で 1。
+    transformers の SynthIDTextWatermarkDetector は学習したベイズ検出器を使うので、ここでは学習の要らない平均値の検定にした"""
+    proc = config.construct_processor(model.config.vocab_size, device)
+    p = proc.sampling_table.float().mean().item()            # g が 1 になる確率 (乱数の表から決まる)
+    zs = []
+    for ids in id_lists:
+        x = torch.tensor([ids], device=device)
+        if x.shape[1] <= config.ngram_len:
+            zs.append(np.nan)
+            continue
+        g = proc.compute_g_values(x)[0].float()               # (n-gram の数, 鍵の数)
+        g = g[proc.compute_context_repetition_mask(x)[0]]      # 同じ文脈の繰り返しは、生成時に透かしを入れていないので数えない
+        zs.append((g.mean().item() - p) / math.sqrt(p * (1 - p) / g.numel()))
+    return np.array(zs)
+
+def kgw(gamma=0.25, delta=2.0, scheme="lefthash", width=1):
+    return WatermarkingConfig(greenlist_ratio=gamma, bias=delta, hashing_key=KEY, seeding_scheme=scheme, context_width=width)
+
+def detector_for(config):
+    """生成の設定に合った検出の関数を返す。透かしなし (None) の文章は、γ=0.25 δ=2 の検出器で測る"""
+    if isinstance(config, SynthIDTextWatermarkingConfig):
+        return synthid_z
+    return lambda ids: kgw_z(ids, config or wm)
+
+settings = {   # 名前: (生成の設定, generate に渡す追加の引数)
+    "なし": (None, {}),
+    "KGW γ=0.25 δ=1": (kgw(delta=1.0), {}),
+    "KGW γ=0.25 δ=2": (wm, {}),
+    "KGW γ=0.25 δ=4": (kgw(delta=4.0), {}),
+    "KGW γ=0.25 δ=8": (kgw(delta=8.0), {}),
+    "KGW γ=0.5 δ=2": (kgw(gamma=0.5), {}),
+    "KGW γ=0.25 δ=2 selfhash 幅4": (kgw(scheme="selfhash", width=4), {}),
+    "KGW γ=0.25 δ=2 top_p=0.9": (wm, {"top_p": 0.9}),
+    "SynthID": (synthid, {}),
+}
+texts_by = {"なし": plain, "KGW γ=0.25 δ=2": marked}
+for label, (config, kwargs) in settings.items():       # 先に 0.5B のモデルで全部生成してから、3B のモデルを読み込む (GPU メモリを節約する)
+    if label not in texts_by:
+        texts_by[label] = generate(config, **kwargs)[0]
+print(f"生成までの GPU メモリの最大: {torch.cuda.max_memory_reserved() / 1e9:.1f} GB")
+
+oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価と言い換え用の大きなモデル (SB Intuitions、MIT ライセンス)
+oracle_tok = load_tokenizer(oracle_name)
+oracle = AutoModelForCausalLM.from_pretrained(oracle_name, dtype=DTYPE, device_map="auto").eval()
 
 @torch.no_grad()
 def perplexity(prompt, text):
@@ -1850,25 +2115,31 @@ def perplexity(prompt, text):
     return math.exp(-logp.gather(1, ids[0, p.shape[1]:, None]).mean().item())
 
 rows = []
-for gamma, delta in [(0.25, 0.0), (0.25, 1.0), (0.25, 2.0), (0.25, 4.0), (0.25, 8.0), (0.5, 1.0), (0.5, 2.0), (0.5, 4.0), (0.5, 8.0)]:
-    texts = plain if delta == 0 else marked if (gamma, delta) == (0.25, 2.0) else generate(gamma, delta)[0]
-    z = np.array([detect(t, gamma) for t in texts])
+for label, (config, kwargs) in settings.items():
+    texts = texts_by[label]
+    detect = detector_for(config)
+    z, z_null = detect(encode(texts)), detect(encode(plain))      # 同じ検出器で、透かしのない文章を誤検出しないかも見る
     ppl = np.array([perplexity(p, t) for p, t in zip(prompts, texts)])
-    rows.append({"γ": gamma, "δ": delta, "z の平均": z.mean(), "z の最小": z.min(), "z>4 の割合": np.mean(z > 4), "PPL の中央値": np.median(ppl),
-                 "英単語を含む割合": np.mean([bool(re.search(r"[A-Za-z]{3,}", t)) for t in texts]), "例": texts[1][:30]})
+    rows.append({"透かし": label, "z の平均": z.mean(), "z の最小": z.min(), "z>4 の割合": np.mean(z > 4),
+                 "透かしなしで z>4": np.mean(z_null > 4), "PPL の中央値": np.median(ppl), "例": texts[1][:25]})
 print(pd.DataFrame(rows).round(2).to_string(index=False))
+# selfhash を既定の幅 1 で使うと、green かどうかが各トークンだけで決まってしまう。透かしのない文章で確かめる
+for ignore in [False, True]:
+    z_null = kgw_z(encode(plain), kgw(scheme="selfhash"), ignore_repeated_ngrams=ignore)
+    print(f"selfhash 幅1 の検出器 (ignore_repeated_ngrams={ignore}) に透かしなしの文章を入れると: z の平均 {z_null.mean():.2f}, z>4 の割合 {np.mean(z_null > 4):.2f}")
 ```
 
 ```python
-# 頑健さ (1): 文章を短くする。同じ green の割合でも、トークン数 T が少ないと z (∝ √T) が小さく、検出できない
+# 頑健さ (1): 文章を短くする。green の割合が同じでも、数えるトークン数 T が少ないと z (∝ √T) が小さく、検出できない
+detectors = {k: detector_for(settings[k][0]) for k in ["KGW γ=0.25 δ=2", "SynthID"]}
 for n_chars in [25, 50, 100, 200, None]:
-    z = np.array([detect(t[:n_chars], 0.25) for t in marked])
-    n_tok = np.mean([len(tokenizer(t[:n_chars], add_special_tokens=False)["input_ids"]) for t in marked])
-    print(f"先頭 {n_chars or '全部'} 文字 (平均 {n_tok:.0f} トークン): z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
+    n_tok = np.mean([len(ids) for ids in encode([t[:n_chars] for t in marked])])
+    res = [f"{k} z>4 の割合 {np.mean(f(encode([t[:n_chars] for t in texts_by[k]])) > 4):.2f}" for k, f in detectors.items()]
+    print(f"先頭 {n_chars or '全部'} 文字 (KGW の文章で平均 {n_tok:.0f} トークン): " + " / ".join(res))
 ```
 
 ```python
-# 頑健さ (2): 透かしのない別のモデル (3B) で、文を 1 つずつ言い換える。全体の半分の文だけ言い換えた場合と、全部言い換えた場合を比べる。T4 で 3〜5 分
+# 頑健さ (2): 透かしのない別のモデル (3B) で、文を 1 つずつ言い換える。半分の文だけ言い換えた場合と、全部言い換えた場合を比べる。T4 で 5〜8 分程度
 @torch.no_grad()
 def paraphrase(sentences, batch_size=32):
     outs = []
@@ -1880,43 +2151,31 @@ def paraphrase(sentences, batch_size=32):
         outs += [s.strip().split("\n")[0] for s in oracle_tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
     return outs
 
-split = [re.findall(r"[^。]+。?", t) for t in marked]                # 句点で文に分ける
-flat = [s for ss in split for s in ss]
-para = iter(paraphrase(flat))
-para_split = [[next(para) for _ in ss] for ss in split]
-half = ["".join(p if i % 2 else s for i, (s, p) in enumerate(zip(ss, ps))) for ss, ps in zip(split, para_split)]   # 2 文目、4 文目… だけ言い換える
-full = ["".join(ps) for ps in para_split]
-print("元の文章:", marked[2][:100], "\n全部言い換え:", full[2][:100])
-for label, texts in [("言い換えなし", marked), ("半分の文を言い換え", half), ("全部の文を言い換え", full), ("(参考) 透かしなし", plain)]:
-    z = np.array([detect(t, 0.25) for t in texts])
-    print(f"{label}: z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
+def attack(texts):
+    split = [re.findall(r"[^。]+。?", t) for t in texts]          # 句点で文に分ける
+    para = iter(paraphrase([s for ss in split for s in ss]))
+    para_split = [[next(para) for _ in ss] for ss in split]
+    half = ["".join(p if i % 2 else s for i, (s, p) in enumerate(zip(ss, ps))) for ss, ps in zip(split, para_split)]   # 2 文目、4 文目… だけ
+    return half, ["".join(ps) for ps in para_split]
+
+detectors["KGW γ=0.25 δ=2 selfhash 幅4"] = detector_for(settings["KGW γ=0.25 δ=2 selfhash 幅4"][0])
+rows = []
+for k, f in detectors.items():
+    half, full = attack(texts_by[k])
+    if k == "KGW γ=0.25 δ=2":
+        print("元の文章:", texts_by[k][2][:100], "\n全部言い換え:", full[2][:100], "\n")
+    for label, texts in [("言い換えなし", texts_by[k]), ("半分の文を言い換え", half), ("全部の文を言い換え", full), ("(参考) 透かしなし", plain)]:
+        z = f(encode(texts))
+        rows.append({"透かし": k, "文章": label, "z の平均": z.mean(), "z>4 の割合": np.mean(z > 4)})
+print(pd.DataFrame(rows).round(2).to_string(index=False))
+print(f"GPU メモリの最大使用量: テンソル {torch.cuda.max_memory_allocated() / 1e9:.1f} GB / PyTorch が確保した領域 {torch.cuda.max_memory_reserved() / 1e9:.1f} GB")
 ```
 
-```python
-# transformers に組み込みの透かし (WatermarkingConfig) と検出器 (WatermarkDetector)。鍵の値は同じだが green の決め方が違うので、互いに検出できない
-from transformers import WatermarkDetector, WatermarkingConfig
-
-wm_config = WatermarkingConfig(bias=2.0, greenlist_ratio=0.25, seeding_scheme="lefthash")   # bias が δ、greenlist_ratio が γ
-torch.manual_seed(0)
-enc = tokenizer(prompts[:20], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
-out = model.generate(**enc, watermarking_config=wm_config, do_sample=True, temperature=0.7, top_p=1.0, top_k=0, repetition_penalty=1.0,
-                     max_new_tokens=200, pad_token_id=tokenizer.pad_token_id)
-builtin = tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
-
-detector = WatermarkDetector(model_config=model.config, device=model.device, watermarking_config=wm_config)   # 生成と同じデバイスで (乱数がデバイスで変わる)
-def builtin_z(texts):
-    return np.array([detector(torch.tensor([tokenizer(t, add_special_tokens=False)["input_ids"]], device=model.device), return_dict=True).z_score[0] for t in texts])
-print(f"組み込みの透かし → 組み込みの検出器: z の平均 {builtin_z(builtin).mean():.2f} / 自作の検出器: {np.mean([detect(t, 0.25) for t in builtin]):.2f}")
-print(f"自作の透かし     → 組み込みの検出器: z の平均 {builtin_z(marked[:20]).mean():.2f} / 自作の検出器: {z_marked[:20].mean():.2f}")
-print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
-```
-
-
-
-- Kirchenbauer らの方法 (Kirchenbauer et al., 2023, "A Watermark for Large Language Models")。検出には、鍵と、生成時と同じトークン化とハッシュの方式があればよく、モデルもプロンプトも要らない。z が 4 を超えたら透かしありとする (論文の基準。透かしのない文章が偶然超える確率は約 3e-5)。原論文は直前のトークンのハッシュを乱数の種にして green のトークンを γ|V| 個選ぶが、ここでは (直前のトークン, 次のトークン, 鍵) のハッシュ値で直接決める簡略版にした (green の数は平均して γ|V|)。
-- 60 件 (約 200 トークン) で、透かしなしの z は平均 0.15 (最大 2.33)、γ = 0.25、δ = 2 の透かしありは平均 5.32 で、z > 4 は 88% だった。60 件なので、割合には ±10 ポイント余りの幅がある。
-- 検出は文章をトークン化し直して行うので、生成時と分割が同じでないと透かしが弱まる。sarashina2.2 のトークナイザーを transformers 5 のまま使うと分割が大きく変わり (この章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書き)、z の平均は 3.86、z > 4 は 45% まで下がった。直したトークナイザーでは 5.32 で、生成したトークン列のままの 5.43 とほとんど変わらない。それでも同じトークン列に戻ったのは 43% で (「読み取り / やすい」→「を読み / 取りやすい」のように、同じ文字列に分割が複数ありうる)、その分だけ目減りは残る。
-- δ を大きくすると検出しやすくなるが、文章の質が落ちる。γ = 0.25 で δ を 0, 1, 2, 4, 8 と上げると、z の平均は 0.15, 2.57, 5.32, 11.29, 18.33、3B のモデルで測ったパープレキシティの中央値は 9.5, 10.6, 11.4, 23.2, 82.6 になった。同じ δ では γ = 0.25 のほうが γ = 0.5 より z が高い。パープレキシティは同じ系列のモデルで測ったので、目安と考える。
-- 短い文章では検出できない。z は green の割合が同じでも √T に比例するので、先頭 100 文字 (約 44 トークン) に切ると z > 4 は 7%、200 文字 (約 89 トークン) で 35% だった。また、次のトークンがほぼ決まっている箇所 (エントロピーが低い箇所) では、δ を足しても選ばれるトークンが変わらず、透かしが入りにくい (原論文)。
-- 言い換えに弱い。透かしのない 3B のモデルで半分の文を言い換えると z の平均は 3.35 (z > 4 は 27%)、全部だと 1.03 (2%) になった。上の例のように元の語句を多く残していても、隣り合うトークンの組が変われば判定も変わる。同じグループの続編の研究 (Kirchenbauer et al., ICLR 2024) は、言い換えた文章にも元の断片が残るので、長くすれば検出できると報告している (人が強く言い換えた場合で、偽陽性率 1e-5 には平均 800 トークン程度)。透かしの入っていない文章を、文章の統計だけで見分ける方法は、この章の「LLM が生成した文章を見分ける (パープレキシティ、Binoculars、分類器)」を参照。
-- transformers には同じ方式の `WatermarkingConfig` / `WatermarkDetector` が組み込まれている (SynthID Text 用の `SynthIDTextWatermarkingConfig` もある)。上の `KEY` は `hashing_key` の既定値と同じだが、green の決め方が違うので互いに検出できない (z の平均 0.15 と −0.32)。透かしは生成する側が協力して入れておく仕組みで、生成した側の協力なしに AI が書いた文章かどうかを推定する方法とは別物である。
+- Kirchenbauer らの方式 (Kirchenbauer et al., 2023, "A Watermark for Large Language Models")。直前のトークンと鍵から語彙の γ を「green」に選び、そのロジットに δ を足して生成する。検出には鍵と設定とトークナイザーがあればよく、モデルの重みもプロンプトも要らない。`generate(watermarking_config=...)` で透かしを入れ、`WatermarkDetector` が green の数から z を計算する (`prediction` の既定のしきい値は z > 3 で、透かしのない文章が偶然超える確率は約 1e-3。ここでは原論文にならって z > 4 にした)。検出では `ignore_repeated_ngrams=True` を付け、同じ n-gram を何度も数えないようにした (原著の実装 jwkirchenbauer/lm-watermarking の README が「検出では必ず使う」と勧める設定で、transformers の既定は False)。60 件 (約 200 トークン) で、透かしなしの z は平均 −0.08 (最大 2.87)、γ = 0.25、δ = 2 の透かしありは平均 5.16 で、z > 4 は 83% だった (繰り返しも数える既定のままだと、透かしなしは平均 −0.28、最大 2.29)。60 件なので、割合には ±10 ポイント程度の幅がある。
+- 検出の条件は生成時とそろえる。鍵を 1 つ変えると z の平均は −0.58、GPU で生成した文章を CPU で検出すると 0.24 になり、まったく検出できなかった (green の表を `torch.Generator` の乱数で作るので、デバイスで変わる)。CPU と GPU の違いしか確かめておらず、GPU の種類が違う場合 (たとえば T4 と A5000) に同じ表になるかは確かめていない。上の数値も、GPU によって変わりうる。鍵は秘密にし、transformers と torch の版も記録して固定しておく (版を変えても同じ表になるかも確かめていない)。トークナイザーも同じにする: sarashina2.2 のトークナイザーを直さずに使うと z の平均は 3.91、z > 4 は 50% まで下がった (直し方は、この章の「オープンな LLM とチャットする (チャットテンプレート)」の注意書きを参照)。直したトークナイザーでは 5.16 で、生成したトークン列のままの 5.24 とほとんど変わらないが、同じトークン列に戻った文章は 58% で、同じ文字列に分割が複数ありうる分だけ目減りは残る。
+- δ を大きくすると検出しやすくなるが、文章の質が落ちる。γ = 0.25 で δ を 0, 1, 2, 4, 8 と上げると、z の平均は −0.08, 2.15, 5.16, 10.54, 17.02、3B のモデルで測ったパープレキシティの中央値は 9.5, 10.1, 12.0, 20.3, 78.5 になった (同じ系列のモデルで測ったので目安)。δ = 1 では z > 4 は 5% で、200 トークンではほとんど検出できない。γ = 0.5 は γ = 0.25 より z が低かった (4.47)。transformers では (5.22.1 で確認) 透かしの処理が top_p などの絞り込みのあとにかかるので、モデルの既定の top_p = 0.9 のまま生成すると、δ = 2 でも z の平均は 4.04 (z > 4 は 57%) に下がった。この設定のパープレキシティ (8.3) が透かしなし (9.5) より低いのは top_p で候補を絞った効果で、透かしのコストとは比べられない。
+- `seeding_scheme="selfhash"` は名前が同じでも、原著の実装と transformers で中身が違う。原著の README は幅 (context width) h = 4 を勧め、`selfhash` を幅 4 の方式の略称としている。transformers の `selfhash` は既定が `context_width=1` で、そのままだと green かどうかが各トークンだけで決まる。そのため、繰り返しも数える既定の検出器では、透かしのない文章でも z の平均が 3.65、z > 4 が 40% になった (`ignore_repeated_ngrams=True` にすると 0.49 と 0%)。selfhash を使うなら `context_width=4` を明示する (候補のトークン自身を含む 4 トークンから green が決まる。lefthash では幅を変えても直前の 1 トークンしか使わない)。幅 4 では、透かしのない文章の z > 4 は 0 (ただし z の平均は 0.90 とやや高い)、透かしありは z の平均 6.29 (z > 4 は 93%)、パープレキシティの中央値 10.5 だった。候補を 1 つずつ確かめながら生成するので、lefthash より生成が遅い。
+- SynthID Text (Dathathri et al., 2024, Nature, Google DeepMind) は、直前の数トークン、候補のトークン、複数の鍵から決まる 0/1 の値 (g 値) が大きいトークンを、トーナメント方式の抽出で選ぶ。ここでは z の平均 7.63 (z > 4 は 100%) と検出しやすく、パープレキシティの中央値も 9.5 で、透かしなし (9.5) とほとんど変わらなかった。transformers の公式の検出器 `SynthIDTextWatermarkDetector` は、学習したベイズ検出器 (`BayesianDetectorModel`) を使う。学習の手順は transformers-research-projects リポジトリにあり、ここでは代わりに、g 値の平均の検定を小さな関数で書いた。transformers の実装はハッシュの方式が Gemini アプリのものと違うので (ソースコードのコメント)、Gemini の出力の検出には使えない。
+- 短い文章では検出できない。z は green の割合が同じでも √T に比例するので、先頭 100 文字 (約 44 トークン) に切ると z > 4 は KGW (δ = 2) で 5%、SynthID で 33%、200 文字 (約 88 トークン) で 17% と 83% だった。また、次のトークンがほぼ決まっている箇所 (エントロピーが低い箇所) には透かしが入りにくい (Kirchenbauer らの原論文)。
+- 言い換えに弱い。透かしのない 3B のモデルで半分の文を言い換えると、z > 4 は KGW (lefthash、幅 1) で 32%、SynthID で 58%、selfhash 幅 4 で 77%、全部の文を言い換えると 2%、0%、15% になった。同じグループの続編の研究 (Kirchenbauer et al., ICLR 2024, "On the Reliability of Watermarks for Large Language Models") は、言い換えた文章にも元の断片が残るので、長くすれば検出できると報告している。透かしは生成する側が協力して入れておく仕組みで、透かしのない文章を文章の統計だけで見分ける方法は、この章の「LLM が生成した文章を見分ける (パープレキシティ、Binoculars、分類器)」を参照。
+- transformers は Apache-2.0 ライセンスで、Colab に入っている版をそのまま使った (検証は 5.22.1)。透かしの仕組み (green の選び方と z 検定) を自分で実装して確かめる版は、付録「仕組みを理解するための実装」の「LLM の出力に入れる透かし (green リスト) を自分で実装し、統計的に検出する」にある。

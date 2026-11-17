@@ -1,6 +1,6 @@
 # コーパスの統計と可視化
 
-単語を数える、共起や特徴語を調べる、分布を図にする、文体から書き手を推定する。コーパスを手に入れたらまずやること。
+単語を数える、共起や特徴語を調べる、分布を図にする、文体から書き手を推定する、n-gram 言語モデルでノイズの混じった文を見つける。コーパスを手に入れたらまずやること。
 
 ## 文の長さや文字数の基本統計をとる {corpus_stats}
 
@@ -688,63 +688,149 @@ for i in range(2):
 - 主成分分析の図では、PC1 の + 側 (「に・を・ず・ぬ・より」) に森鴎外が、- 側 (「だ・から・な・ん・よ・まし」) に宮沢賢治が寄る。PC2 の - 側には、芥川に多い「ばかり・ながら」と、です・ます体の「ませ・です・まし」が混ざっていて、芥川と宮沢賢治が下に来る。漱石・太宰・坂口安吾は重なる (2 成分で分散の 29%)。品詞の構成で作品を比べる方法は、この章の「品詞の分布を調べる・比べる」を参照。
 - 新字新仮名の作品は、底本の段階で表記が現代の字体と仮名遣いに直されている。漢字の割合や「云う / 言う」のような表記の特徴には、作家だけでなく底本や編集方針の違いも混じる。
 
-## n-gram 言語モデルを作ってパープレキシティを測り、文を生成する {ngram_lm}
+## KenLM で n-gram 言語モデルを作り、パープレキシティでコーパスのノイズを見つける {ngram_lm}
 
-古典的な n-gram 言語モデルを学習して、文の「それらしさ」を数値化したい。文も生成してみたい。
+Web から集めたコーパスに混じった、文章になっていない段落 (キーワードの羅列、外国語、記号の繰り返しなど) を、きれいな文章で学習した言語モデルのパープレキシティで見つけて除きたい。
 
 ```python
-!pip install -q fugashi unidic-lite
+# KenLM をビルドする。版をそろえるためにコミットを固定する (Colab で 3〜5 分)
+!apt-get install -y -q libboost-program-options-dev libboost-system-dev libboost-thread-dev libboost-test-dev > /dev/null 2>&1
+!git clone -q https://github.com/kpu/kenlm && cd kenlm && git checkout -q 4cb443e
+# ビルドの出力は build.log に書き、失敗したときだけ末尾を表示する
+!mkdir -p kenlm/build && cd kenlm/build && (cmake .. > build.log 2>&1 && make -j4 lmplz build_binary >> build.log 2>&1 || tail -n 20 build.log)
+!ls kenlm/build/bin
+# Python から使うモジュール。同梱の kenlm.cpp は古い Cython で生成されていて Python 3.13 ではビルドできないので、作り直してから入れる
+!pip install -q cython==3.1.4 && cd kenlm && python -m cython -3 --cplus python/kenlm.pyx -o python/kenlm.cpp && pip install -q .
 ```
 
 ```python
-import io, re, urllib.request, zipfile
+!pip install -q datasets fugashi unidic-lite matplotlib-fontja
+```
+
+```python
+import itertools, re, unicodedata
+from datasets import load_dataset
 from fugashi import Tagger
 
-def aozora(url):
-    with urllib.request.urlopen(url) as r:
-        z = zipfile.ZipFile(io.BytesIO(r.read()))
-    text = z.read(z.namelist()[0]).decode("cp932")
-    text = re.split(r"-{50,}", text)[2].split("底本：")[0]
-    return re.sub(r"《.+?》|［＃.+?］|｜", "", text).replace("\r\n", "\n").strip()
+tagger = Tagger("-Owakati")
 
-tagger = Tagger()
-text = aozora("https://www.aozora.gr.jp/cards/000148/files/789_ruby_5639.zip")
-sents = [[w.surface for w in tagger(s)] for s in re.split(r"(?<=。)|\n", text) if s and s.strip()]
-train, test = sents[:-300], sents[-300:]
-print(len(train), len(test))
+def tokenize(s):
+    """学習と採点で同じ前処理をする: NFKC で正規化して小文字にし、数字を 0 にそろえてから分かち書きする"""
+    s = re.sub(r"\d", "0", unicodedata.normalize("NFKC", s).lower())
+    return tagger.parse(s).strip()
+
+def sentences(text):
+    return [s.strip() for s in re.split(r"(?<=[。！？!?])|\n", text) if s.strip()]
+
+# 「きれいな文章」の見本として日本語 Wikipedia (wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL) の先頭 3,000 記事を使う
+# 100 記事に 1 つは学習に使わず、パープレキシティの基準をとるために残す (Colab で 1〜2 分)
+wiki = load_dataset("wikimedia/wikipedia", "20231101.ja", split="train", streaming=True)
+with open("wiki.txt", "w") as f_train, open("wiki_dev.txt", "w") as f_dev:
+    for i, article in enumerate(itertools.islice(wiki, 3000)):
+        f = f_dev if i % 100 == 0 else f_train
+        for s in sentences(article["text"]):
+            if len(s) >= 10:                   # 見出しなどの短い行は除く
+                f.write(tokenize(s) + "\n")
+!wc -l wiki.txt wiki_dev.txt
+!head -n 3 wiki.txt
 ```
 
 ```python
-from nltk.lm import KneserNeyInterpolated, Laplace, Vocabulary
-from nltk.lm.preprocessing import pad_both_ends, padded_everygram_pipeline
-from nltk.util import ngrams
-
-n = 3
-models = {}
-for name, cls in [("Laplace", Laplace), ("Kneser-Ney", KneserNeyInterpolated)]:
-    data, words = padded_everygram_pipeline(n, train)
-    lm = cls(n, vocabulary=Vocabulary(words, unk_cutoff=2))  # 1 回しか出ない語は <UNK> として学習
-    lm.fit(data)
-    models[name] = lm
-
-def perplexity(lm, sentences):
-    grams = [g for s in sentences for g in ngrams(pad_both_ends(lm.vocab.lookup(s), n=n), n)]
-    return lm.perplexity(grams)
-
-for name, lm in models.items():
-    print(f"{name:11} テスト PPL = {perplexity(lm, test[:100]):.1f}")
+# 5-gram の言語モデルを学習する (修正 Kneser-Ney 平滑化)。-S は使うメモリの上限、--prune 0 1 1 1 は 2-gram 以上で 1 回しか出ないものを捨てる
+!kenlm/build/bin/lmplz -o 5 -S 2G --prune 0 1 1 1 < wiki.txt > wiki.arpa 2> lmplz.log
+!kenlm/build/bin/build_binary wiki.arpa wiki.bin > /dev/null 2>&1
+!ls -lh wiki.arpa wiki.bin
+!sed -n 1,8p wiki.arpa
 ```
 
 ```python
-lm = models["Kneser-Ney"]
-for s in ["吾輩は猫である。", "猫は吾輩である。", "である猫吾輩は。"]:
-    print(f"{perplexity(lm, [[w.surface for w in tagger(s)]]):10.1f}  {s}")
+import kenlm
 
-for seed in range(3):
-    out = lm.generate(30, text_seed=["<s>", "<s>"], random_seed=seed)
-    print("".join(w for w in out if w not in ("<s>", "</s>")))
+lm = kenlm.Model("wiki.bin")
+
+def ppl_tok(toks):
+    """分かち書き済みの文の列のパープレキシティ。文ごとの log10 確率を足し、文末記号 </s> を含むトークン数で割る"""
+    logp = sum(lm.score(t) for t in toks)          # lm.score は文頭・文末の記号 <s> </s> を自動で付ける
+    n = sum(len(t.split()) + 1 for t in toks)
+    return 10 ** (-logp / n)
+
+def ppl(sents):
+    return ppl_tok([tokenize(s) for s in sents])
+
+dev = [line.strip() for line in open("wiki_dev.txt")]   # 前処理済み
+print(f"{lm.order}-gram、Wikipedia の残しておいた {len(dev)} 文の PPL = {ppl_tok(dev):.1f}")
+for s in ["吾輩は猫である。", "猫は吾輩である。", "である猫吾輩は。", "東京都は日本の首都である。", "SampleGallery SampleGallery SampleGallery"]:
+    print(f"{ppl([s]):10.1f}  {s}")
+
+# トークンごとの log10 確率、使われた n-gram の長さ、未知語かどうか
+for s in ["推しのアクスタを買ったけど草", "그렇게 많은 오늘이"]:
+    t = tokenize(s)
+    print(" ".join(f"{w}({logp:.1f},{n}{',未知語' if oov else ''})" for w, (logp, n, oov) in zip(t.split() + ["</s>"], lm.full_scores(t))))
 ```
 
-- 未知語があると確率 0 (PPL = ∞) になるので、低頻度語を `<UNK>` に置き換えて学習する (`unk_cutoff`)。
-- スムージングで未知の n-gram の確率を 0 にしないのが肝。加算 (Laplace) より Kneser-Ney のほうがずっと良い (PPL が低い)。
-- 本格的に使うなら KenLM (高速・省メモリ)。ニューラル言語モデルのパープレキシティは Transformers の基本操作の章を参照。
+```python
+import pandas as pd
+
+# 採点する Web コーパス: mC4 の日本語 (allenai/c4 の multilingual、ODC-BY。Common Crawl の利用規約にも従う) の検証用の 1 ファイル (約 40MB)
+web = load_dataset("allenai/c4", data_files="multilingual/c4-ja-validation.tfrecord-00000-of-00008.json.gz", split="train")
+
+# CCNet と同じく段落 (改行で区切られた行) ごとにパープレキシティを計算する (Colab で 1 分ほど)
+rows = []
+for doc_id, doc in enumerate(web.select(range(3000))):
+    for para in doc["text"].split("\n"):
+        if toks := [tokenize(s) for s in sentences(para)]:
+            rows.append((doc_id, para, sum(len(t.split()) + 1 for t in toks), ppl_tok(toks)))
+df = pd.DataFrame(rows, columns=["doc", "text", "tokens", "ppl"])
+d = df[df["tokens"] >= 10]           # 短い段落は値がばらつくので、以下では 10 トークン以上の段落だけを見る
+print(len(web), "文書のうち 3000 文書、", len(df), "段落 (10 トークン以上は", len(d), "段落)")
+d["ppl"].describe(percentiles=[0.1, 0.33, 0.5, 0.66, 0.9, 0.99]).round(1)
+```
+
+```python
+import matplotlib.pyplot as plt
+import matplotlib_fontja
+import numpy as np
+
+pd.set_option("display.max_colwidth", 70)
+ax = np.log10(d["ppl"]).hist(bins=60)
+ax.set_xlabel("log10 パープレキシティ"); ax.set_ylabel("段落数 (10 トークン以上)"); plt.show()
+
+print("PPL が最も高い段落"); display(d.nlargest(12, "ppl")[["ppl", "text"]].round(0))
+print("PPL が最も低い段落"); display(d.nsmallest(8, "ppl")[["ppl", "text"]].round(1))
+```
+
+```python
+# CCNet のように、PPL の三分位で head (Wikipedia に近い)・middle・tail に分け、無作為に 6 段落ずつ見る
+q1, q2 = d["ppl"].quantile([1 / 3, 2 / 3])
+d = d.assign(bucket=pd.cut(d["ppl"], [0, q1, q2, np.inf], labels=["head", "middle", "tail"]))
+print(f"三分位の境界: {q1:.0f}, {q2:.0f}")
+for b, g in d.groupby("bucket", observed=True):
+    print(f"--- {b}")
+    for _, r in g.sample(6, random_state=0).iterrows():
+        print(f"{r.ppl:9.0f}  {r.text[:60]}")
+```
+
+```python
+# 除く: 上位 10% (PPL が高い側) を捨てる。境界のすぐ内側と外側を目で確かめてから閾値を決める
+th = d["ppl"].quantile(0.9)
+removed = d["ppl"] > th
+print(f"閾値 PPL = {th:.0f}、除く段落 {removed.sum()} / {len(d)}")
+print(f"段落の平均の文字数: 除く段落 {d.loc[removed, 'text'].str.len().mean():.0f}、残す段落 {d.loc[~removed, 'text'].str.len().mean():.0f}")
+print("--- 境界のすぐ外側 (除かれる)")
+for _, r in d[removed].nsmallest(8, "ppl").iterrows():
+    print(f"{r.ppl:9.0f}  {r.text[:60]}")
+print("--- 境界のすぐ内側 (残る)")
+for _, r in d[~removed].nlargest(8, "ppl").iterrows():
+    print(f"{r.ppl:9.0f}  {r.text[:60]}")
+clean = df[~df.index.isin(d.index[removed])]
+print(f"文字数: {df['text'].str.len().sum():,} → {clean['text'].str.len().sum():,}")
+```
+
+- CCNet (Wenzek ら 2020) の言語モデルによる絞り込みにならった。CCNet は言語ごとに Wikipedia で SentencePiece と 5-gram の Kneser-Ney モデル (KenLM) を学習し、Web のテキストをパープレキシティの三分位で head・middle・tail に分ける。論文は段落ごとに計算すると書いているが、公開コード (facebookresearch/cc_net) は段落のスコアを文書ごとに合算し、文書を分けている。ここでは段落ごとに見る。分かち書きは fugashi にし、小文字化と数字の 0 への置き換えは公開コードの正規化をまねた。論文は、tail にも用途によっては役立つ文章があるとして、パープレキシティで捨てることまではしていない。
+- 最も PPL が高い段落は、タイ文字の結合記号の繰り返し、「SampleGallery」の繰り返し、ベトナム語や韓国語の文、英単語の羅列だった。mC4 はページ単位で言語を判定しているので、日本語とされたページにこうした段落が混じる。この例では韓国語の語はすべて未知語になった。一方で、閾値のすぐ内側にはロシア語のスパムや英語の文が残った。外国語を除くのは言語判定のほうが確実なので、英語・多言語の前処理の章の「高精度な言語判定と、混在テキストの言語区間検出 (lingua)」と組み合わせる。
+- 低い側にもノイズがある。PPL が最も低い段落は、年号の連続、ISBN、数字の列、日付 (PPL 1.4〜3.4) だった。数字を 0 にそろえたので、同じトークンの繰り返しになり予測しやすい。高い側だけでなく低い側も目で見て、文字種の割合などの規則や、データの収集と入出力の章の「テキストデータの重複と不良データを取り除く」と組み合わせる。
+- パープレキシティは「Wikipedia にどれだけ近いか」であって、文章の質そのものではない。head には日付だけの行 (PPL 5) や、それらしく見えて意味の通らない宣伝文 (PPL 281) が入り、tail には顔文字の入ったブログの文 (PPL 4233) が入った。「推しのアクスタを買ったけど草」も、使われた n-gram はほとんど 1〜2-gram で、確率が低い。くだけた文や専門分野の文を集めたいときに Wikipedia の言語モデルで切ると、欲しいものまで捨てる。CCNet の論文も、ブログのコメントや専門的なフォーラムが tail に入ると書いている。
+- 10 トークン以上の段落の上位 10% (PPL 10278 より上、10,161 / 101,616 段落) を除くと、文字数は 1,245 万から 1,023 万に 18% 減った。除いた段落は平均 218 文字で、残した段落 (109 文字) の 2 倍の長さがあるため、段落数の割合より文字数の減り方が大きい。境界の両側には似た商品名の羅列が並んでいて、閾値に決まった正解はない。境界の近くを見て決め、文字数の減り方も確かめる。10 トークン未満の段落は値がばらつくので、ここでは判定せずに残した。
+- lmplz は修正 Kneser-Ney 平滑化で学習し、未知語のための `<unk>` も自動で入れるので、未知語の確率は 0 にならない。学習と採点で前処理 (`tokenize`) をそろえないと値が意味をなさない。`-S` はメモリの上限で、Colab に合わせて 2G にした。`--prune` で ARPA は 137MB、バイナリは 87MB になった。機械翻訳の章の「Moses で統計的機械翻訳システムを作る」も同じ lmplz と build_binary を使っている。ニューラル言語モデルでは、Transformers の基本操作の章の「言語モデルで文の自然さ (パープレキシティ) を測る」を参照。
+- KenLM (Heafield 2011) は LGPL 2.1 以降 (一部のファイルは別のライセンス) で、2025-03-30 のコミット 4cb443e に固定した。PyPI の kenlm 0.3.0 も同梱の `kenlm.cpp` も Python 3.13 ではビルドできなかったので、Cython で作り直している。データは日本語 Wikipedia (CC BY-SA 3.0 / GFDL) と mC4 の日本語 (ODC-BY。Common Crawl の利用規約にも従う)。12 万段落の採点は 2 コアで 30 秒ほどだった (mC4 はダウンロード済みの状態で測った)。
+- 仕組みを自分で実装して確かめる版は、付録「仕組みを理解するための実装」の「n-gram 言語モデルを自分で実装してパープレキシティを測り、文を生成する」にある。

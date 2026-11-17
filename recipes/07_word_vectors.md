@@ -1,6 +1,6 @@
 # 単語ベクトル
 
-単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を参照。
+単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ (PPMI と SVD) は付録の「仕組みを理解するための実装」を参照。
 
 ## word2vec を自分のコーパスで学習する {word2vec_train}
 
@@ -76,57 +76,6 @@ for w in ["governmental", "governmentally", "goverment", "unhappily"]:
 - 単語ベクトル = 単語自身 + 文字 n-gram (`min_n`〜`max_n` 文字) のベクトルの和。綴りが似ている語は近くなる。
 - 形態が豊かな言語 (ドイツ語、トルコ語、フィンランド語など) やタイポの多いテキストで特に有効。
 - Meta 公開の学習済みモデル (157 言語、`cc.ja.300.bin` など) は `fasttext` パッケージで読める (各 4GB 以上)。
-
-## PPMI 行列の SVD で単語ベクトルを作る (カウントベース) {ppmi_svd}
-
-ニューラルネットを使わずに、共起行列から単語ベクトルを作りたい。word2vec が何をしているかの理解にも役立つ。
-
-```python
-import nltk
-nltk.download("brown", quiet=True)
-from collections import Counter
-from nltk.corpus import brown
-import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import svds
-
-sents = [[w.lower() for w in s if w.isalpha()] for s in brown.sents()]
-freq = Counter(w for s in sents for w in s)
-vocab = [w for w, c in freq.most_common(8000)]
-idx = {w: i for i, w in enumerate(vocab)}
-
-window, cooc = 4, Counter()
-for s in sents:
-    ids = [idx[w] for w in s if w in idx]
-    for i, a in enumerate(ids):
-        for b in ids[max(0, i - window):i]:
-            cooc[a, b] += 1
-            cooc[b, a] += 1
-print(len(cooc), "組の共起")
-```
-
-```python
-rows, cols = zip(*cooc.keys())
-C = csr_matrix((list(cooc.values()), (rows, cols)), shape=(len(vocab), len(vocab)), dtype=np.float64)
-total, row_sum = C.sum(), np.asarray(C.sum(axis=1)).ravel()
-
-coo = C.tocoo()
-pmi = np.log(coo.data * total / (row_sum[coo.row] * row_sum[coo.col]))
-ppmi = csr_matrix((np.maximum(pmi, 0), (coo.row, coo.col)), shape=C.shape)   # 負の値は 0 に
-
-U, S, _ = svds(ppmi, k=100)
-vecs = U * np.sqrt(S)
-vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-9
-
-def most_similar(word, topn=6):
-    sims = vecs @ vecs[idx[word]]
-    return [vocab[i] for i in np.argsort(-sims)[1:topn + 1]]
-
-for w in ["money", "school", "monday", "walked"]:
-    print(w, most_similar(w))
-```
-
-- skip-gram with negative sampling は、(シフトした) PMI 行列の行列分解を暗黙に行っていることが知られている (Levy & Goldberg, 2014)。
 
 ## 学習済みの英語単語ベクトルを読み込んで類似語を調べる {pretrained_vectors_en}
 
