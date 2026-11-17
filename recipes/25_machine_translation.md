@@ -179,7 +179,7 @@ print(BLEU().corpus_score(hyp_en, [ref_en]).score, CHRF().corpus_score(hyp_en, [
 - chrF は文字単位なので、日本語でも単語分割の方法に左右されない。語尾だけ違う語にも部分点が入る。
 - いずれも表層の一致を見る指標で、言い換えは評価できない。意味を見るには BERTScore や COMET などの学習ベースの指標を併用する。
 
-## COMET で翻訳の品質を評価する {comet gpu norun}
+## COMET で翻訳の品質を評価する {comet gpu}
 
 機械翻訳の評価で現在標準的に使われている、人手評価に基づいて学習されたニューラル評価指標を使いたい。
 
@@ -188,7 +188,10 @@ print(BLEU().corpus_score(hyp_en, [ref_en]).score, CHRF().corpus_score(hyp_en, [
 ```
 
 ```python
+import logging, warnings
+warnings.filterwarnings("ignore", module="torchmetrics|pytorch_lightning")   # ライブラリの古い書き方についての警告を隠す
 from comet import download_model, load_from_checkpoint
+logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)   # PyTorch Lightning の動作ログ (INFO) を隠す
 
 model = load_from_checkpoint(download_model("Unbabel/wmt22-comet-da"))   # 原文・訳文・参照訳を使うモデル (約 2.3GB)
 
@@ -197,22 +200,22 @@ data = [
     {"src": "吾輩は猫である。名前はまだ無い。", "mt": "I am a dog. My name is not here.", "ref": "I am a cat. As yet I have no name."},
     {"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday.", "ref": "Yesterday he went to Tokyo."},
 ]
-out = model.predict(data, batch_size=8, gpus=1)
+out = model.predict(data, batch_size=8, gpus=1, progress_bar=False)
 for d, s in zip(data, out.scores):
     print(f"{s:.3f}  {d['mt']}")
 print("システムスコア:", round(out.system_score, 4))
 ```
 
 ```python
-# 参照訳なしで評価する品質推定 (QE) モデル。利用規約への同意と Hugging Face へのログインが必要
+# 参照訳なしで評価する品質推定 (QE) モデル。利用規約への同意と Hugging Face へのログインが必要（ライセンスは非商用の CC BY-NC-SA 4.0）
 # from huggingface_hub import login; login()
 # qe = load_from_checkpoint(download_model("Unbabel/wmt22-cometkiwi-da"))
 # print(qe.predict([{"src": "彼は昨日東京に行った。", "mt": "He went to Tokyo yesterday."}], batch_size=8, gpus=1).scores)
 ```
 
-- BLEU と違い、原文も入力に使う。意味が合っていれば表現が違っても高く評価され、人手評価との相関が高い。
+- BLEU と違い、原文も入力に使う。意味が合っていれば表現が違っても高く評価され、人手評価との相関が高い。上の例でも、参照訳と言い回しや語順が違う 1 行目と 3 行目は 0.93 以上、意味を取り違えた 2 行目 (dog) は 0.77 になる。
 - スコアはモデルごとに尺度が違う。異なる COMET モデルの値を比べてはいけない。モデル名を必ず報告する。
-- Colab では、インストール時に依存ライブラリのバージョンが入れ替わることがある。エラーが出たらランタイムを再起動する。
+- unbabel-comet は numpy 2 に対応していないため、インストール時に numpy などが古い版に入れ替わり、依存関係の衝突を知らせる赤い ERROR と、衝突するライブラリの長い一覧が表示される。このレシピの実行には影響しない。ほかのセルでエラーが出たらランタイムを再起動する。
 
 ## 参照訳なしで翻訳の品質を推定する（品質推定） {mt_quality_estimation gpu}
 
@@ -440,7 +443,7 @@ for src, hyp, ref in list(zip(open("data/test.ja"), hyps, refs))[:8]:
 - ビルドに時間がかかる（4 コアで約 6 分、Colab の 2 コアではその 2〜3 倍）。うまくいかないときは `bjam.log` と `train.log` を確認する。
 - 現在の実用システムはほぼニューラルに置き換わったが、フレーズテーブルは対訳辞書の抽出や訳語の分析に、単語アライメントは用語の対応付けや注釈の投影に、今も使われている。
 
-## Transformer の翻訳モデルをゼロから学習する {nmt_from_scratch gpu norun}
+## Transformer の翻訳モデルをゼロから学習する {nmt_from_scratch gpu}
 
 対訳データだけから、ニューラル機械翻訳モデルを自分で学習したい。サブワード分割、モデルの定義、学習、ビームサーチ、BLEU による評価までを一通り行う。
 
@@ -570,7 +573,7 @@ for (ja, en), hyp in list(zip(test, hyps))[:6]:
 - 検証損失が下がらなくなったら学習を止める。データが少ないのに層を増やしても、過学習するだけで良くならない。
 - 本格的に学習するなら、データを増やし（JParaCrawl など数千万文対）、逆翻訳で単言語データを活用し、fairseq や Marian、OpenNMT などの専用ツールを使う。
 
-## 学習済みの翻訳モデルを自分の分野のデータでファインチューニングする {mt_finetune gpu norun}
+## 学習済みの翻訳モデルを自分の分野のデータでファインチューニングする {mt_finetune gpu}
 
 公開されている翻訳モデルを、自分の分野の対訳データで追加学習して、その分野での訳質を上げたい。ここでは、田中コーパス（Tatoeba の日英対訳。辞書や教科書の例文のような短い文）を「自分の分野」に見立てる。
 
@@ -621,7 +624,7 @@ def translate(model, sentences, batch_size=64):
     out = []
     for i in range(0, len(sentences), batch_size):
         batch = tokenizer(sentences[i:i + batch_size], return_tensors="pt", padding=True, truncation=True, max_length=64).to(device)
-        out += tokenizer.batch_decode(model.generate(**batch, num_beams=4, max_new_tokens=64), skip_special_tokens=True)
+        out += tokenizer.batch_decode(model.generate(**batch, num_beams=4, max_length=64), skip_special_tokens=True)
     return out
 
 before = translate(model, test["ja"])
@@ -888,7 +891,7 @@ for name, depth in [("char", 0), ("ideograph", 2)]:
 - 簡体字は部品そのものが簡略化されている（訁 → 讠）ので、分解しても一致しないことが多い。字体の対応表（異体字データ、OpenCC など）で先に字体をそろえる方法と比べて選ぶ。
 - 構成の型を表す記号（⿰ など）を残すと元の字に戻せるが、系列は長くなる。翻訳の入力側だけ分解する、という使い方もある。
 
-## タグを付けて訳文の文体を制御する（丁寧さの制御） {controlled_translation gpu norun}
+## タグを付けて訳文の文体を制御する（丁寧さの制御） {controlled_translation gpu}
 
 同じ原文を、敬体（です・ます）と常体（だ・である）に訳し分けたい。原文の先頭に付けたタグで、訳文の文体を指定できるようにする。
 
@@ -905,7 +908,7 @@ POLITE = re.compile(r"(です|ます|でした|ました|ません|でしょう|
 PLAIN = re.compile(r"(だ|である|だった|ない|た|る|う|い)(よ|ね|な|ぞ|わ|か)?[。！？!?]*$")
 
 def style(ja):
-    """訳文の文末から文体を判定する (規則による自動ラベル付け)"""
+    """訳文の文末から文体を判定する（規則による自動ラベル付け）"""
     return "<polite>" if POLITE.search(ja) else "<plain>" if PLAIN.search(ja) else None
 
 ds = load_dataset("Helsinki-NLP/opus-100", "en-ja")
@@ -940,7 +943,7 @@ def translate(sentences, tag=None, batch_size=32):
     for i in range(0, len(sentences), batch_size):
         batch = [f"{tag} {s}" if tag else s for s in sentences[i:i + batch_size]]
         enc = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=64).to(model.device)
-        out += tokenizer.batch_decode(model.generate(**enc, num_beams=4, max_new_tokens=64, forced_bos_token_id=JA), skip_special_tokens=True)
+        out += tokenizer.batch_decode(model.generate(**enc, num_beams=4, max_length=64, forced_bos_token_id=JA), skip_special_tokens=True)
     return out
 
 tests = ["I will go to Tokyo tomorrow.", "This book is very interesting.", "Do you know where the station is?", "He did not come to the party.",

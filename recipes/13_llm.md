@@ -323,7 +323,7 @@ print("CUDA グラフありとの出力の一致:", sum(a == b for a, b in zip(v
 - GPU メモリ: vLLM は起動時に `gpu_memory_utilization`（GPU 全体に対する割合。既定は 0.9）の分を先に確保し、モデルと CUDA グラフの残りを KV キャッシュにする。ここでは 0.6（T4 で約 9.5GB）にし、transformers のモデルは先に GPU から外した。検証では 24GB の GPU でほぼ同じ量になる 0.38 にし、このノートブックと vLLM のエンジンの分だけを数えると最大 10.1 GB、`del llm` の後は 0.3 GB だった。起動時に「No available memory for the cache blocks」で止まったら、`gpu_memory_utilization` を上げるか `max_model_len` を下げる。
 - `enforce_eager=True` にすると、起動は 34 秒と短くなったが、生成は 2,129 トークン/秒と既定（CUDA グラフあり）の約 6 分の 1 になった。確保するメモリは変わらず（どちらも起動の直後に 9.8 GB）、CUDA グラフの分は KV キャッシュに回る。出力の一致は 53 / 64 件だった。試行錯誤の段階など、起動の速さを優先するときに使う。
 
-## LLM を 4bit 量子化して少ないメモリで動かす {llm_4bit gpu norun}
+## LLM を 4bit 量子化して少ないメモリで動かす {llm_4bit gpu}
 
 7B クラスのモデルを Colab の T4 GPU (16GB) で余裕を持って動かしたい。
 
@@ -353,7 +353,7 @@ inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, ret
 with torch.no_grad():
     out = model.generate(**inputs, max_new_tokens=200, do_sample=False)
 print(tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True))
-!nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")   # PyTorch が確保した分。T4 の 15GB に余裕で収まる
 ```
 
 - 4bit 量子化による精度の低下は、多くのタスクでわずか。「大きなモデルの 4bit」は「小さなモデルの 16bit」より良いことが多い。実際に測った結果は、LLM の評価と分析の章の「量子化で LLM の性能がどれだけ落ちるかを測る（bitsandbytes と GGUF）」を参照。

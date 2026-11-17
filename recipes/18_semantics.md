@@ -487,11 +487,13 @@ for s in ["The <e1>fire</e1> was caused by a faulty <e2>heater</e2>.",
 - T4 では、3 つの学習で合わせて 10 分ほどかかる見込みで、GPU メモリの最大は 3.7 GB である。ここでは学習データ全体で学習し、評価データで 1 回だけ測っている。学習率やエポック数を選ぶなら、学習データの一部を開発データとして分ける。
 - 日本語では、ライセンスが明確で手軽に使える関係分類の注釈付きデータが見当たらない。日本語で作るなら、同じ形式（印を付けた文とラベル）で自分のデータに注釈を付け、`tohoku-nlp/bert-base-japanese-v3` などの日本語のモデルに替える。
 
-## 固有表現を Wikidata のエンティティに結び付ける（エンティティリンキング） {entity_linking norun}
+## 固有表現を Wikidata のエンティティに結び付ける（エンティティリンキング） {entity_linking}
 
 文中の「アップル」が企業なのか果物なのか、どのエンティティなのかを特定して、知識ベースの ID に結び付けたい。
 
 ```python
+import time
+import numpy as np
 import requests
 from sentence_transformers import SentenceTransformer
 
@@ -500,28 +502,34 @@ HEADERS = {"User-Agent": "nlp-cookbook-example/0.1 (educational notebook)"}
 model = SentenceTransformer("intfloat/multilingual-e5-small")
 
 def candidates(mention, lang="ja", limit=8):
-    """表層形から候補のエンティティを検索する (候補生成)"""
+    """表層形から候補のエンティティを検索する（候補生成）"""
     params = {"action": "wbsearchentities", "search": mention, "language": lang, "uselang": lang, "format": "json", "limit": limit}
-    hits = requests.get(API, params=params, headers=HEADERS, timeout=30).json()["search"]
+    r = requests.get(API, params=params, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    time.sleep(1)  # API を連続して呼ぶときは間隔を空ける
+    hits = r.json()["search"]
     return [{"id": h["id"], "label": h.get("label", ""), "description": h.get("description", "")} for h in hits]
 
 def link(mention, context, lang="ja"):
-    """候補の説明文と文脈の類似度で、最もふさわしいエンティティを選ぶ (曖昧性解消)"""
+    """候補の説明文と文脈の類似度に検索順位を加味して、最もふさわしいエンティティを選ぶ（曖昧性解消）"""
     cands = [c for c in candidates(mention, lang) if c["description"]]
     if not cands:
         return None
     emb = model.encode([f"passage: {c['label']}: {c['description']}" for c in cands], normalize_embeddings=True)
     sims = emb @ model.encode("query: " + context, normalize_embeddings=True)
-    best = int(sims.argmax())
-    return {**cands[best], "score": round(float(sims[best]), 3), "url": f"https://www.wikidata.org/wiki/{cands[best]['id']}"}
+    scores = sims - 0.01 * np.arange(len(cands))  # 検索順位（人気度）が 1 つ下がるごとに 0.01 引く
+    best = int(scores.argmax())
+    return {**cands[best], "score": round(float(scores[best]), 3), "url": f"https://www.wikidata.org/wiki/{cands[best]['id']}"}
 
 for mention, context in [("アップル", "アップルは新しい iPhone を発表した。"), ("アップル", "アップルパイを焼くために、アップルを 3 個買った。"),
                          ("ジャガー", "ジャガーは南米の密林に生息するネコ科の動物だ。"), ("ジャガー", "彼はジャガーの新型セダンを購入した。")]:
     print(mention, "|", context, "\n   →", link(mention, context))
 ```
 
+1 つ目と 3・4 つ目は正しく結び付く。2 つ目の果物の「アップル」は、Wikidata での日本語名が「リンゴ」なので、検索で果物のエンティティ (Q89) が候補に入らず、別のもの（映画など）が選ばれてしまう。候補生成で正解が漏れると後段では取り返せない例である。
+
 ```python
-# 結び付けたエンティティの情報を取得する (別名、分類、他言語のラベル)
+# 結び付けたエンティティの情報を取得する（別名、分類、他言語のラベル）
 def entity(qid, lang="ja"):
     params = {"action": "wbgetentities", "ids": qid, "languages": f"{lang}|en", "props": "labels|aliases|claims", "format": "json"}
     e = requests.get(API, params=params, headers=HEADERS, timeout=30).json()["entities"][qid]
@@ -533,8 +541,8 @@ print(entity("Q312"))
 ```
 
 - エンティティリンキングは「候補生成」と「曖昧性解消」の 2 段階で行うのが基本。候補生成で正解が漏れると、後段では取り返せない。
-- 候補の人気度（その表層形がどのエンティティを指すことが多いか）は非常に強い手がかり。検索 API の返す順位がほぼそれに当たるので、類似度と組み合わせるとよい。
-- 知識ベースにないエンティティ (NIL) の扱いも重要。類似度が低い場合は「該当なし」とする。
+- 候補の人気度（その表層形がどのエンティティを指すことが多いか）は非常に強い手がかり。検索 API の返す順位がほぼそれに当たるので、類似度と組み合わせるとよい。上のコードでも、類似度だけで選ぶと 1 つ目は「Apple II」になってしまうため、順位に応じて点を引いている。
+- 知識ベースにないエンティティ (NIL) の扱いも重要。類似度が低い場合は「該当なし」とする。ただし e5 の類似度は 0.8 前後に固まりやすいので、しきい値は開発用のデータで決める。
 - API を連続して呼ぶときは間隔を空ける。大量に処理するなら、Wikidata のダンプや、学習済みのエンティティリンキングモデル（mGENRE、BLINK、ReFinED など）を使う。
 
 ## 日本語の時間表現を抽出して正規化する (ja-timex) {timex_ja}
