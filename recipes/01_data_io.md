@@ -38,7 +38,7 @@ print(raw[start:start + 150])
 - 全作品の一覧は「公開中 作家別作品一覧拡充版」の CSV として配布されている。
 - 新字新仮名の作品を選ぶと現代の解析器で扱いやすい。旧字旧仮名の作品は UniDic の近代文語用辞書などを検討する。
 
-## Wikipedia の記事本文を API で取得する {wikipedia_api norun}
+## Wikipedia の記事本文を API で取得する {wikipedia_api}
 
 特定の Wikipedia 記事の本文を、HTML を解析せずにプレーンテキストで取得したい。
 
