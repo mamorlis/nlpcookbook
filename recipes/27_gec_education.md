@@ -1362,6 +1362,216 @@ for s in ["太郎は図書館で本を借りた。", "雨が降ったので、�
 - 自動生成した選択肢には、正解になりうるものが混ざる。出題前に人間が確認する。
 - 特定の文法項目（助詞、活用）を問いたいときは、`target_pos` を変える。
 
+## 文章から内容理解を問う多肢選択式の問題を LLM で作り、自動で検証して選ぶ {quiz_generation gpu}
+
+説明文を読んだ人が内容を理解できたかを確かめる 4 択の問題を、LLM で自動で作りたい。作った問題のうち、本文を読めば正解でき、読まなくても当てられず、正解が 1 つに決まるものだけを残す。
+
+```python
+!pip install -q datasets==4.8.5
+```
+
+```python
+import json, random, re
+import sentencepiece as spm
+import torch
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+random.seed(0); torch.manual_seed(0)
+# 本文: JSQuAD（JGLUE、CC BY-SA 4.0）の検証セットの段落。元は日本語 Wikipedia の記事。記事 1 つにつき段落 1 つ（250〜450 字）を選ぶ
+ds = load_dataset("sbintuitions/JSQuAD", split="validation")
+# 教材の例に向かない政治的な題材（政党、選挙、政治体制、紛争、植民地支配、民族・宗教の対立など）の記事は除く
+POLITICAL = {"日本共産党", "ルガンスク人民共和国", "コンゴ共和国", "ラオス", "国際連合平和維持活動", "労働基本権",
+             "オランダ", "ポルトガル", "グスタフ・マーラー", "同君連合", "出入国管理及び難民認定法"}
+by_title = {}
+for c in dict.fromkeys(ds["context"]):
+    title, text = [s.strip() for s in c.split("[SEP]", 1)]
+    if 250 <= len(text) <= 450 and title not in POLITICAL:
+        by_title.setdefault(title, text)
+titles = random.Random(0).sample(sorted(by_title), 23)
+passages = [by_title[t] for t in titles]
+print(len(by_title), "記事から", len(titles), "記事:", titles)
+
+# 問題を作る LLM: sarashina2.2-3b-instruct（SB Intuitions、MIT）
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tokenizer.padding_side = "left"           # バッチ生成では左パディング
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+PROMPT = """次の文章の内容を理解できているかを確かめる 4 択の問題を 3 問作ってください。
+- 文章を読めば答えが 1 つに決まり、文章を読まないと答えられない問題にする
+- 誤答は、文章に出てくる語句などを使ったもっともらしいものにするが、文章から見て明らかに誤りであるものにする
+- 次の形の JSON の配列だけを出力する
+[{{"question": "問題文", "answer": "正解", "distractors": ["誤答1", "誤答2", "誤答3"]}}, ...]
+
+# 文章
+{passage}"""
+
+@torch.no_grad()
+def generate(prompts, max_new_tokens=512, batch_size=24):
+    outs = []
+    for i in range(0, len(prompts), batch_size):
+        texts = [tokenizer.apply_chat_template([{"role": "user", "content": p}], add_generation_prompt=True, tokenize=False)
+                 for p in prompts[i:i + batch_size]]
+        enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+        out = llm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        outs += tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+    return outs
+
+raw = generate([PROMPT.format(passage=p) for p in passages])     # 23 記事 × 3 問。T4 で 3〜5 分（モデルのダウンロードは別）
+print(f"GPU メモリの最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+print(titles[0], "\n", passages[0], "\n\n", raw[0])
+```
+
+```python
+# 1. 形式の検査: JSON として読めるか、選択肢が 4 つで重複がないか
+def parse(out):
+    """出力から {"question": ... } のオブジェクトを 1 つずつ取り出す（配列の閉じ忘れなどがあっても、読める問題は拾う）。
+    1 問も取り出せなかった出力は、3 問分が壊れていても None の 1 件として返す"""
+    items, dec = [], json.JSONDecoder()
+    for m in re.finditer(r'\{\s*"question"', out):
+        try:
+            items.append(dec.raw_decode(out[m.start():])[0])
+        except json.JSONDecodeError:
+            items.append(None)
+    return items or [None]
+
+def format_error(item):
+    fields_ok = (isinstance(item, dict) and all(isinstance(item.get(k), str) for k in ("question", "answer"))
+                 and isinstance(item.get("distractors"), list) and all(isinstance(x, str) for x in item["distractors"]))
+    if not fields_ok:
+        return "JSON が壊れている"
+    if len(item["distractors"]) != 3:
+        return f"誤答が {len(item['distractors'])} 個"
+    if len({c.strip() for c in [item["answer"], *item["distractors"]]} - {""}) < 4:
+        return "選択肢が重複・空"
+    return None
+
+quiz = []
+for pi, out in enumerate(raw):
+    for item in parse(out):
+        q = {"passage": pi, "reason": format_error(item)}
+        if q["reason"] is None:
+            q["question"] = item["question"].strip()
+            q["choices"] = [c.strip() for c in [item["answer"], *item["distractors"]]]   # choices[0] が正解
+        quiz.append(q)
+print("取り出した問題", len(quiz), "/ 形式の検査に通った問題", sum(q["reason"] is None for q in quiz))
+for pi in sorted({q["passage"] for q in quiz if q["reason"]})[:2]:
+    print(f"--- 形式の誤り ({titles[pi]}): {[q['reason'] for q in quiz if q['passage'] == pi and q['reason']]}\n{raw[pi][:400]}")
+```
+
+```python
+import numpy as np
+
+# 2. 内容の検査には、問題を作ったのとは別の LLM を使う: Qwen3-4B-Instruct-2507（Alibaba の Qwen チーム、Apache 2.0）
+del llm; torch.cuda.empty_cache()        # T4 の 15GB に 2 つのモデルは載らないので、作る側を消してから読み込む
+name = "Qwen/Qwen3-4B-Instruct-2507"
+tok = AutoTokenizer.from_pretrained(name)
+tok.padding_side = "left"
+judge_llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+digit_ids = [tok(str(i), add_special_tokens=False)["input_ids"][0] for i in range(1, 5)]         # 「1」〜「4」のトークン
+yes_no_ids = [tok(w, add_special_tokens=False)["input_ids"][0] for w in ("はい", "いいえ")]      # 最初のトークン（このモデルでは「は」と「いい」）
+
+@torch.no_grad()
+def next_token_probs(prompts, ids, batch_size=16):
+    """各プロンプトについて、アシスタントの最初のトークンが ids のどれになるかの確率（ids の中で正規化）"""
+    res = []
+    for i in range(0, len(prompts), batch_size):
+        texts = [tok.apply_chat_template([{"role": "user", "content": p}], add_generation_prompt=True, tokenize=False) for p in prompts[i:i + batch_size]]
+        enc = tok(texts, return_tensors="pt", padding=True, add_special_tokens=False).to(judge_llm.device)
+        res.append(judge_llm(**enc).logits[:, -1, ids].float().softmax(-1).cpu())
+    return torch.cat(res).numpy()
+
+def solve(qs, with_passage):
+    """4 択を解かせ、各選択肢を選ぶ確率を返す。位置の偏りを打ち消すため、選択肢を 4 通りに回して並べ、確率を平均する"""
+    prompts = []
+    for q in qs:
+        for r in range(4):
+            rotated = q["choices"][r:] + q["choices"][:r]
+            listing = "\n".join(f"{i}. {c}" for i, c in enumerate(rotated, 1))
+            context = f"次の文章を読んで、質問の答えとして最も適切なものを選び、番号だけを答えてください。\n\n# 文章\n{passages[q['passage']]}\n\n" \
+                if with_passage else "次の質問の答えとして最も適切なものを選び、番号だけを答えてください。\n\n"
+            prompts.append(f"{context}# 質問\n{q['question']}\n{listing}")
+    p = next_token_probs(prompts, digit_ids).reshape(len(qs), 4, 4)        # [問題, 回し方 r, 表示位置 k]
+    return np.stack([sum(np.roll(p[n, r], r) for r in range(4)) / 4 for n in range(len(qs))])   # 表示位置 k は元の選択肢 (k + r) % 4
+
+JUDGE = """次の文章だけを根拠にして判断してください。質問に対する答えとして、次の選択肢は正しいですか。「はい」か「いいえ」だけで答えてください。
+
+# 文章
+{passage}
+
+# 質問
+{question}
+
+# 選択肢
+{choice}"""
+
+def judge_each(qs):
+    """選択肢を 1 つずつ本文と照らし、「正しい」と判定される確率を返す"""
+    prompts = [JUDGE.format(passage=passages[q["passage"]], question=q["question"], choice=c) for q in qs for c in q["choices"]]
+    return next_token_probs(prompts, yes_no_ids)[:, 0].reshape(len(qs), 4)
+
+# 捨てる条件。pw は本文ありで各選択肢を選ぶ確率、pn は本文なしの確率、j は各選択肢が本文から見て正しいと判定される確率（いずれも [0] が正解）
+THRESHOLD = 0.5
+CHECKS = {
+    "本文があっても正解できない": lambda pw, pn, j: pw.argmax() != 0,
+    "正解が本文から見て正しくない": lambda pw, pn, j: j[0] < THRESHOLD,
+    "誤答にも正しいものがある": lambda pw, pn, j: (j[1:] >= THRESHOLD).any(),
+    "本文なしで当たる": lambda pw, pn, j: pn[0] >= THRESHOLD,
+}
+ok = [q for q in quiz if q["reason"] is None]
+P_with, P_without, J = solve(ok, True), solve(ok, False), judge_each(ok)      # 37 問の検査で T4 で 2〜3 分ほど
+for q, pw, pn, j in zip(ok, P_with, P_without, J):
+    q.update(p_with=pw[0], p_without=pn[0], judge=j)
+    q["failed"] = [reason for reason, bad in CHECKS.items() if bad(pw, pn, j)]
+    q["reason"] = q["failed"][0] if q["failed"] else None      # 最初に引っかかった検査を捨てた理由とする
+print(f"GPU メモリの最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+import pandas as pd
+
+# 3. 捨てた理由と残る割合。左は最初に引っかかった検査、右は検査ごとに引っかかった数（1 問が複数に引っかかることがある）
+kept = [q for q in quiz if q["reason"] is None]
+print(pd.DataFrame({"捨てた理由": pd.Series([q["reason"] or "採用" for q in quiz]).value_counts(),
+                    "検査ごと": pd.Series([r for q in ok for r in q["failed"]]).value_counts()}).fillna(0).astype(int).to_string())
+print(f"採用 {len(kept)} / {len(quiz)} 問 ({len(kept) / len(quiz):.0%})、問題が 1 つ以上残った記事 {len({q['passage'] for q in kept})} / {len(titles)}")
+# 選択肢の形の手がかり: 正解がいちばん長い選択肢である割合（でたらめなら 25%）
+longest = lambda qs: np.mean([max(range(4), key=lambda i: len(q["choices"][i])) == 0 for q in qs])
+print(f"正解がいちばん長い選択肢: 形式に通った問題 {longest(ok):.0%} / 採用した問題 {longest(kept):.0%}")
+
+def show(q):
+    print(f"[{titles[q['passage']]}] {q['question']}\n   正解: {q['choices'][0]} / 誤答: {' / '.join(q['choices'][1:])}\n"
+          f"   本文あり {q['p_with']:.2f} / 本文なし {q['p_without']:.2f} / 各選択肢が正しい確率 {[round(float(x), 2) for x in q['judge']]}")
+
+for reason in ["本文なしで当たる", "誤答にも正しいものがある", "正解が本文から見て正しくない", "本文があっても正解できない"]:
+    print(f"\n=== 捨てた例: {reason}")
+    for q in [q for q in ok if reason in q["failed"]][:2]:
+        show(q)
+```
+
+```python
+# 4. 残った問題を人が見て確かめる（出題前には必ず本文と照らして読む）
+for q in kept:
+    show(q)
+```
+
+- この章の「穴埋め問題（クローズテスト）を自動で作る」は文から語を抜く語彙の問題を作る。質問応答の章の「文書から質問と答えの組を自動で作る（質問生成）」は、文書中の語句を答えに指定して質問を作り、抽出型 QA のモデルで解き直して指定した答えが返るものを残す（選択肢はない）。ここの「本文があっても正解できない」の検査は、その往復検査を 4 択に当てはめたものである。内容の理解を問う多肢選択式では、それに加えて誤答の質（本文を読まなくても当てられないか）と正解が 1 つに決まるかが問題の良し悪しを決めるので、その検査が中心になる。4 択を解かせる部分は、質問応答の章の「多肢選択式の問題を解く」と同じく番号のトークンの確率を比べる方法で、選択肢を 4 通りに回して確率を平均し、位置の偏りを打ち消している。
+- この実行では、23 記事の出力から 67 件を取り出し、形式の検査に通ったのは 37 問、最後に残ったのは 13 問（19%、問題が残った記事は 9）だった。いちばん多く引っかかったのは「本文なしで当たる」で、37 問中 22 問。「この文章で「応力」という言葉が指すものは何か」の正解が「応力テンソル」のように問題文の語から推せる問題や、「曜日を読み上げるとき、なぜ「火」「土」が引き伸ばされるか」の正解「他の2モーラ1フットに合わせるため」に対して、誤答が「特別な意味を強調するため」のように的外れな問題（どちらも本文なしで 1.00）がここで落ちる。本文は Wikipedia なので、検査する LLM が記事の内容を覚えていて解ける問題もここに含まれる。世界知識で解ける問題を出題してよいかは目的しだいで、しきい値で調整する。形式の誤りは、誤答を 4 つ書いたもの（23 問。正解と同じ「作業を行う従業員の安全」を誤答にも入れたものもあった）、JSON が壊れたもの（6 件）、誤答が 2 つのもの（1 問）。大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」のように誤りを伝えて作り直させるか、「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」で形を強制すると減らせる。
+- 正解の一意性は、選択肢を 1 つずつ本文と照らして「はい」「いいえ」の確率で判定した。「打楽器が重要な役割を果たすジャンルはいくつ挙げられているか」のように数え方で答えが変わる問題は、すべての選択肢が正しいと判定されて落ち、本文にない「426グルデン」を正解にした問題 (0.19) も落ちた。「グーテンベルクがフストに返済を命じられた最終的な金額」の正解「2,026グルデン」は 0.48 で、しきい値のすぐ下で落ちた。本文で 2,026 グルデンはフストが要求した額で、裁判所が命じた額としては書かれていない。しきい値の 0.5 は仮の値で、判定の精度を人の判定と比べて測ってはいない。NLI で照らすこともできるが（Transformers の基本操作の章の「2 つの文の含意関係を判定する (NLI)」）、質問と選択肢を 1 つの文に書き換える必要があり、数値の取り違えにも弱い。
+- 残った 13 問を本文と照らして人が読んだところ、正解が正しく誤答が誤りだとはっきりしていたのは 12 問だった。「GNSS の観測データで何を計算できるか」は、本文の「点間の基線長」が正解だが、誤答の「観測点の座標」も相対測位で求められると考える人がいそうである。笑福亭松鶴の考えを問う問題は、正解を「真打制度はお客様が決めるべきもの」と言い換えているが、本文は「真打にふさわしいかどうかはお客様が決めること」で、言い換えで意味が少しずれている。また、ほとんどの問題は本文の語句をそのまま正解にしたもので（天体暦の記事の 3 問は、どれも本文に出てくる名称を問うだけ）、言い換えや推論を要する問題は少なかった。自動の検査は明らかに悪い問題を減らすための足切りで、出題の前には人が読む。
+- 選択肢の形の手がかりは残る。正解がいちばん長い選択肢である割合は、形式に通った問題で 78%、採用した問題でも 77% だった（でたらめなら 25%）。「本文なしで当たる」の検査はこれを取り除けていない。誤答の長さや詳しさを正解にそろえるよう指示するか、長さの偏りを検査に加える。
+- 問題を作る LLM (sarashina2.2-3b-instruct) と検査する LLM (Qwen3-4B-Instruct-2507) を分けたのは、自分で作った問題を自分で解くと、作ったときと同じ思い込みで正解してしまうおそれがあるため。T4 の 15GB に 2 つは同時に載らないので、作る側を消してから読み込んでいる。GPU メモリの最大は 11.0 GB だった（T4 と同じ float16 で実行した値）。2 つのモデルで合わせて約 15GB をダウンロードする。
+- 本文は JSQuAD（JGLUE、ヤフー、CC BY-SA 4.0。元は日本語 Wikipedia）の段落で、作った問題を本文と一緒に配布するなら CC BY-SA 4.0 に従う。sarashina2.2 は MIT、Qwen3-4B-Instruct-2507 は Apache 2.0。sarashina2.2 のトークナイザーの修正は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
 ## 作文を自動で採点する {essay_scoring}
 
 学習者の作文に、人が付けるのと近い点数を自動で付けたい。特徴量による回帰と文埋め込みによる回帰を比べ、採点者間の一致度と同じ指標 (QWK) で評価する。

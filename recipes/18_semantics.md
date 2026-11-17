@@ -50,6 +50,48 @@ for bp in doc.base_phrases:
 - `--model-size` は tiny / base / large。base 以上は CPU だと 1 文に数秒かかる。大量に処理するなら GPU を使う。
 - インストール時に Transformers のバージョンが入れ替わることがある。import でエラーになったらランタイムを再起動する。
 
+## FrameNet と PropBank で述語の意味フレームと意味役割を調べる {framenet_propbank}
+
+動詞 `buy` がどんな参加者（買い手、商品、売り手…）を取るのかを、言語資源から引きたい。意味役割付与のラベル体系を理解したい。
+
+```python
+import nltk
+nltk.download("framenet_v17", quiet=True)
+nltk.download("propbank", quiet=True)
+from nltk.corpus import framenet as fn
+
+frame = fn.frame("Commerce_buy")
+print(frame.name, "-", frame.definition[:160])
+print("中核的なフレーム要素:", [name for name, fe in frame.FE.items() if fe.coreType == "Core"])
+print("周辺的なフレーム要素:", [name for name, fe in frame.FE.items() if fe.coreType != "Core"][:8])
+print("このフレームを喚起する語:", sorted(frame.lexUnit)[:8])
+```
+
+```python
+# 単語からフレームを探す / フレーム間の関係をたどる
+print([f.name for f in fn.frames_by_lemma(r"(?i)\bsell\b")])
+print([f"{r.superFrameName} → {r.subFrameName} ({r.type.name})" for r in frame.frameRelations][:4])
+
+# 注釈付きの例文: どの部分がどのフレーム要素か
+lu = [l for l in fn.lus(r"(?i)^buy\.v$") if l.frame.name == "Commerce_buy"][0]
+for ex in lu.exemplars[:3]:
+    print(ex.text.strip())
+    print("   ", [(ex.text[s:e], role) for s, e, role in ex.FE[0]])
+```
+
+```python
+# PropBank: 動詞の語義 (roleset) ごとに、番号付きの項 (Arg0, Arg1, ...) を定義する
+from nltk.corpus import propbank
+
+for roleset_id in ["buy.01", "sell.01", "give.01"]:
+    rs = propbank.roleset(roleset_id)
+    print(roleset_id, rs.attrib["name"], {f"Arg{r.attrib['n']}": r.attrib["descr"] for r in rs.findall("roles/role")})
+```
+
+- FrameNet は「場面」（フレーム）を単位に、場面ごとの役割（Buyer、Goods、Seller）を定義する。`buy` と `sell` は同じ商取引の場面を別の視点から述べたものとして関連付けられる。
+- PropBank は動詞ごとに Arg0（動作主的な項）、Arg1（対象的な項）… と番号を振る。ラベルが少なく一貫しているので、意味役割付与の学習データとして広く使われる。
+- 日本語には、日本語フレームネット、京都大学格フレーム、NPCMJ の PropBank 風アノテーションなどがある。
+
 ## 日本語の共参照解析をする (KWJA) {coref_kwja}
 
 「彼」「その会社」「同社」が、文章中のどの語と同じものを指しているのかを知りたい。
@@ -218,48 +260,6 @@ for r in df[~df["correct"]].head(5).itertuples():
 - 日本語版 (JWSC) は英語からの翻訳で作られている。日本語ではゼロ代名詞が自然な場面でも「彼」「それ」が使われるので、やや不自然な文が含まれる。
 - 事前学習済みモデルの登場で、この種の問題の正解率は大きく上がった。ただし、Web 上の類似文を覚えているだけの可能性や、データの偏りを使っている可能性が指摘されており、改良版（WinoGrande など）が作られている。
 - 照応解析の一般的な方法は、この章の「日本語の共参照解析をする (KWJA)」を参照。
-
-## FrameNet と PropBank で述語の意味フレームと意味役割を調べる {framenet_propbank}
-
-動詞 `buy` がどんな参加者（買い手、商品、売り手…）を取るのかを、言語資源から引きたい。意味役割付与のラベル体系を理解したい。
-
-```python
-import nltk
-nltk.download("framenet_v17", quiet=True)
-nltk.download("propbank", quiet=True)
-from nltk.corpus import framenet as fn
-
-frame = fn.frame("Commerce_buy")
-print(frame.name, "-", frame.definition[:160])
-print("中核的なフレーム要素:", [name for name, fe in frame.FE.items() if fe.coreType == "Core"])
-print("周辺的なフレーム要素:", [name for name, fe in frame.FE.items() if fe.coreType != "Core"][:8])
-print("このフレームを喚起する語:", sorted(frame.lexUnit)[:8])
-```
-
-```python
-# 単語からフレームを探す / フレーム間の関係をたどる
-print([f.name for f in fn.frames_by_lemma(r"(?i)\bsell\b")])
-print([f"{r.superFrameName} → {r.subFrameName} ({r.type.name})" for r in frame.frameRelations][:4])
-
-# 注釈付きの例文: どの部分がどのフレーム要素か
-lu = [l for l in fn.lus(r"(?i)^buy\.v$") if l.frame.name == "Commerce_buy"][0]
-for ex in lu.exemplars[:3]:
-    print(ex.text.strip())
-    print("   ", [(ex.text[s:e], role) for s, e, role in ex.FE[0]])
-```
-
-```python
-# PropBank: 動詞の語義 (roleset) ごとに、番号付きの項 (Arg0, Arg1, ...) を定義する
-from nltk.corpus import propbank
-
-for roleset_id in ["buy.01", "sell.01", "give.01"]:
-    rs = propbank.roleset(roleset_id)
-    print(roleset_id, rs.attrib["name"], {f"Arg{r.attrib['n']}": r.attrib["descr"] for r in rs.findall("roles/role")})
-```
-
-- FrameNet は「場面」（フレーム）を単位に、場面ごとの役割（Buyer、Goods、Seller）を定義する。`buy` と `sell` は同じ商取引の場面を別の視点から述べたものとして関連付けられる。
-- PropBank は動詞ごとに Arg0（動作主的な項）、Arg1（対象的な項）… と番号を振る。ラベルが少なく一貫しているので、意味役割付与の学習データとして広く使われる。
-- 日本語には、日本語フレームネット、京都大学格フレーム、NPCMJ の PropBank 風アノテーションなどがある。
 
 ## 文から関係の三つ組を抽出する (REBEL) {relation_extraction}
 

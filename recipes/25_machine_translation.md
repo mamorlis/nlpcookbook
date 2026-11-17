@@ -803,6 +803,91 @@ print(df[df["cos"] > 0.97][["ja", "pseudo_en", "cos"]].head(5).to_string(index=F
 - 往復で元に戻るからといって、中間の訳が正しいとは限らない（同じ誤りを往復で打ち消すことがある）。逆に、正しい訳でも言い換えで戻ってくると一致度は下がる。あくまで目安として使う。
 - 短い文や定型文ばかりが高得点で残りやすい。残したデータの長さや内容の分布が偏っていないかを確かめる。
 
+## 漢字を部品に分解して日本語と中国語で共有する {subcharacter_decomposition}
+
+日本語と中国語は漢字を共有しているが、字体が違う（経 / 经、験 / 验）ために別の文字として扱われてしまう。漢字を構成要素に分解して、共通部分を取り出したい。
+
+```python
+!pip install -q sentencepiece datasets
+!wget -q https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt
+```
+
+```python
+import re
+
+# IDS (漢字構成記述列): 漢字を「構成の型を表す記号 (⿰ 左右、⿱ 上下など) + 部品」で表したデータ
+ids = {}
+for line in open("ids.txt", encoding="utf-8"):
+    if line.startswith("U+"):
+        _, char, *descriptions = line.rstrip("\n").split("\t")
+        ids[char] = re.sub(r"\[[A-Z]+\]", "", descriptions[0])         # 地域ごとの字形の違いがある場合は最初のものを使う
+print(len(ids), "字")
+for c in "語験経樹鬱":
+    print(c, ids[c])
+```
+
+```python
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def decompose(char, depth=1):
+    """depth 段だけ分解する。分解できない字 (それ自体が部品) はそのまま返す"""
+    d = ids.get(char, char)
+    if depth == 0 or d == char:
+        return char
+    return "".join(decompose(c, depth - 1) if c in ids and c != char else c for c in d)
+
+def decompose_text(text, depth=1):
+    return "".join(decompose(c, depth) if "一" <= c <= "鿿" else c for c in text)
+
+for word in ["経験", "言語", "機械翻訳"]:
+    print(word, "→ 1 段:", decompose_text(word, 1), "/ 2 段:", decompose_text(word, 2), "/ 3 段:", decompose_text(word, 3))
+```
+
+```python
+# 日本語の字体と中国語 (簡体字) の字体で、共有される部品がどれだけ増えるか
+STRUCTURE = set("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
+pairs = [("経験", "经验"), ("図書館", "图书馆"), ("機械", "机械"), ("発音", "发音"), ("説明", "说明"), ("電話", "电话"), ("銀行", "银行"), ("読書", "读书")]
+
+def overlap(a, b):
+    a, b = set(a) - STRUCTURE, set(b) - STRUCTURE
+    return len(a & b) / len(a | b)
+
+for ja, zh in pairs:
+    row = [f"{overlap(decompose_text(ja, d), decompose_text(zh, d)):.2f}" for d in (0, 1, 2, 3)]
+    print(f"{ja} / {zh}: 文字のまま {row[0]} → 1 段 {row[1]} → 2 段 {row[2]} → 3 段 {row[3]} | {decompose_text(ja, 2)} / {decompose_text(zh, 2)}")
+```
+
+```python
+# 分解した文字列でサブワード分割を学習し、日本語と中国語で共有される語彙の割合を調べる
+import sentencepiece as spm
+from datasets import load_dataset
+
+# 日本語と中国語のテキスト (対訳である必要はない)
+ja = [ex["translation"]["ja"] for ex in load_dataset("Helsinki-NLP/opus-100", "en-ja", split="train").select(range(30000))]
+zh = [ex["translation"]["zh"] for ex in load_dataset("Helsinki-NLP/opus-100", "en-zh", split="train").select(range(30000))]
+for name, depth in [("char", 0), ("ideograph", 2)]:
+    with open(f"{name}.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(decompose_text(s, depth) for s in ja + zh))
+    spm.SentencePieceTrainer.train(input=f"{name}.txt", model_prefix=name, vocab_size=8000, character_coverage=0.9995, minloglevel=2)
+
+for name, depth in [("char", 0), ("ideograph", 2)]:
+    sp = spm.SentencePieceProcessor(model_file=f"{name}.model")
+    vocab = {sp.id_to_piece(i) for i in range(sp.get_piece_size())}
+    share = lambda sents: {p for s in sents[:5000] for p in sp.encode(decompose_text(s, depth), out_type=str)}
+    v_ja, v_zh = share(ja), share(zh)
+    print(f"{name}: 日本語で使われる語彙 {len(v_ja)} / 中国語 {len(v_zh)} / 共通 {len(v_ja & v_zh)} ({len(v_ja & v_zh) / len(v_ja | v_zh):.0%})")
+    print("   ", sp.encode(decompose_text("経験を説明する", depth), out_type=str), sp.encode(decompose_text("说明经验", depth), out_type=str))
+```
+
+- 漢字は、偏や旁などの部品の組み合わせでできている。日本の新字体と中国の簡体字は字体が違っても、部品まで分解すると共通部分が見つかることがある（説 / 说 はどちらも「兑」を含む）。
+- 分解した文字列でサブワード分割を学習すれば、日本語と中国語で語彙の共有が増えると期待できる。ただし、この実験では共通の語彙の割合は増えなかった (22% → 21%)。部品の並びが長くなって別々のサブワードに切られること、簡体字の部品が別の字であることが原因で、分解するだけでは足りない。
+- 対訳データが少ない言語対のニューラル機械翻訳では、部首や筆画への分解で翻訳精度が上がったという報告がある。効果は分解の深さやデータの量に左右されるので、翻訳の精度で確かめる。
+- 分解の深さは調整が必要。浅いと共有が増えず、深すぎると（筆画まで）文字列が長くなって、意味の手がかりも失われる。
+- IDS には、Unicode に登録されていない部品を表す丸数字（①、② など）が含まれる。別々の部品が同じ記号になるので、深く分解しすぎると情報が失われる。
+- 簡体字は部品そのものが簡略化されている（訁 → 讠）ので、分解しても一致しないことが多い。字体の対応表（異体字データ、OpenCC など）で先に字体をそろえる方法と比べて選ぶ。
+- 構成の型を表す記号（⿰ など）を残すと元の字に戻せるが、系列は長くなる。翻訳の入力側だけ分解する、という使い方もある。
+
 ## タグを付けて訳文の文体を制御する（丁寧さの制御） {controlled_translation gpu norun}
 
 同じ原文を、敬体（です・ます）と常体（だ・である）に訳し分けたい。原文の先頭に付けたタグで、訳文の文体を指定できるようにする。
@@ -890,91 +975,6 @@ for tag in ["<polite>", "<plain>"]:
 - 6,000 文対・1 エポックなら T4 GPU で数分。新しく足したタグの埋め込みは乱数から始まるので、データが少ないと効きが不完全になる。指定どおりになった割合を必ず測る。
 - 文体を変えると、訳の内容まで変わってしまうことがある。制御の成功率だけでなく、BLEU などで翻訳の質が落ちていないかも確かめる。
 - LLM による翻訳なら、プロンプトで「です・ます調で」と指示するだけで同じことができる。専用の翻訳モデルを使う場面（速度、コスト、機密性）では、タグによる制御が今も有効。
-
-## 漢字を部品に分解して日本語と中国語で共有する {subcharacter_decomposition}
-
-日本語と中国語は漢字を共有しているが、字体が違う（経 / 经、験 / 验）ために別の文字として扱われてしまう。漢字を構成要素に分解して、共通部分を取り出したい。
-
-```python
-!pip install -q sentencepiece datasets
-!wget -q https://raw.githubusercontent.com/cjkvi/cjkvi-ids/master/ids.txt
-```
-
-```python
-import re
-
-# IDS (漢字構成記述列): 漢字を「構成の型を表す記号 (⿰ 左右、⿱ 上下など) + 部品」で表したデータ
-ids = {}
-for line in open("ids.txt", encoding="utf-8"):
-    if line.startswith("U+"):
-        _, char, *descriptions = line.rstrip("\n").split("\t")
-        ids[char] = re.sub(r"\[[A-Z]+\]", "", descriptions[0])         # 地域ごとの字形の違いがある場合は最初のものを使う
-print(len(ids), "字")
-for c in "語験経樹鬱":
-    print(c, ids[c])
-```
-
-```python
-from functools import lru_cache
-
-@lru_cache(maxsize=None)
-def decompose(char, depth=1):
-    """depth 段だけ分解する。分解できない字 (それ自体が部品) はそのまま返す"""
-    d = ids.get(char, char)
-    if depth == 0 or d == char:
-        return char
-    return "".join(decompose(c, depth - 1) if c in ids and c != char else c for c in d)
-
-def decompose_text(text, depth=1):
-    return "".join(decompose(c, depth) if "一" <= c <= "鿿" else c for c in text)
-
-for word in ["経験", "言語", "機械翻訳"]:
-    print(word, "→ 1 段:", decompose_text(word, 1), "/ 2 段:", decompose_text(word, 2), "/ 3 段:", decompose_text(word, 3))
-```
-
-```python
-# 日本語の字体と中国語 (簡体字) の字体で、共有される部品がどれだけ増えるか
-STRUCTURE = set("⿰⿱⿲⿳⿴⿵⿶⿷⿸⿹⿺⿻")
-pairs = [("経験", "经验"), ("図書館", "图书馆"), ("機械", "机械"), ("発音", "发音"), ("説明", "说明"), ("電話", "电话"), ("銀行", "银行"), ("読書", "读书")]
-
-def overlap(a, b):
-    a, b = set(a) - STRUCTURE, set(b) - STRUCTURE
-    return len(a & b) / len(a | b)
-
-for ja, zh in pairs:
-    row = [f"{overlap(decompose_text(ja, d), decompose_text(zh, d)):.2f}" for d in (0, 1, 2, 3)]
-    print(f"{ja} / {zh}: 文字のまま {row[0]} → 1 段 {row[1]} → 2 段 {row[2]} → 3 段 {row[3]} | {decompose_text(ja, 2)} / {decompose_text(zh, 2)}")
-```
-
-```python
-# 分解した文字列でサブワード分割を学習し、日本語と中国語で共有される語彙の割合を調べる
-import sentencepiece as spm
-from datasets import load_dataset
-
-# 日本語と中国語のテキスト (対訳である必要はない)
-ja = [ex["translation"]["ja"] for ex in load_dataset("Helsinki-NLP/opus-100", "en-ja", split="train").select(range(30000))]
-zh = [ex["translation"]["zh"] for ex in load_dataset("Helsinki-NLP/opus-100", "en-zh", split="train").select(range(30000))]
-for name, depth in [("char", 0), ("ideograph", 2)]:
-    with open(f"{name}.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(decompose_text(s, depth) for s in ja + zh))
-    spm.SentencePieceTrainer.train(input=f"{name}.txt", model_prefix=name, vocab_size=8000, character_coverage=0.9995, minloglevel=2)
-
-for name, depth in [("char", 0), ("ideograph", 2)]:
-    sp = spm.SentencePieceProcessor(model_file=f"{name}.model")
-    vocab = {sp.id_to_piece(i) for i in range(sp.get_piece_size())}
-    share = lambda sents: {p for s in sents[:5000] for p in sp.encode(decompose_text(s, depth), out_type=str)}
-    v_ja, v_zh = share(ja), share(zh)
-    print(f"{name}: 日本語で使われる語彙 {len(v_ja)} / 中国語 {len(v_zh)} / 共通 {len(v_ja & v_zh)} ({len(v_ja & v_zh) / len(v_ja | v_zh):.0%})")
-    print("   ", sp.encode(decompose_text("経験を説明する", depth), out_type=str), sp.encode(decompose_text("说明经验", depth), out_type=str))
-```
-
-- 漢字は、偏や旁などの部品の組み合わせでできている。日本の新字体と中国の簡体字は字体が違っても、部品まで分解すると共通部分が見つかることがある（説 / 说 はどちらも「兑」を含む）。
-- 分解した文字列でサブワード分割を学習すれば、日本語と中国語で語彙の共有が増えると期待できる。ただし、この実験では共通の語彙の割合は増えなかった (22% → 21%)。部品の並びが長くなって別々のサブワードに切られること、簡体字の部品が別の字であることが原因で、分解するだけでは足りない。
-- 対訳データが少ない言語対のニューラル機械翻訳では、部首や筆画への分解で翻訳精度が上がったという報告がある。効果は分解の深さやデータの量に左右されるので、翻訳の精度で確かめる。
-- 分解の深さは調整が必要。浅いと共有が増えず、深すぎると（筆画まで）文字列が長くなって、意味の手がかりも失われる。
-- IDS には、Unicode に登録されていない部品を表す丸数字（①、② など）が含まれる。別々の部品が同じ記号になるので、深く分解しすぎると情報が失われる。
-- 簡体字は部品そのものが簡略化されている（訁 → 讠）ので、分解しても一致しないことが多い。字体の対応表（異体字データ、OpenCC など）で先に字体をそろえる方法と比べて選ぶ。
-- 構成の型を表す記号（⿰ など）を残すと元の字に戻せるが、系列は長くなる。翻訳の入力側だけ分解する、という使い方もある。
 
 ## 1 つの原文から多様な訳を複数出す {diverse_translation}
 

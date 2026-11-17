@@ -445,7 +445,55 @@ df[df["reason"] == ""]["text"].tolist()
 
 - 何を何件捨てたかを理由ごとに記録しておく。フィルタのバグでデータの大半を捨てていた、という事故に気づける。
 - 学習データと評価データの間の重複（リーク）も必ず確認する: `set(train_keys) & set(test_keys)`。
-- ほぼ同じ内容の文書（ニアデュプリケート）は、文字列処理と正規化の章の MinHash のレシピで検出する。
+- ほぼ同じ内容の文書（ニアデュプリケート）は、この章の「MinHash と LSH で大量文書からほぼ重複を見つける」で検出する。
+
+## MinHash と LSH で大量文書からほぼ重複を見つける {minhash_lsh}
+
+数十万件の文書から、コピペや微修正による「ほぼ同じ文書」を、全ペア比較せずに高速に見つけたい。
+
+```python
+!pip install -q datasketch
+```
+
+```python
+from datasketch import MinHash, MinHashLSH
+
+def shingles(text, n=3):
+    text = "".join(text.split())
+    return {text[i:i + n] for i in range(len(text) - n + 1)}
+
+def minhash(text, num_perm=128):
+    m = MinHash(num_perm=num_perm)
+    for s in shingles(text):
+        m.update(s.encode("utf-8"))
+    return m
+
+docs = {
+    "a": "自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる一連の技術である。",
+    "b": "自然言語処理とは、人間が日常的に使っている言語をコンピューターに処理させる技術のことである。",
+    "c": "機械学習は、データから規則性を学習してタスクを解くアルゴリズムの研究分野である。",
+    "d": "自然言語処理は、人間が日常的に使っている言語をコンピュータに処理させる一連の技術である！",
+}
+mh = {k: minhash(v) for k, v in docs.items()}
+
+def jaccard(a, b):
+    A, B = shingles(docs[a]), shingles(docs[b])
+    return len(A & B) / len(A | B)
+
+for x, y in [("a", "b"), ("a", "c"), ("a", "d")]:
+    print(f"{x}-{y}: 真の Jaccard = {jaccard(x, y):.2f}  MinHash による推定 = {mh[x].jaccard(mh[y]):.2f}")
+```
+
+```python
+lsh = MinHashLSH(threshold=0.5, num_perm=128)
+for k, m in mh.items():
+    lsh.insert(k, m)
+for k in docs:
+    print(k, "と似ている:", sorted(set(lsh.query(mh[k])) - {k}))
+```
+
+- MinHash は集合の Jaccard 係数を固定長の署名で近似する。LSH は署名が似たものだけを同じバケットに入れ、候補を絞る。
+- 大規模な事前学習コーパスの重複除去で標準的に使われている。意味的な重複（言い換え）は拾えないので、それには埋め込みを使う。
 
 ## 事前学習用の Web テキストを品質で選ぶ（規則によるフィルタと、LLM の採点で学習した品質分類器） {pretrain_data_filter gpu}
 
@@ -651,7 +699,7 @@ for i in df[~df["rule_keep"] & clean_view].nlargest(6, "clf").index:
     print(f"{df.clf[i]:4.2f}  [{reason[i]}]  {short(df.text[i], 60)}")
 ```
 
-- この章の「テキストデータの重複と不良データを取り除く」の次の段階にあたる。そこで完全な重複や明らかな不良を除き（大量の文書のほぼ重複は、文字列処理と正規化の章の「MinHash と LSH で大量文書からほぼ重複を見つける」）、ここで文書の品質で選ぶ。規則は FineWeb-2（Penedo ら 2025）が日本語用に調整した閾値を datatrove に渡したもので、繰り返しの規則と語の統計の規則は Gopher（Rae ら 2021）、行の形の規則は FineWeb（Penedo ら 2024）にならっている。FineWeb-2 は C4（Raffel ら 2020）の規則を使っていないが、ここでは C4 の不適切な語のリストを加えた。
+- この章の「テキストデータの重複と不良データを取り除く」の次の段階にあたる。そこで完全な重複や明らかな不良を除き（大量の文書のほぼ重複は、この章の「MinHash と LSH で大量文書からほぼ重複を見つける」）、ここで文書の品質で選ぶ。規則は FineWeb-2（Penedo ら 2025）が日本語用に調整した閾値を datatrove に渡したもので、繰り返しの規則と語の統計の規則は Gopher（Rae ら 2021）、行の形の規則は FineWeb（Penedo ら 2024）にならっている。FineWeb-2 は C4（Raffel ら 2020）の規則を使っていないが、ここでは C4 の不適切な語のリストを加えた。
 - 規則をすべて通ったのは 3,000 文書のうち 904 文書（30.1%、文字数では 24.0%）だった。落とした数が多いのは、数字や記号だけの語が多すぎる（gopher_below_alpha_threshold、1,047 文書）、句読点で終わる行が 9.6% 未満（line_punct_ratio、879 文書）、5 語の連なりの重複が多い（duplicated_5_n_grams、374 文書）で、商品名や型番の羅列、メニューや見出しだけの行が並ぶページ、中国語のページが落ちた。mC4 はページの行をそのまま残している（Xue ら 2021 は C4 の句読点の規則の代わりに、200 文字以上の行が 3 行以上あることを求めた）。trafilatura で本文を取り出した FineWeb-2 のテキストに合わせた閾値なので、このデータでは多めに落ちている可能性がある（FineWeb-2 のデータでは確かめていない）。閾値は、落ちた例と残った例を見て決め直す。
 - 不適切な語の規則は 762 文書 (25.4%)を落とし、うち 368 文書はこの規則だけで落ちた。日本語は語の境界を見ずに部分文字列で探すので、「嫌い」（121 文書）、「支配」（39 文書）、「ラバー」（33 文書）のような普通の語でも落ちる。datatrove も「sm」「グロ」「女の子」は落としすぎるとして除外している。使うなら、一致した語を数えてリストを見直す。
 - 規則をすべて通った文書にも、「中郡大磯町で切手買取りの優良業者とは？」や「ホワイトニング 効果なしでできるダイエット」のような、地名や語を差し替えて量産された検索エンジン向けのページが残った。文章の形が整っていれば規則は通るので、内容は分類器で見る。
