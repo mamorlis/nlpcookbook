@@ -32,7 +32,7 @@ FENCE_RE = re.compile(r"^```python\s*$")
 
 @dataclass
 class Recipe:
-    chapter_no: int
+    chapter_no: int | str  # 本文の章は整数、付録は "A" など
     chapter_dir: str
     chapter_title: str
     no: int
@@ -43,6 +43,8 @@ class Recipe:
 
     @property
     def ident(self) -> str:
+        if isinstance(self.chapter_no, str):  # 付録は A-01 の形
+            return f"{self.chapter_no}-{self.no:02d}"
         return f"{self.chapter_no:02d}-{self.no:02d}"
 
     @property
@@ -93,10 +95,10 @@ def split_cells(lines: list[str]) -> list[tuple[str, str]]:
 
 
 def parse_chapter(path: Path) -> tuple[str, str, list[Recipe]]:
-    m = re.match(r"(\d+)_", path.stem)
+    m = re.match(r"(\d+|[A-Z])_", path.stem)
     if not m:
-        raise ValueError(f"{path.name}: ファイル名は NN_name.md の形式にしてください")
-    chapter_no = int(m.group(1))
+        raise ValueError(f"{path.name}: ファイル名は NN_name.md (付録は A_name.md) の形式にしてください")
+    chapter_no = int(m.group(1)) if m.group(1).isdigit() else m.group(1)
     lines = path.read_text(encoding="utf-8").split("\n")
     if not lines[0].startswith("# "):
         raise ValueError(f"{path.name}: 1 行目は '# 章タイトル' にしてください")
@@ -267,11 +269,12 @@ def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
              "バッジをクリックすると Google Colab で開きます。", ""]
     for title, _, rs in chapters:
         if rs:
-            lines.append(f"- [{rs[0].chapter_no}. {title}](#{rs[0].chapter_no}-{slugify(title)}) ({len(rs)})")
+            head = chapter_heading(rs[0].chapter_no, title)
+            lines.append(f"- [{head}](#{slugify(head)}) ({len(rs)})")
     for title, intro, rs in chapters:
         if not rs:
             continue
-        lines += ["", f"### {rs[0].chapter_no}. {title}", ""]
+        lines += ["", f"### {chapter_heading(rs[0].chapter_no, title)}", ""]
         if intro:
             lines += [intro, ""]
         lines += ["| # | やりたいこと | Colab |", "|---|---|---|"]
@@ -291,6 +294,16 @@ def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
     readme.write_text(f"{pre}{start}\n{block}\n{end}{post}", encoding="utf-8")
 
 
+def chapter_heading(no: int | str, title: str) -> str:
+    """README の章の見出し。本文の章は「3. 章名」、付録は「付録 A. 章名」。"""
+    return f"付録 {no}. {title}" if isinstance(no, str) else f"{no}. {title}"
+
+
+def chapter_files() -> list[Path]:
+    """本文の章 (NN_*.md) を番号順に並べ、付録 (A_*.md など) をその後ろに置く。"""
+    return sorted(SRC.glob("[0-9]*.md")) + sorted(SRC.glob("[A-Z]_*.md"))
+
+
 def slugify(title: str) -> str:
     """GitHub の見出しアンカーに合わせる (記号を除去し、空白をハイフンに)。"""
     s = re.sub(r"[^\w\- ]", "", title.lower())
@@ -306,7 +319,7 @@ def main() -> None:
     ap.add_argument("--timeout", type=int, default=1200)
     args = ap.parse_args()
 
-    chapters = [parse_chapter(p) for p in sorted(SRC.glob("[0-9]*.md"))]
+    chapters = [parse_chapter(p) for p in chapter_files()]
     recipes = [r for _, _, rs in chapters for r in rs]
     slugs = [r.slug for r in recipes]
     dup = {s for s in slugs if slugs.count(s) > 1}
