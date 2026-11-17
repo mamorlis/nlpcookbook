@@ -1,74 +1,140 @@
 # 検索
 
-転置索引と BM25 によるキーワード検索とその工夫 (文字 n-gram、クエリ拡張)、埋め込みによる意味検索、評価、組み合わせと並べ替え (ハイブリッド検索、リランキング、ランキング学習、多様化)、長い文書や言語をまたぐ検索、モデルの微調整、入力中の候補の提示。質問応答や RAG の土台になる。
+転置索引と BM25 によるキーワード検索とその工夫 (文字 n-gram、クエリ拡張)、埋め込みによる意味検索、評価、組み合わせと並べ替え (ハイブリッド検索、リランキング、ランキング学習、多様化)、関連記事の推薦、長い文書や言語をまたぐ検索、モデルの微調整、入力中の候補の提示。質問応答や RAG の土台になる。転置索引と BM25 を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
 
-## 転置索引を自作してブール検索・フレーズ検索をする {inverted_index}
+## SQLite の FTS5 で日本語の文書をブール検索・フレーズ検索する {inverted_index}
 
-検索エンジンの基本である転置索引を自分で作り、AND / OR / NOT や語順どおりのフレーズで検索したい。
+手元の日本語の文書を、検索サーバーを立てずに AND / OR / NOT や語順どおりのフレーズで検索したい。Python に組み込まれた SQLite の全文検索 (FTS5) で、文字 3-gram の索引と、分かち書きしてから入れる索引を作り、ヒットの違いを確かめる。
 
 ```python
 !pip install -q fugashi unidic-lite
 ```
 
 ```python
-from collections import defaultdict
+import io, re, sqlite3, tarfile, time, unicodedata, urllib.request
+import pandas as pd
 from fugashi import Tagger
 
+def load_livedoor():
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+# 所要時間の目安: Colab で 1 分以内 (ダウンロードと読み込み)
+# livedoor ニュースコーパス (7,367 記事)。記事は CC BY-ND 2.1 JP (改変禁止) で、索引を作って検索するだけにとどめる
+df = load_livedoor()
+norm = lambda s: unicodedata.normalize("NFKC", s)   # 全角英数字・半角カナなどをそろえる (文書とクエリの両方に使う)
+df["title"], df["body"] = df["title"].map(norm), df.pop("text").map(norm)
+
 tagger = Tagger()
-docs = [
-    "東京都立大学で自然言語処理の研究をしている。",
-    "自然言語処理では機械翻訳の研究が盛んだ。",
-    "東京で機械学習の勉強会が開かれた。",
-    "京都大学は言語処理の研究で知られる。",
-    "機械翻訳は自然な言語を処理する技術の一つである。",
-    "東京と京都を結ぶ新幹線に乗った。",
-]
-
-def tokenize(text):
-    return [w.surface for w in tagger(text) if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
-
-# 転置索引: 単語 → {文書番号: [出現位置, ...]}
-index = defaultdict(dict)
-for doc_id, doc in enumerate(docs):
-    for pos, term in enumerate(tokenize(doc)):
-        index[term].setdefault(doc_id, []).append(pos)
-
-print(len(index), "語")
-for term in ["東京", "研究", "処理"]:
-    print(term, dict(index[term]))
+seg = lambda s: [w.surface for w in tagger(s)]
+print("SQLite", sqlite3.sqlite_version, "/", len(df), "件")
+print(seg("東京都立大学で自然言語処理を研究する"))
 ```
 
 ```python
-ALL = set(range(len(docs)))
-posting = lambda term: set(index.get(term, {}))
+# 所要時間の目安: Colab で 1〜2 分 (7,367 記事の分かち書きを含む)
+con = sqlite3.connect(":memory:")   # ファイル名を渡せば索引をディスクに保存できる
+con.execute("CREATE TABLE docs(id INTEGER PRIMARY KEY, label TEXT, title TEXT, body TEXT)")
+con.executemany("INSERT INTO docs VALUES (?, ?, ?, ?)", zip(range(len(df)), df["label"], df["title"], df["body"]))
 
-def AND(*terms): return set.intersection(*[posting(t) for t in terms])
-def OR(*terms): return set.union(*[posting(t) for t in terms])
-def NOT(term): return ALL - posting(term)
+# (1) 文字 3-gram の索引: 分かち書きは不要。本文は docs から読む (content=) ので、索引だけを持つ
+t = time.time()
+con.execute("CREATE VIRTUAL TABLE tri USING fts5(title, body, content='docs', content_rowid='id', tokenize='trigram')")
+con.execute("INSERT INTO tri(tri) VALUES ('rebuild')")   # docs の全行から索引を作る
+print(f"trigram の索引: {time.time() - t:.1f} 秒")
 
-def phrase(*terms):
-    """語がこの順番で隣り合って出現する文書 (位置情報を使う)"""
-    hits = set()
-    for doc_id in AND(*terms):
-        if any(all(p + i in index[t][doc_id] for i, t in enumerate(terms)) for p in index[terms[0]][doc_id]):
-            hits.add(doc_id)
-    return hits
-
-queries = {
-    "東京 AND 研究": AND("東京", "研究"),
-    "機械 AND (翻訳 OR 学習)": posting("機械") & OR("翻訳", "学習"),
-    "研究 AND NOT 東京": posting("研究") & NOT("東京"),
-    'フレーズ "自然 言語 処理"': phrase("自然", "言語", "処理"),
-    "自然 AND 言語 AND 処理": AND("自然", "言語", "処理"),
-}
-for q, result in queries.items():
-    print(f"{q}\n   → {sorted(result)} {[docs[i][:18] for i in sorted(result)]}")
+# (2) 分かち書きしてから入れる索引: 単語を空白で区切った文字列を入れ、空白で区切る tokenizer (unicode61) に任せる
+t = time.time()
+con.execute("CREATE VIRTUAL TABLE wak USING fts5(title, body, tokenize='unicode61')")
+con.executemany("INSERT INTO wak(rowid, title, body) VALUES (?, ?, ?)",
+                ((i, " ".join(seg(a)), " ".join(seg(b))) for i, a, b in zip(range(len(df)), df["title"], df["body"])))
+print(f"分かち書きの索引: {time.time() - t:.1f} 秒 (分かち書きを含む)")
+for name in ["docs", "tri", "wak"]:   # 表と索引の大きさ (dbstat で集計)
+    size = con.execute("SELECT sum(pgsize) FROM dbstat WHERE name = ? OR name GLOB ?", (name, name + "_*")).fetchone()[0]
+    print(f"  {name}: {size / 1e6:.0f} MB")
 ```
 
-- 転置索引は「この単語を含む文書はどれか」を即座に引ける構造。全文書を走査せずに済むので、数億件の文書でも高速に検索できる。
-- 出現位置まで持っておくと、フレーズ検索や「近くに出現する」という条件の検索ができる。最後の 2 つの結果の違い (語順どおりに並んでいるか) がその効果。
-- 日本語では単語の区切り方が検索結果を左右する。「東京都立大学」が 1 語になる辞書だと「東京」で検索しても当たらない。対策は、この章の文字 n-gram による検索。
-- 実用の検索エンジン (Lucene、Elasticsearch、Tantivy) も、この構造を圧縮し、スコア計算と組み合わせたもの。
+```python
+def to_wakati(query):
+    """クエリの "..." の中を、文書と同じように分かち書きする ("携帯電話" → "携帯 電話" のフレーズ)。
+    "..." の外は分かち書きしないので、語は必ず "..." で囲む (囲まない 携帯電話 は分かち書きの索引に当たらない)"""
+    return re.sub(r'"([^"]*)"', lambda m: '"' + " ".join(seg(m.group(1))) + '"', query)
+
+def search(query, table, k=0):
+    q = to_wakati(norm(query)) if table == "wak" else norm(query)
+    n = con.execute(f"SELECT count(*) FROM {table} WHERE {table} MATCH ?", (q,)).fetchone()[0]
+    if not k:
+        return n, []
+    # bm25() は小さいほどよく一致する。重みはタイトル 5、本文 1
+    top = con.execute(f"""SELECT docs.label, docs.title FROM {table} JOIN docs ON docs.id = {table}.rowid
+                          WHERE {table} MATCH ? ORDER BY bm25({table}, 5.0, 1.0) LIMIT ?""", (q, k)).fetchall()
+    return n, top
+
+queries = [
+    '"iPhone" AND "バッテリー"',
+    '"サッカー" AND ("日本代表" OR "なでしこ")',
+    '"スマートフォン" NOT "Android"',      # FTS5 の NOT は「A NOT B」の二項演算
+    '"携帯電話"',                          # フレーズ: 語がこの順番で隣り合う
+    '"携帯" AND "電話"',                    # 語順・位置を問わない
+    'NEAR("iPhone" "ケース", 5)',           # 間が 5 トークン以内 (trigram は 1 文字ずつ、分かち書きは 1 語ずつ数える)
+    'title : "iPhone"',                     # タイトルの列だけで探す
+]
+for q in queries:
+    (n_tri, top), (n_wak, _) = search(q, "tri", k=2), search(q, "wak")
+    print(f"{q}\n   trigram {n_tri} 件 / 分かち書き {n_wak} 件  {to_wakati(norm(q))}")
+    for label, title in top:
+        print(f"     [{label}] {title[:40]}")
+```
+
+```python
+# 1 語のクエリで、部分文字列としての出現 (str.contains) と比べる
+def contains(s):
+    return int((df["title"].str.contains(s, regex=False) | df["body"].str.contains(s, regex=False)).sum())
+
+rows = []
+for w in ["東京", "京都", "東京都", "スマートフォン", "日本代表", "iPhone", "iphone"]:
+    rows.append({"語": w, "分かち書き": " ".join(seg(w)), "部分文字列": contains(w),
+                 "trigram": search(f'"{w}"', "tri")[0], "分かち書き索引": search(f'"{w}"', "wak")[0],
+                 "分かち書き索引 (末尾を前方一致)": search(f'"{w}" *', "wak")[0]})
+print(pd.DataFrame(rows).to_string(index=False))
+# 文書の中での区切られ方の例
+print(seg("東京都内で"), seg("東京都千代田区"), seg("最新のハイスペックスマートフォン「"))
+# 「京都」の部分文字列の一致のうち、「東京都」の一部でないものがある文書の数
+no_tokyo = (df["title"] + "\n" + df["body"]).str.replace("東京都", "", regex=False)
+print("「東京都」を除いても「京都」を含む文書:", int(no_tokyo.str.contains("京都", regex=False).sum()), "件")
+```
+
+```python
+# trigram の索引は 3 文字未満の語を MATCH で探せない。LIKE なら探せるが、3 文字未満のパターンでは索引を使わず全件を調べる
+for sql, arg in [("SELECT count(*) FROM tri WHERE tri MATCH ?", '"東京都"'),
+                 ("SELECT count(*) FROM tri WHERE body LIKE ?", "%東京都%"),
+                 ("SELECT count(*) FROM tri WHERE body LIKE ?", "%東京%"),
+                 ("SELECT count(*) FROM wak WHERE wak MATCH ?", '"東京"')]:
+    t = time.perf_counter()
+    for _ in range(10):
+        n = con.execute(sql, (arg,)).fetchone()[0]
+    print(f"{(time.perf_counter() - t) / 10 * 1000:7.2f} ms  {n:5d} 件  {sql.split('WHERE')[1].strip()} {arg}")
+t = time.perf_counter()
+n = int(df["body"].str.contains("東京", regex=False).sum())
+print(f"{(time.perf_counter() - t) * 1000:7.2f} ms  {n:5d} 件  pandas の str.contains (本文) 東京")
+```
+
+- FTS5 は SQLite に組み込まれた全文検索の機能で、Python の標準ライブラリの sqlite3 から使える。検索サーバーも追加のパッケージも要らず、`sqlite3.connect("ファイル名")` にすれば索引をファイルに保存して持ち運べる。SQLite はパブリックドメイン。trigram の tokenizer は SQLite 3.34.0 以降で使える (Colab の Python の SQLite は上の出力の版)。
+- クエリは FTS5 の構文で書き、`AND`、`OR`、`NOT`、かっこ、`"..."` のフレーズ、`NEAR(..., N)`、`列名 : ...`、末尾の `*` (前方一致) が使える。`NOT` は「A NOT B」の二項演算で、単独の否定は書けない。`bm25()` の値は小さい (負に大きい) ほどよく一致し、引数で列ごとの重みを渡せる。分かち書きの索引では、クエリの `"..."` の中も文書と同じ方法で分かち書きしてフレーズにする (`to_wakati`)。`"..."` の外は分かち書きしないので、語は必ず `"..."` で囲む。FTS5 は語の出現位置も索引に持つので、フレーズ `"携帯 電話"` (366 件) と、語順や位置を問わない `"携帯" AND "電話"` (390 件) を区別できる。
+- trigram の索引は、3 文字以上の語なら部分文字列の出現と同じ件数がヒットした (東京都 298 件、スマートフォン 1074 件。英字は大文字と小文字を区別しないぶん多くなり、iPhone は部分文字列の 881 件に対して 884 件)。そのかわり、3 文字未満の「東京」「京都」は MATCH で 0 件になり、`"携帯" AND "電話"` のように短い語を含むクエリ全体も 0 件になる。LIKE なら探せるが、3 文字未満のパターンは索引を使わない全件の走査になり、上の出力では `%東京%` (54 ms) が `%東京都%` (2.8 ms) より 1 桁以上遅く、メモリ上の pandas の str.contains (8 ms) よりも遅かった。索引を引く MATCH は 0.1 ms 前後で、全件を調べる方法より桁違いに速い (時間は実行ごとに変わる)。また「京都」を部分文字列で探すと 361 件当たるが、「東京都」を取り除いても「京都」を含む文書は 68 件なので、残りは「東京都」の一部への一致である。
+- 分かち書きしてから入れる索引は、2 文字の語も探せて、「京都」は「東京都」に当たらない (68 件で、「東京都」を除いた部分文字列の件数と同じ)。そのかわり、文書の中での区切られ方がクエリと違うと漏れる。「東京都内」は「東京 / 都内」と区切られるので、フレーズ「東京 都」では 190 件にとどまり、末尾を前方一致にした `"東京 都" *` で 298 件に戻る。「スマートフォン」は 11 件漏れ、前方一致でも戻らない。主な原因は、カタカナが長く続く文脈で全体が 1 語 (ハイスペックスマートフォン) になることである。
+- 2 つの索引は弱点が逆なので、両方を持って結果を合わせる構成が実用的 (この章の「単語に区切らず文字 n-gram で検索する (表記ゆれに強い検索)」も参照)。どちらの tokenizer も英字の大文字と小文字を区別しない (既定) ので、「iphone」でも 884 件ヒットする。`NEAR` の距離はトークンの数なので、trigram (1 文字ずつ) と分かち書き (1 語ずつ) では同じ N でも範囲が違う (29 件と 59 件)。
+- 複数の人がサーバーとして使う、kuromoji の検索モードや同義語を使う、といった場合は、この章の「Elasticsearch で日本語の全文検索をする (kuromoji)」へ進む。Rust 製の検索ライブラリ Tantivy にも Python 版があり (`pip install tantivy`、MIT ライセンス)、分かち書きした文字列を入れれば日本語にも使えるはずである (ここでは試していない)。
+- データは livedoor ニュースコーパス (株式会社ロンウイット配布)。各記事は CC BY-ND 2.1 JP (表示 - 改変禁止) で、ここでは索引を作って検索するだけにしている。fugashi は MIT ライセンス (同梱の MeCab は BSD ライセンス)、辞書の unidic-lite は UniDic (BSD ライセンスなどから選べる) を含む。
+- 転置索引を自分で実装して仕組み (出現位置を使ったフレーズ検索など) を確かめる版は、付録「仕組みを理解するための実装」の「転置索引を自作してブール検索・フレーズ検索をする」にある。
 
 ## TF-IDF とコサイン類似度で似た文書を探す {tfidf_similarity}
 
@@ -108,74 +174,6 @@ for i in np.argsort(-sims)[1:3]:
 
 - 日本語の場合は `TfidfVectorizer(tokenizer=分かち書き関数, token_pattern=None)` とする。
 - 文字 n-gram (`analyzer="char", ngram_range=(2, 3)`) にすると、分かち書きなしで表記ゆれにも強くなる。
-
-## BM25 を自分で実装してパラメータの働きを確かめる {bm25_scratch}
-
-キーワード検索の標準的なスコアである BM25 が、何を計算しているのかを理解したい。パラメータ k1 と b を変えると何が起きるかを見たい。
-
-```python
-!pip install -q rank_bm25 fugashi unidic-lite
-```
-
-```python
-import math
-from collections import Counter
-import numpy as np
-from fugashi import Tagger
-
-tagger = Tagger()
-tok = lambda s: [w.surface for w in tagger(s) if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
-
-docs = [
-    "猫は可愛い。",
-    "猫と犬はどちらも人気のあるペットで、猫は室内で、犬は散歩が必要なので屋外でも飼われることが多い。",
-    "猫、猫、猫。猫が大好きだ。",
-    "犬の散歩は毎日の習慣である。",
-    "ペットを飼うと生活が豊かになると言われている。",
-]
-tokenized = [tok(d) for d in docs]
-N, avgdl = len(docs), np.mean([len(d) for d in tokenized])
-df = Counter(t for d in tokenized for t in set(d))
-
-def bm25(query, k1=1.5, b=0.75):
-    scores = []
-    for d in tokenized:
-        tf, total = Counter(d), 0.0
-        for t in tok(query):
-            if t not in tf:
-                continue
-            idf = math.log((N - df[t] + 0.5) / (df[t] + 0.5) + 1)           # 珍しい語ほど重い
-            norm = tf[t] * (k1 + 1) / (tf[t] + k1 * (1 - b + b * len(d) / avgdl))   # 出現回数は頭打ち、長い文書は割り引く
-            total += idf * norm
-        scores.append(total)
-    return np.array(scores)
-
-for q in ["猫", "猫 ペット"]:
-    print(q, bm25(q).round(2).tolist())
-```
-
-```python
-# k1: 出現回数をどこまで重視するか / b: 文書の長さでどこまで割り引くか
-print("文書の長さ:", [len(d) for d in tokenized])
-for k1, b in [(1.5, 0.75), (0.0, 0.75), (10.0, 0.75), (1.5, 0.0), (1.5, 1.0)]:
-    s = bm25("猫", k1, b)
-    print(f"k1={k1:4} b={b:4}  スコア {s[:3].round(2).tolist()}  順位 {np.argsort(-s)[:3].tolist()}")
-```
-
-```python
-# ライブラリの実装と順位が一致することを確かめる (IDF の式に細かい違いがあるので値は少し違う)
-from rank_bm25 import BM25Okapi
-
-lib = BM25Okapi(tokenized, k1=1.5, b=0.75).get_scores(tok("猫 ペット"))
-mine = bm25("猫 ペット")
-print(lib.round(2).tolist(), np.argsort(-lib).tolist())
-print(mine.round(2).tolist(), np.argsort(-mine).tolist())
-```
-
-- BM25 = 「語の珍しさ (IDF)」×「その文書での出現回数 (頭打ちあり)」を、クエリの語について足したもの。
-- k1 を 0 にすると出現回数を無視する (含むか含まないかだけ)。大きくすると、同じ語を繰り返す文書ほど高くなる。
-- b を 0 にすると文書の長さを無視し、1 にすると長さに比例して割り引く。長い文書は語を多く含みやすいので、その有利さを打ち消している。
-- 既定値 (k1=1.2〜2.0、b=0.75) は多くの場合そのままでよい。タイトルのような短い文書ばかりなら b を小さくする。
 
 ## BM25 で日本語のキーワード検索をする {bm25_ja}
 
@@ -375,7 +373,7 @@ server.wait(timeout=120)
 print("終了コード", server.returncode)   # 143 = SIGTERM で終了した
 ```
 
-- Elasticsearch は、検索ライブラリ Lucene の転置索引を HTTP の API で使えるようにした検索サーバー。この版 (9.5.6) は Lucene 10.5.2 を使っている。スコアの既定は BM25 で、explain の内訳のとおり k1=1.2、b=0.75、IDF は log(1 + (N − n + 0.5) / (n + 0.5))。boost の 2.2 は k1 + 1 にあたり、この章の「BM25 を自分で実装してパラメータの働きを確かめる」の式と同じ形になる。
+- Elasticsearch は、検索ライブラリ Lucene の転置索引を HTTP の API で使えるようにした検索サーバー。この版 (9.5.6) は Lucene 10.5.2 を使っている。スコアの既定は BM25 で、explain の内訳のとおり k1=1.2、b=0.75、IDF は log(1 + (N − n + 0.5) / (n + 0.5))。boost の 2.2 は k1 + 1 にあたり、付録「仕組みを理解するための実装」の「BM25 を自分で実装してパラメータの働きを確かめる」の式と同じ形になる。
 - 自前の BM25 (rank_bm25 の BM25Okapi) と比べると、スコアが 0 より大きい文書の順位は同じだが、スコアの値とヒットする文書の数が違う。BM25Okapi の IDF は log((N − n + 0.5) / (n + 0.5)) なので、6 件中 3 件に出る「日本」の IDF が 0 になり、「日本」だけが一致する文書のスコアが 0 になる。Lucene の IDF は 1 を足してから対数をとるので、必ず正になる。k1 の既定値 (rank_bm25 は 1.5、Lucene は 1.2) や、単語の区切り方 (unidic-lite と kuromoji に内蔵の辞書) も違う。
 - kuromoji の検索モードは、長い複合語を、全体 (関西国際空港) と部分 (関西 / 国際 / 空港) の両方のトークンにするので、「空港」のような部分の語でも当たるようになる。通常モードでは複合語が 1 語のまま。標準のアナライザ (standard) は、漢字やひらがなを 1 文字ずつに分けてしまう (カタカナの続きは 1 語)。
 - 品詞による除外 (`kuromoji_part_of_speech`) とストップワード (`ja_stop`) で、「で」「を」「とは」「です」のような機能語が消える (「BERT とは何ですか」→ bert, 何)。`kuromoji_baseform` は活用語を原形に戻す (買い → 買う)。その結果、「高さ」の「高」も「高い」になり、「日本で一番高い山」で東京スカイツリーの文書がヒットしている。原形化は検索漏れを減らすが、このような意図しない一致も増やす。
@@ -951,6 +949,147 @@ print("関連度順:", round(redundancy(top), 3), " MMR:", round(redundancy(mmr(
 - RAG では、同じ内容のチャンクを何個も渡しても情報が増えない。MMR で多様にすると、限られた件数で広い範囲の情報を渡せる。
 - 多様にしすぎると関連の薄い文書が入る。λ は 0.5〜0.8 あたりから試す。
 - 完全に同じ内容の文書は、検索より前に重複除去しておく (文字列処理と正規化の章の MinHash を参照)。
+
+## 記事に似た記事を推薦する (関連記事、重複除去・多様化・新しさ) {related_articles gpu}
+
+ニュースサイトの記事の下に「関連記事」を 5 件出したい。埋め込みで似た記事を探すだけでなく、ほぼ同じ内容の記事を除き、似た記事ばかりにならないようにし、新しさも考慮して、その効果を数値で比べたい。
+
+```python
+import io, tarfile, urllib.request
+import numpy as np
+import pandas as pd
+
+def load_livedoor():
+    """livedoor ニュースコーパス (株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP)。1 行目 URL、2 行目 日付、3 行目 タイトル"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "date": lines[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+df = load_livedoor()
+df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert("Asia/Tokyo")
+print(len(df), "記事", df["date"].min().date(), "〜", df["date"].max().date())
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+# 記事 = タイトル + 本文の冒頭 120 字。e5 は文同士の類似度 (対称なタスク) では両側に "query: " を付ける
+model = SentenceTransformer("intfloat/multilingual-e5-small")   # MIT ライセンス
+model.max_seq_length = 128                                   # これを超えるトークンは切られる。120 字ならほぼ全記事が収まる
+body = df["text"].str.split().str.join(" ").str[:120]
+emb = model.encode(("query: " + df["title"] + "\n" + body).tolist(),
+                   normalize_embeddings=True, batch_size=64, show_progress_bar=False)   # GPU (T4) なら 1 分以内。CPU だけでも動くが Colab では 10〜15 分
+
+S = emb @ emb.T
+np.fill_diagonal(S, -np.inf)                                 # 自分自身は推薦しない
+C = 50                                                       # 類似度の上位 50 件を候補にして、その中から選ぶ
+top = np.argpartition(-S, C, axis=1)[:, :C]                 # 上位 50 件 (順不同) だけを取り出し、
+cand = np.take_along_axis(top, np.argsort(-np.take_along_axis(S, top, axis=1), axis=1), axis=1)   # 類似度順に並べる
+del top
+print(emb.shape, "候補", cand.shape)
+```
+
+```python
+from sklearn.feature_extraction.text import CountVectorizer
+
+# 「ほぼ同じ内容」は埋め込みではなく、本文の文字 5-gram の Jaccard 係数で判定する (テンプレート記事や重複掲載を拾う)
+X = CountVectorizer(analyzer="char", ngram_range=(5, 5), binary=True, dtype=np.float32).fit_transform(
+    df["text"].str.replace(r"\s+", "", regex=True))
+size = np.asarray(X.sum(axis=1)).ravel()
+N = len(df)
+JB = np.empty((N, C + 1, C + 1), dtype=np.float32)          # 記事ごとに [元の記事, 候補 50 件] 同士の Jaccard 係数
+for i in range(N):                                           # Colab で 1〜2 分
+    b = np.r_[i, cand[i]]
+    inter = (X[b] @ X[b].T).toarray()
+    JB[i] = inter / (size[b][:, None] + size[b][None, :] - inter)
+
+labels = df["label"].to_numpy()
+age = (df["date"].max() - df["date"]).dt.days.to_numpy()     # コーパスの最終日を「今日」とみなした記事の古さ
+fresh = 0.5 ** (age / 180)                                   # 半減期 180 日の新しさ (今日 = 1、180 日前 = 0.5)
+
+def recommend(i, k=5, dup=None, lam=1.0, beta=0.0, gamma=0.0):
+    """dup: Jaccard 係数がこれを超える記事を除く / lam: MMR の重み (1 なら類似度順)
+    beta: 新しさのボーナス / gamma: 同じカテゴリのボーナス
+    返り値: 推薦する記事の番号と、候補 50 件の中での位置 (JB を引くのに使う)"""
+    c, J = cand[i], JB[i]
+    rel = S[i, c] + beta * fresh[c] + gamma * (labels[c] == labels[i])
+    ok = np.ones(C, dtype=bool) if dup is None else J[0, 1:] <= dup
+    red, chosen = np.zeros(C), []
+    for _ in range(k):
+        score = np.where(ok, lam * rel - (1 - lam) * red, -np.inf)
+        p = int(np.argmax(score))
+        if not np.isfinite(score[p]):
+            break
+        chosen.append(p)
+        ok[p] = False
+        if dup is not None:
+            ok &= J[p + 1, 1:] <= dup                        # 選んだ記事とほぼ同じ記事も除く
+        red = np.maximum(red, emb[c] @ emb[c[p]])            # 選んだ記事との最大類似度 (MMR の罰則)
+    chosen = np.array(chosen, dtype=int)
+    return c[chosen], chosen
+```
+
+```python
+i = int(np.flatnonzero(df["title"].str.contains("土屋アンナ編"))[0])
+print(f"元の記事: [{labels[i]}] {df['title'][i]}")
+for name, kw in [("類似度の上位 5 件", {}), ("近重複を除く + MMR (λ=0.7)", {"dup": 0.5, "lam": 0.7})]:
+    print(name)
+    recs, pos = recommend(i, **kw)
+    for j, p in zip(recs, pos):
+        print(f"  類似度 {S[i, j]:.3f}  Jaccard {JB[i][0, p + 1]:.2f}  本文 {len(df['text'][j]):4d} 字  "
+              f"{df['date'][j].date()} [{labels[j]}] {df['title'][j][:36]}")
+```
+
+```python
+def gini(counts):
+    """推薦される回数の偏り (0 = 全記事が同じ回数、1 に近いほど一部の記事に集中)"""
+    x = np.sort(counts)
+    n = len(x)
+    return float(((2 * np.arange(1, n + 1) - n - 1) * x).sum() / (n * x.sum()))
+
+def evaluate(**kw):
+    out = [recommend(i, **kw) for i in range(N)]
+    recs = [r for r, _ in out]
+    counts = np.bincount(np.concatenate(recs), minlength=N)
+    def has_dup(i, pos):                                     # 元の記事と推薦した記事の組のどれかが Jaccard 0.5 超
+        b = np.r_[0, pos + 1]
+        return (JB[i][np.ix_(b, b)][np.triu_indices(len(b), 1)] > 0.5).any()
+    return {
+        "類似度": np.mean([S[i, r].mean() for i, r in enumerate(recs)]),
+        "同カテゴリ率": np.mean([(labels[r] == labels[i]).mean() for i, r in enumerate(recs)]),
+        "カバレッジ": (counts > 0).mean(),                    # 1 回以上推薦された記事の割合
+        "Gini": gini(counts),
+        "最多の推薦回数": counts.max(),                       # いちばん多く推薦された記事の回数
+        "リスト内類似度": np.mean([(emb[r] @ emb[r].T)[np.triu_indices(len(r), 1)].mean() for r in recs]),
+        "近重複を含む率": np.mean([has_dup(i, p) for i, (_, p) in enumerate(out)]),
+        "平均の古さ(日)": np.mean([age[r].mean() for r in recs]),
+    }
+
+settings = {
+    "類似度の上位 5 件": {},
+    "+ 近重複を除く": {"dup": 0.5},
+    "+ MMR (λ=0.7)": {"dup": 0.5, "lam": 0.7},
+    "+ MMR (λ=0.5)": {"dup": 0.5, "lam": 0.5},
+    "+ MMR (λ=0.7) + 新しさ (β=0.02)": {"dup": 0.5, "lam": 0.7, "beta": 0.02},
+    "+ MMR (λ=0.7) + 新しさ (β=0.05)": {"dup": 0.5, "lam": 0.7, "beta": 0.05},
+    "+ MMR (λ=0.7) + 同カテゴリ (γ=0.02)": {"dup": 0.5, "lam": 0.7, "gamma": 0.02},
+}
+pd.DataFrame({name: evaluate(**kw) for name, kw in settings.items()}).T.round(3)
+```
+
+- 流れは「埋め込みの類似度で候補を 50 件に絞る → ほぼ同じ内容の記事を除く → MMR (この章の「検索結果の重複を減らして多様にする (MMR)」) で選ぶ → 新しさやカテゴリのボーナスを足す」。記事の埋め込みと推薦リストは記事の公開時やバッチで計算しておき、表示のときは引くだけにする。ここでは全記事の類似度行列 (7367 × 7367) を作ったが、件数が多いときはこの章の「FAISS で大量のベクトルから高速に近傍検索する」で候補を取る。埋め込みは本文の冒頭 120 字までにした。300 字にしても `max_seq_length=128` を超えた分は切られ、128 より長くすると時間がかかる。
+- 例の上位 4 件は、本文が 40 字ほどしかない同じ形式の写真記事 (同じ連載の別のモデルの回) で、テンプレートの共通部分のために Jaccard 係数が 0.60〜0.63 と高い。本当の重複掲載は、同じタイトルで日付だけが違う「佐々木希編」の 2 本である。この例では埋め込みの類似度でも近重複 (0.957〜0.965) と別の記事 (0.923) は分かれているが、Jaccard 係数 (0.60 以上と 0.04) の方が差がはっきりする。近重複を含む推薦リストは、類似度の上位 5 件では全記事の 5.5% だった。しきい値 0.5 は、短い記事では連載の各回まで除く。連載の各回は除くより「連載の他の回」として別枠に出す方がよいこともある。大量の文書なら文字列処理と正規化の章の「MinHash と LSH で大量文書からほぼ重複を見つける」を使う。
+- 類似度の上位だけでは推薦が一部の記事に偏り (Gini 係数 0.451、最も多く推薦された記事は 52 回)、1 回も推薦されない記事が 1 割近く残る (カバレッジ 0.913)。MMR (λ=0.7) にすると、カバレッジは 0.970、Gini 係数は 0.344、最多の回数は 23 回になり、元の記事との平均類似度は 0.903 から 0.900 とわずかしか下がらない。ただし例の 3・4 件目 (独女通信の年間まとめ、東京オートサロンの写真集) のように、関係の薄い記事も入る。λ=0.5 では同カテゴリ率が 0.650 まで下がる。
+- 新しさのボーナスを強くすると (β=0.05)、MMR (λ=0.7) だけのときと比べて、推薦される記事の平均の古さは 280 日から 98 日になるが、カバレッジは 0.970 から 0.727 に下がり、最多の回数は 134 回になる (新しい記事に推薦が集まり、古い記事は推薦されなくなる)。時期の決まった話題では、今日からの古さより元の記事の日付との近さを使う方が自然なこともある。コーパスの日付には誤りらしいものがある (例の 2011 年の東京ガールズコレクションの記事に 2009 年の日付) ので、日付を使う前に分布を確かめる。
+- 同カテゴリ率は関連度の手軽な代理だが、カテゴリをスコアに入れると (γ=0.02 で 0.955) 当然上がるので、スコアに使った情報で評価してはいけない。これらのオフラインの指標はトレードオフを見るためのもので、最終的にはクリック率や回遊率を A/B テストで比べる。
+- livedoor ニュースコーパスは株式会社ロンウイットが配布しているもので、記事は CC BY-ND 2.1 JP (改変禁止)、`intfloat/multilingual-e5-small` は MIT ライセンス。
 
 ## 長い文書を分割して検索し、文書単位にまとめる {long_document_retrieval}
 

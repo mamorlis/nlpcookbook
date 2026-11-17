@@ -68,7 +68,7 @@ print("Sentence Transformers と一致:", torch.allclose(st, emb, atol=1e-4))
 ```
 
 - どのプーリング (平均 / CLS / 最後のトークン) を使うべきかはモデルの学習方法で決まる。モデルカードの指定に従う。
-- 素の BERT (文埋め込み用に学習されていないモデル) の平均ベクトルは、類似度計算にはあまり向かない。対照学習で文埋め込みモデルにすると何が変わるかは、この章の「対照学習 (SimCSE) で素の BERT から文埋め込みモデルを作る」を参照。
+- 素の BERT (文埋め込み用に学習されていないモデル) の平均ベクトルは、類似度計算にはあまり向かない。対照学習で文埋め込みモデルにすると何が変わるかは、この章の「文埋め込み用でない BERT を対照学習で文埋め込みモデルにする (SimCSE、Sentence Transformers)」を参照。
 
 ## 重複・言い換えの文ペアを見つける {paraphrase_mining}
 
@@ -241,28 +241,24 @@ for name in ["sentence-transformers/all-MiniLM-L6-v2", "intfloat/multilingual-e5
 - STS の評価は Spearman の順位相関で報告するのが慣例。
 - 日本語なら JGLUE の JSTS や JSICK を使う。複数タスクでまとめて評価するなら MTEB / JMTEB。
 
-## 対照学習 (SimCSE) で素の BERT から文埋め込みモデルを作る {simcse gpu}
+## 文埋め込み用でない BERT を対照学習で文埋め込みモデルにする (SimCSE、Sentence Transformers) {simcse gpu}
 
-文埋め込み用に学習されていない素の BERT から、ラベルなしの文だけで文埋め込みモデルを作りたい。同じ文をドロップアウトの違う 2 回で埋め込んで正例にする対照学習 (教師なし SimCSE) を、損失から自分で書く。
+分野に合った文埋め込みモデルがなく、手元にあるのは文埋め込み用に学習されていない BERT とラベルなしの文 (あれば NLI のような文の組) だけである。Sentence Transformers の `SentenceTransformerTrainer` と `MultipleNegativesRankingLoss` で対照学習 (SimCSE) をして、文埋め込みモデルを作る。
 
 ```python
-!pip install -q fugashi unidic-lite datasets
+!pip install -q fugashi unidic-lite datasets accelerate
 ```
 
 ```python
 import json, random, re, urllib.request
 import numpy as np
 import torch
-import torch.nn.functional as F
-from datasets import load_dataset
-from scipy.stats import spearmanr
-from transformers import AutoModel, AutoTokenizer
+from datasets import Dataset, load_dataset
 from transformers.utils import logging
 
 logging.set_verbosity_error()   # モデルを読むたびに出る「使わない重み」の一覧を出さない
 random.seed(0); np.random.seed(0); torch.manual_seed(0)
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-DTYPE = torch.bfloat16 if BF16 else torch.float16
 
 # 学習データ: 日本語 Wikipedia (wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL) の先頭の記事から文を切り出す
 # streaming=True なので全体 (約 4GB) はダウンロードしない
@@ -276,100 +272,112 @@ for article in wiki:
 random.shuffle(sents)
 print(len(sents), "文", sents[:3])
 
-# 評価データ: JGLUE の JSTS v1.3 のテストセット (1589 組、0〜5 の類似度、CC BY-SA 4.0)
-url = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jsts-v1.3/test-v1.3.json"
-jsts = [json.loads(l) for l in urllib.request.urlopen(url).read().decode("utf-8").splitlines()]
-print(len(jsts), "組", jsts[1])
+# 評価データ: JGLUE の JSTS v1.3 (0〜5 の類似度、CC BY-SA 4.0)。検証セット (1457 組) でチェックポイントを選び、テストセット (1589 組) で最後に測る
+def load_jsts(split):
+    url = f"https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jsts-v1.3/{split}-v1.3.json"
+    return [json.loads(l) for l in urllib.request.urlopen(url).read().decode("utf-8").splitlines()]
+jsts_valid, jsts_test = load_jsts("valid"), load_jsts("test")
+print(len(jsts_valid), "組 /", len(jsts_test), "組", jsts_test[1])
 ```
 
 ```python
+from scipy.stats import spearmanr
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.sentence_transformer.evaluation import EmbeddingSimilarityEvaluator   # 5.7 より前の版では sentence_transformers.evaluation
+
 name = "tohoku-nlp/bert-base-japanese-v3"   # 東北大の日本語 BERT (Apache 2.0)。MLM で事前学習しただけで、文埋め込み用の学習はしていない
-tokenizer = AutoTokenizer.from_pretrained(name)
 
-def embed(model, texts, max_length=64):
-    """平均プーリング (この章の「BERT の出力から文ベクトルを自分で作る」と同じ)"""
-    batch = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt").to("cuda")
-    with torch.autocast("cuda", dtype=DTYPE):
-        hidden = model(**batch).last_hidden_state
-    mask = batch["attention_mask"].unsqueeze(-1).float()
-    return (hidden.float() * mask).sum(1) / mask.sum(1)
-
-@torch.no_grad()
-def jsts_cos(model):
-    model.eval()   # 評価ではドロップアウトを切る
-    e1 = torch.cat([embed(model, [d["sentence1"] for d in jsts[i:i + 256]]) for i in range(0, len(jsts), 256)])
-    e2 = torch.cat([embed(model, [d["sentence2"] for d in jsts[i:i + 256]]) for i in range(0, len(jsts), 256)])
-    return F.cosine_similarity(e1, e2).cpu().numpy()
-
-gold = np.array([d["label"] for d in jsts])
-jsts_spearman = lambda model: spearmanr(jsts_cos(model), gold).statistic   # この章の「文の意味的類似度 (STS) でモデルを評価する」と同じ指標
-
-bert = AutoModel.from_pretrained(name).to("cuda")
-print(f"学習前の BERT (平均プーリング): JSTS Spearman = {jsts_spearman(bert):.4f}")
-```
-
-```python
-def simcse_loss(z1, z2, temperature=0.05, z3=None):
-    """InfoNCE。z1[i] と z2[i] が正例、z2[j] (j≠i) はすべて負例。z3 を渡すと z3[j] も負例 (ハードネガティブ) に加える"""
-    z1, z2 = F.normalize(z1, dim=-1), F.normalize(z2, dim=-1)
-    sim = z1 @ z2.T                                         # (N, N) のコサイン類似度。対角が正例
-    if z3 is not None:
-        sim = torch.cat([sim, z1 @ F.normalize(z3, dim=-1).T], dim=1)   # (N, 2N)
-    labels = torch.arange(len(z1), device=z1.device)        # i 行目の正解は i 列目
-    return F.cross_entropy(sim / temperature, labels)       # 「N 個 (2N 個) の候補から正例を当てる」分類の損失
-
-def train(examples, batch_size=64, temperature=0.05, lr=3e-5, supervised=False, seed=0):
-    torch.manual_seed(seed)
-    model = AutoModel.from_pretrained(name).to("cuda").train()   # train() でドロップアウト (p=0.1) が有効になる
-    opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    steps = len(examples) // batch_size
-    sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1 - s / steps)   # 学習率を線形に 0 まで下げる
-    scaler = torch.amp.GradScaler(enabled=not BF16)                          # float16 の勾配のアンダーフロー対策
-    for s in range(steps):
-        batch = examples[s * batch_size:(s + 1) * batch_size]
-        if supervised:   # (前提, 含意, 矛盾) の三つ組を 1 回の順伝播で埋め込む
-            z = embed(model, [a for a, _, _ in batch] + [p for _, p, _ in batch] + [n for _, _, n in batch], max_length=32)
-            z1, z2, z3 = z.chunk(3)
-        else:            # 同じ文を 2 回並べる。ドロップアウトのマスクが行ごとに違うので、2 つの埋め込みは少しずれる
-            z1, z2 = embed(model, batch + batch, max_length=32).chunk(2)   # 学習は 32 トークンで切る (論文と同じ)
-            z3 = None
-        loss = simcse_loss(z1, z2, temperature, z3)
-        opt.zero_grad(); scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); sched.step()
-        if s % 100 == 0 or s == steps - 1:
-            print(f"step {s:4d}  loss {loss.item():.3f}")
+def new_model():
+    # Sentence Transformers 用の設定がないモデル名を渡すと、BERT + 平均プーリングの文埋め込みモデルが組み立てられる
+    model = SentenceTransformer(name, device="cuda")
+    model.max_seq_length = 64
     return model
 
-# 12800 文、バッチ 64 で 200 ステップ。乱数の種を変えて 3 回学習する (Colab の T4 で 2〜4 分の見込み)
+def sts_evaluator(data, split):
+    return EmbeddingSimilarityEvaluator([d["sentence1"] for d in data], [d["sentence2"] for d in data],
+                                        [d["label"] / 5 for d in data], batch_size=256, name=f"jsts-{split}")
+dev_eval, test_eval = sts_evaluator(jsts_valid, "dev"), sts_evaluator(jsts_test, "test")
+jsts_spearman = lambda model: test_eval(model)["jsts-test_spearman_cosine"]   # この章の「文の意味的類似度 (STS) でモデルを評価する」と同じ指標
+
+bert = new_model()
+print(bert)
+print(f"学習前の BERT (平均プーリング): JSTS 検証の Spearman = {dev_eval(bert)['jsts-dev_spearman_cosine']:.4f}"
+      f"  テストの Spearman = {jsts_spearman(bert):.4f}")
+```
+
+```python
+import shutil
+from sentence_transformers import SentenceTransformerTrainer, SentenceTransformerTrainingArguments
+from sentence_transformers.sentence_transformer.training_args import BatchSamplers   # 5.7 より前の版では sentence_transformers.training_args
+from sentence_transformers.sentence_transformer.losses import MultipleNegativesRankingLoss, CachedMultipleNegativesRankingLoss   # 5.7 より前の版では sentence_transformers.losses
+
+def train(train_ds, batch_size=64, scale=20.0, lr=3e-5, seed=0, eval_steps=50):
+    """train_ds の 1 列目と 2 列目の同じ行が正例、バッチ内の他の行の 2 列目 (と 3 列目) が負例。scale は 1 / 温度"""
+    model = new_model()
+    args = SentenceTransformerTrainingArguments(
+        output_dir=f"ckpt-{len(train_ds)}-{batch_size}-{scale}-{seed}", save_only_model=True,
+        num_train_epochs=1, per_device_train_batch_size=batch_size, learning_rate=lr, fp16=not BF16, bf16=BF16, seed=seed, report_to="none", disable_tqdm=True, logging_steps=eval_steps,
+        # eval_steps ごとに JSTS の検証セットで測り、最後に最良のチェックポイントに戻す (テストセットでは選ばない)
+        eval_strategy="steps", eval_steps=eval_steps, save_strategy="steps", save_steps=eval_steps, save_total_limit=1,
+        load_best_model_at_end=True, metric_for_best_model="eval_jsts-dev_spearman_cosine",
+        # 同じ文が同じバッチに入ると、その文が自分の正例と同じなのに負例として扱われる (偽の負例)。それを避けるバッチの作り方
+        batch_sampler=BatchSamplers.NO_DUPLICATES)
+    if batch_size <= 64:
+        loss = MultipleNegativesRankingLoss(model, scale=scale)
+    else:
+        # 大きなバッチは GradCache 版にする。64 文ずつ順伝播するのでメモリはバッチ 64 程度で済み、損失は同じになる (ドロップアウトの乱数も再現する)。
+        # 普通の MultipleNegativesRankingLoss でバッチ 256 にすると、このノートブックの最大メモリが 15.9GB になり、T4 (16GB) には収まらない
+        loss = CachedMultipleNegativesRankingLoss(model, scale=scale, mini_batch_size=64)
+    trainer = SentenceTransformerTrainer(model=model, args=args, train_dataset=train_ds, loss=loss, evaluator=dev_eval)
+    trainer.train()
+    best = trainer.state.best_model_checkpoint.split("-")[-1]
+    print(f"選んだチェックポイント: {best} ステップ目 (検証セットの Spearman {trainer.state.best_metric:.4f})")
+    # チェックポイントは 1 つ約 0.44GB で、ckpt-* に最良と最新の 2 つまで残る。最良のモデルはもう読み込んであるので消す
+    shutil.rmtree(args.output_dir)
+    return model
+
+# 教師なし SimCSE: anchor と positive に同じ文を入れる。学習中はドロップアウト (p=0.1) が有効なので、同じ文でも 2 つの埋め込みは少しずれる
+unsup_ds = Dataset.from_dict({"anchor": sents[:12800], "positive": sents[:12800]})
+
+# 12800 文、バッチ 64 で 200 ステップ。乱数の種を変えて 3 回学習する (Colab の T4 で 5〜8 分の見込み)
 scores = []
 for seed in range(3):
-    simcse = train(sents[:12800], seed=seed)
+    simcse = train(unsup_ds, seed=seed)
     scores.append(jsts_spearman(simcse))
-    print(f"教師なし SimCSE (seed={seed}): JSTS Spearman = {scores[-1]:.4f}")
+    print(f"教師なし SimCSE (seed={seed}): JSTS テストの Spearman = {scores[-1]:.4f}")
 print(f"平均 {np.mean(scores):.4f} (最小 {min(scores):.4f}、最大 {max(scores):.4f})")
 ```
 
 ```python
-# 学習前後で、文の組の類似度がどう変わるか (simcse は上で最後に学習した seed=2 のモデル)
+# 学習前後で類似度の値がどう変わるか (simcse は上で最後に学習した seed=2 のモデル)
+def jsts_cos(model, data=jsts_test):
+    e1 = model.encode([d["sentence1"] for d in data], batch_size=256, normalize_embeddings=True, convert_to_tensor=True)
+    e2 = model.encode([d["sentence2"] for d in data], batch_size=256, normalize_embeddings=True, convert_to_tensor=True)
+    return (e1 * e2).sum(-1).float().cpu().numpy()
+
+gold = np.array([d["label"] for d in jsts_test])
 pairs = [("猫がソファの上で寝ている。", "ソファで猫が眠っています。"),
          ("猫がソファの上で寝ている。", "犬が公園を走り回っている。"),
          ("猫がソファの上で寝ている。", "株価が大きく値下がりした。")]
-bert.eval(); simcse.eval()   # ドロップアウトを切る
-with torch.no_grad():
-    for a, b in pairs:
-        r = [F.cosine_similarity(embed(m, [a]), embed(m, [b])).item() for m in (bert, simcse)]
-        print(f"学習前 {r[0]:.3f}  学習後 {r[1]:.3f}  {a} / {b}")
+for a, b in pairs:
+    r = [m.similarity(m.encode([a]), m.encode([b])).item() for m in (bert, simcse)]
+    print(f"学習前 {r[0]:.3f}  学習後 {r[1]:.3f}  {a} / {b}")
 
-# ランダムな文の組の類似度の平均: 素の BERT はどの文同士も似ている (異方性)
-with torch.no_grad():
-    for label, m in [("学習前", bert), ("学習後", simcse)]:
-        e = F.normalize(embed(m, sents[-512:]), dim=-1)
-        print(f"{label}: ランダムな文の組のコサイン類似度の平均 = {(e @ e.T)[~torch.eye(512, dtype=bool)].mean():.3f}")
+for label, m in [("学習前", bert), ("学習後", simcse)]:
+    # ランダムな文の組の類似度の平均: 素の BERT はどの文同士も似ている (異方性)
+    e = m.encode(sents[-512:], batch_size=256, normalize_embeddings=True, convert_to_tensor=True)
+    rand = (e @ e.T)[~torch.eye(512, dtype=bool, device=e.device)].mean().item()
+    # 人手の類似度が低い組 (0〜1) と高い組 (4〜5) のコサイン類似度の分布
+    c = jsts_cos(m)
+    lo, hi = c[gold <= 1], c[gold >= 4]
+    print(f"{label}: ランダムな組の平均 {rand:.3f}  JSTS の 0〜1 の組 {np.mean(lo):.3f} (90 パーセンタイル {np.percentile(lo, 90):.3f})"
+          f"  4〜5 の組 {np.mean(hi):.3f} (10 パーセンタイル {np.percentile(hi, 10):.3f})")
 ```
 
 ```python
-# 温度とバッチサイズを変えてみる (それぞれ 12800 文、seed=0。温度 0.05・バッチ 64 は上の seed=0 と同じ設定。Colab の T4 で 2〜4 分の見込み)
-for t, b in [(0.01, 64), (1.0, 64), (0.05, 256)]:
-    print(f"温度 {t:<4} バッチ {b:<3}: JSTS Spearman = {jsts_spearman(train(sents[:12800], batch_size=b, temperature=t)):.4f}")
+# 温度 (scale = 1 / 温度) とバッチサイズを変えてみる (それぞれ seed=0。既定の scale=20 は温度 0.05。Colab の T4 で 6〜10 分の見込み)
+for scale, b in [(100.0, 64), (1.0, 64), (20.0, 256)]:
+    print(f"温度 {1 / scale:<4} バッチ {b:<3}: JSTS テストの Spearman = {jsts_spearman(train(unsup_ds, batch_size=b, scale=scale, eval_steps=200 // (b // 64) // 4)):.4f}")
 ```
 
 ```python
@@ -387,9 +395,11 @@ triples = [(p, h["entailment"], h["contradiction"]) for p, h in hyp.items() if "
 random.shuffle(triples)
 print(len(triples), "組", triples[0])
 
-# 16000 組、バッチ 64 で 250 ステップ (ダウンロードを含めて Colab の T4 で 2〜3 分の見込み)
-sup = train(triples[:16000], lr=5e-5, supervised=True)
-print(f"教師あり SimCSE: JSTS Spearman = {jsts_spearman(sup):.4f}")
+# 3 列 (anchor, positive, negative) にすると、MultipleNegativesRankingLoss は negative の列もバッチ全体で負例に加える
+sup_ds = Dataset.from_dict(dict(zip(["anchor", "positive", "negative"], map(list, zip(*triples[:16000])))))
+# 16000 組、バッチ 64 で 250 ステップ (ダウンロードを含めて Colab の T4 で 2〜4 分の見込み)
+sup = train(sup_ds, lr=5e-5)
+print(f"教師あり SimCSE: JSTS テストの Spearman = {jsts_spearman(sup):.4f}")
 ```
 
 ```python
@@ -399,27 +409,22 @@ idx = np.random.default_rng(0).integers(0, len(gold), (1000, len(gold)))
 for a, b in [("学習前", "教師なし"), ("学習前", "教師あり")]:
     d = [spearmanr(cos[b][i], gold[i]).statistic - spearmanr(cos[a][i], gold[i]).statistic for i in idx]
     print(f"{b} − {a}: {np.mean(d):+.4f}  95% 信頼区間 [{np.percentile(d, 2.5):+.4f}, {np.percentile(d, 97.5):+.4f}]")
-```
 
-```python
-# 自作の損失は、Sentence Transformers の MultipleNegativesRankingLoss (scale=20 = 1/温度 0.05) と同じ値になる
-from sentence_transformers.losses import MultipleNegativesRankingLoss
-
-z1, z2, z3 = torch.randn(3, 8, 768)
-mnrl = MultipleNegativesRankingLoss(model=None)
-print("自作:", simcse_loss(z1, z2).item(), " MNRL:", mnrl.compute_loss_from_embeddings([z1, z2], None).item())
-print("自作 (ハードネガティブあり):", simcse_loss(z1, z2, z3=z3).item(), " MNRL:", mnrl.compute_loss_from_embeddings([z1, z2, z3], None).item())
+# 保存して読み直せば、この章のほかのレシピと同じように SentenceTransformer として使える
+sup.save("simcse-sup-ja")
+reloaded = SentenceTransformer("simcse-sup-ja")
+print(reloaded.similarity(reloaded.encode([pairs[0][0]]), reloaded.encode([pairs[0][1]])))
 print(f"最大メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f}GB")
 ```
 
-- 以下の数値は、A5000 で float16 の経路 (`BF16 = False`、T4 と同じ dtype) で実行したもの (最大メモリ 10.1GB)。学習の最初に出る `lr_scheduler.step()` の警告は、float16 の GradScaler が勾配のオーバーフローでそのステップを飛ばしたときに出るもので、害はない。
-- SimCSE は Gao, Yao, Chen (EMNLP 2021) の手法。教師なしでは、同じ文を 2 回エンコードしたときのドロップアウト (p=0.1) のマスクの違いだけがデータ拡張になり、バッチ内の他の文が負例になる。論文の教師なしは英語 Wikipedia の 100 万文、バッチ 64、学習率 3e-5、温度 0.05 で、[CLS] に MLP を載せて学習し、評価時は MLP を外す。教師ありは SNLI と MNLI (論文の記載で 31.4 万組)、バッチ 512、学習率 5e-5、3 エポック、[CLS] + MLP である。このレシピは平均プーリングで MLP を使わず、教師なしは 1 万 2800 文、教師ありはバッチ 64 で 1 万 6000 組 (1 エポック未満) に縮めた。論文は STS-B の開発セットで最良のチェックポイントを選んでいるが、ここでは選んでいない (教師なしの損失は 100 ステップで 0.001 まで下がっている)。
-- JSTS のテストセット (1589 組) の Spearman は、学習前の平均プーリングで 0.7536、教師なし SimCSE で 0.752〜0.763 (乱数の種 3 つ、平均 0.758) になり、seed=0 は学習前をわずかに下回った。seed=2 との差 (+0.0065) のブートストラップの 95% 信頼区間も 0 をまたぎ、この規模ではばらつきと区別できない。種を変えてもデータの順序は同じで、変わるのはドロップアウトの乱数だけなので、この幅は学習のばらつきを小さめに見せている可能性がある。日本語 SimCSE の報告 (Tsukagoshi ら 2023) は、約 100 万文で学習し、ハイパーパラメータとチェックポイントを開発セット (JSICK) で選んで、同じ BERT で JSTS の検証セット (このレシピのテストセットとは別) が 74.09 (学習前、平均プーリング) から 78.70 (5 回の平均) に上がったと報告している。
-- 類似度の値の分布は大きく変わる。ランダムな文の組のコサイン類似度の平均は 0.834 から 0.177 に、無関係な「猫が…」と「株価が…」は 0.755 から 0.119 に下がった。この章の「BERT の出力から文ベクトルを自分で作る (mean pooling)」で、素の BERT の平均ベクトルは類似度計算にあまり向かないとしたのはこの点で、順位 (Spearman) はそこそこでも、どの文の組も類似度が高く出る (異方性) ので、値をそのまま使ったりしきい値を決めたりするのに向かない。JSTS は短い画像の説明文の組なので、単語の重なりで判断しやすく、素の BERT に有利な面もある。
-- 温度を 1.0 にすると、損失は 3.2 付近で下げ止まり (ln 64 ≈ 4.16 に近いまま)、Spearman は 0.7258 と学習前より悪くなった。温度 0.01 (0.7676) とバッチ 256 (0.7695) は温度 0.05・バッチ 64 の seed=0 (0.7520) を上回ったが、どれも種 1 つだけで、種による幅も 0.01 あるので優劣は言えない。同じ種でも GPU の演算の非決定性で値が変わることがある。学習率は 3e-5 のまま変えていない。論文の付録は、学習率を合わせればバッチサイズにはあまり敏感でない、としている。
-- 教師あり SimCSE (JSNLI の含意を正例、矛盾をハードネガティブ) は 0.8257 で、学習前との差は +0.072 (95% 信頼区間 +0.055〜+0.090。評価の組を復元抽出するブートストラップで求めた。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照) だった。NLI のラベルが「同じ意味か」の教師信号になるので、論文でも Tsukagoshi らでも教師ありは教師なしより高い。JSNLI は SNLI を機械翻訳して自動で絞り込んだものである。また SNLI の元は Flickr30k の画像の説明文、JSTS は YJ Captions (MS COCO の画像の日本語説明文) で、分野が近いことも効いている可能性がある。
-- 検索の章の「検索用の埋め込みモデルを自分のデータで微調整する」で使う `MultipleNegativesRankingLoss` は、既定 (コサイン類似度、scale=20 = 温度 0.05) でこの `simcse_loss` と同じ値になる (最後のセル)。Sentence Transformers の説明でも、既定の設定は InfoNCE や SimCSE の損失とも呼ばれるとしている。違うのは正例の組の作り方だけで、検索の章は (クエリ, 文書)、教師なし SimCSE は (文, 同じ文)、教師ありは (前提, 含意) に矛盾を足した三つ組である。Sentence Transformers で教師なし SimCSE をするなら、anchor と positive に同じ文を入れて学習すればよい。
-- データとモデルの出典とライセンス: 日本語 Wikipedia (wikimedia/wikipedia、CC BY-SA 3.0 / GFDL)、JGLUE の JSTS (ヤフー、CC BY-SA 4.0)、JSNLI (京都大学、CC BY-SA 4.0)、tohoku-nlp/bert-base-japanese-v3 (Apache 2.0)。ハイパーパラメータや学習の打ち切りを決めるときは、テストセットではなく JSTS の学習セットなど別の開発データで選ぶ。
+- 以下の数値は、A5000 で float16 の経路 (`BF16 = False`、T4 と同じ dtype) で実行したもの (最大メモリ 6.9GB)。普通の `MultipleNegativesRankingLoss` でバッチ 256 にしたときは 15.9GB になったので、バッチ 64 より大きいときは `CachedMultipleNegativesRankingLoss` (GradCache、Gao ら 2021) を使う。64 文ずつ順伝播して勾配をためるので、メモリはバッチの大きさにほとんどよらない。そのかわり学習は遅くなる。
+- SimCSE は Gao, Yao, Chen (EMNLP 2021) の手法。教師なしでは、同じ文を 2 回エンコードしたときのドロップアウト (p=0.1) のマスクの違いだけがデータ拡張になり、バッチ内の他の文が負例になる。論文の教師なしは英語 Wikipedia の 100 万文、バッチ 64、学習率 3e-5、温度 0.05 で、[CLS] に MLP を載せて学習し、評価時は MLP を外す。教師ありは SNLI と MNLI (論文の記載で 31.4 万組)、バッチ 512、学習率 5e-5、3 エポックである。公開コードの教師なしの例 (run_unsup_example.sh) は最大 32 トークンで学習している。このレシピは平均プーリングで MLP を使わず、最大の長さを 64 トークンにし (学習に使う 1 万 2800 文のうち、32 トークンを超える文は 50%、64 トークンを超える文は 2.5%。評価も同じ長さで行う)、教師なしは 1 万 2800 文、教師ありはバッチ 64 で 1 万 6000 組 (1 エポック未満) に縮めた。論文と同じく開発用のデータ (ここでは JSTS の検証セット) で最良のチェックポイントを選んでいる。
+- JSTS のテストセット (1589 組) の Spearman は、学習前の平均プーリングで 0.7536、教師なし SimCSE で 0.7543〜0.7624 (乱数の種 3 つ、平均 0.7585) になった。seed=2 (0.7589) と学習前との差 (+0.0052) のブートストラップの 95% 信頼区間は −0.0078〜+0.0185 で 0 をまたぎ、この規模ではばらつきと区別できない。検証セットでも 0.7409 から 0.750〜0.756 にしか上がっていない。損失は 100 ステップで 0.0002 まで下がり、同じ文の組を当てる課題はすぐに簡単になってしまう。日本語 SimCSE の報告 (Tsukagoshi ら 2023) は、約 100 万文で学習し、ハイパーパラメータとチェックポイントを開発セット (JSICK) で選んで、同じ BERT で JSTS の検証セットが 74.09 (学習前、平均プーリング) から 78.70 (5 回の平均) に上がったと報告している。教師なしで効果を出すには、文の数を大きく増やす必要がある。
+- 順位 (Spearman) はほとんど変わらなくても、類似度の値は大きく変わる。ランダムな文の組のコサイン類似度の平均は 0.834 から 0.108 に、「猫が…」と「株価が…」は 0.755 から 0.060 に下がった。学習前は、人手の類似度が 0〜1 の組の平均が 0.888、4〜5 の組の平均が 0.967 で、どの組も高い値に詰まっていて (異方性)、0〜1 の組の 90 パーセンタイル (0.924) と 4〜5 の組の 10 パーセンタイル (0.942) の差は 0.02 しかない。学習後は 0.523 と 0.658 で、差が 0.13 に広がった。この章の「BERT の出力から文ベクトルを自分で作る (mean pooling)」で、素の BERT の平均ベクトルは類似度の計算にあまり向かないとしたのはこの点である。値をしきい値に使うなら、モデルを替えるたびにしきい値を決め直す。
+- 温度を 1.0 にすると、損失は 3.22 付近で下げ止まり (ln 64 ≈ 4.16 から少ししか下がらない)、Spearman はテストで 0.7311、検証でも最良が 0.7227 で、どちらも学習前より悪い。チェックポイントの選択は、学習前のモデルより悪くなるのは防げない。温度 0.01 (0.7729) は、温度 0.05・バッチ 64 の seed=0 (0.7624) を 0.01 上回ったが、種による幅 (0.008) と同じくらいで、種 1 つだけなので優劣は言えない。バッチ 256 は 0.7602 だった。バッチ 256 は全部で 50 ステップしかなく、12 ステップ目のチェックポイントが選ばれたので、ほとんど学習していない。論文の付録は、学習率を合わせればバッチサイズにはあまり敏感でない、としている。ここではテストセットで比べているが、実務でハイパーパラメータを選ぶときは検証セットの値で選ぶ。
+- 教師あり SimCSE (JSNLI の含意を正例、矛盾をハードネガティブ) は 0.8261 で、学習前との差は +0.0721 (95% 信頼区間 +0.0544〜+0.0906。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照) だった。選ばれたのは最初の 50 ステップ目のチェックポイントで、少ない組でも効く。JSNLI は SNLI を機械翻訳して自動で絞り込んだものである。また SNLI の元は Flickr30k の画像の説明文、JSTS は YJ Captions (MS COCO の画像の日本語説明文) で、分野が近いことも効いている可能性がある。JSNLI の仮説には短い同じ文がよく出るので、`BatchSamplers.NO_DUPLICATES` で同じ文が同じバッチに入らないようにしている (Sentence Transformers の説明が `MultipleNegativesRankingLoss` に勧めている設定)。
+- 検索の章の「検索用の埋め込みモデルを自分のデータで微調整する」も同じ `MultipleNegativesRankingLoss` を使っている。Sentence Transformers の説明でも、既定の設定 (コサイン類似度、scale=20 = 温度 0.05) は InfoNCE や SimCSE の損失とも呼ばれるとしている。違うのは正例の組の作り方だけで、検索の章は (クエリ, 文書)、教師なし SimCSE は (文, 同じ文)、教師ありは (前提, 含意) に矛盾を足した三つ組である。
+- データとモデルの出典とライセンス: 日本語 Wikipedia (wikimedia/wikipedia、CC BY-SA 3.0 / GFDL)、JGLUE の JSTS (ヤフー、CC BY-SA 4.0)、JSNLI (京都大学、CC BY-SA 4.0)、tohoku-nlp/bert-base-japanese-v3 (Apache 2.0)。Sentence Transformers は Apache 2.0。SimCSE の損失と学習ループを自分で書く版は、付録「仕組みを理解するための実装」の「SimCSE の損失と学習ループを自分で書いて、素の BERT から文埋め込みモデルを作る」にある。
 
 ## 埋め込みを量子化・次元削減して省メモリ化する {embedding_quantization}
 

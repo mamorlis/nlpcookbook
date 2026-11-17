@@ -8,7 +8,7 @@
 ```bash
 pip install nbformat nbclient ipykernel   # 初回のみ
 
-# 1. recipes/NN_章名.md (付録は A_章名.md) を編集する
+# 1. recipes/NN_章名.md (付録は A_章名.md、B_章名.md) を編集する
 # 2. ノートブックと目次を生成する (実行はしない)
 python tools/build.py
 
@@ -19,7 +19,7 @@ python tools/build.py --run -k スラッグ名
 ```
 
 `--run` は、コードが前回の実行時から変わっていないレシピを飛ばします。全部やり直すときは `--force` を付けます。
-`-k` はスラッグか章のファイル名の部分一致で対象を絞ります (`-k 05_` で 5 章全体、`-k A_` で付録全体)。
+`-k` はスラッグか章のファイル名の部分一致で対象を絞ります (`-k 05_` で 5 章全体、`-k A_` で付録 A 全体)。
 
 ## レシピの書式
 

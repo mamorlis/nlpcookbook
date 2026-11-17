@@ -1288,22 +1288,23 @@ cand.head(10)
 - この章の「ルールでラベルを付けて分類器を学習する (弱教師あり学習、Snorkel)」で作ったラベルにも誤りが含まれる。このレシピの方法で候補を洗い出して確かめられる。
 - livedoor ニュースコーパスは CC BY-ND 2.1 JP (改変禁止)。記事そのものは改変していない (付け替えたのはカテゴリのラベルだけ) が、それでも、ラベルを付け替えたデータを livedoor ニュースコーパスとして配布しない。
 
-## 少数のラベルをグラフで広げて分類する (ラベル伝播と相互 k 近傍グラフ) {label_propagation_knn}
+## 少数のラベルをグラフで広げて分類する (scikit-learn の LabelSpreading) {label_propagation_knn}
 
-ラベル付きの文書がごく少ししかないとき、ラベルのない大量の文書も使って分類の精度を上げたい。
+ラベル付きの文書がごく少ししかないとき、ラベルのない大量の文書も使って、scikit-learn の半教師あり学習で分類の精度を上げたい。
 
 ```python
-!pip install -q scikit-learn fugashi unidic-lite
+!pip install -q fugashi unidic-lite   # scikit-learn は Colab に入っている (1.6.1 で確認)
 ```
 
 ```python
-import io, re, tarfile, urllib.request
+import io, tarfile, urllib.request, warnings
 import numpy as np
 import pandas as pd
 from fugashi import Tagger
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 def load_livedoor():
+    """livedoor ニュースコーパス (株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP: 改変禁止) を DataFrame にする"""
     url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
     with urllib.request.urlopen(url) as r:
         tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
@@ -1324,71 +1325,114 @@ print(X.shape, df["label"].nunique(), "クラス")
 ```
 
 ```python
-import scipy.sparse as sp
+from sklearn.neighbors import NearestNeighbors
 
-S = (X @ X.T).toarray()                    # TF-IDF は正規化済みなので、内積がコサイン類似度
-np.fill_diagonal(S, 0)
-
-def knn_graph(S, k, mutual):
-    """各文書から類似度の高い k 個に辺を張る。mutual=True なら、互いに k 近傍に入っている組だけを残す"""
-    n = len(S)
-    idx = np.argsort(-S, axis=1)[:, :k]
-    A = sp.csr_matrix((np.ones(n * k), (np.repeat(np.arange(n), k), idx.ravel())), shape=(n, n))
-    A = A.multiply(A.T) if mutual else A.maximum(A.T)
-    return sp.csr_matrix(A.multiply(S))    # 辺の重みは類似度
+def knn_kernel(k, mutual=False, weighted=True):
+    """LabelSpreading の kernel に渡す関数を作る。グラフは対称にする。
+    weighted=True なら辺の重みはコサイン類似度、False なら重みなし (すべて 1)。
+    mutual=True なら、互いに k 近傍に入っている組だけを結ぶ (相互 k 近傍グラフ)"""
+    def graph(nn, B=None):
+        G = nn.kneighbors_graph(B, mode="distance" if weighted else "connectivity")
+        if weighted: G.data = 1 - G.data       # コサイン距離をコサイン類似度にする
+        return G
+    def kernel(A, B):
+        nn = NearestNeighbors(n_neighbors=k, metric="cosine").fit(A)
+        if B is not A:                         # predict のとき: 新しい文書 B から学習済みの文書 A への k 近傍 (A の数 × B の数)
+            return graph(nn, B).T.tocsr()
+        G = graph(nn)                          # fit のとき: 自分自身を除いた k 近傍
+        return (G.minimum(G.T) if mutual else G.maximum(G.T)).tocsr()
+    return kernel
 
 for k in [10, 30]:
     for mutual in [False, True]:
-        A = knn_graph(S, k, mutual)
-        degree = np.asarray((A > 0).sum(axis=1)).ravel()
-        same = (y[A.nonzero()[0]] == y[A.nonzero()[1]]).mean()
-        print(f"k={k} {'相互 k 近傍' if mutual else 'k 近傍'}: 辺 {A.nnz // 2} / 次数の最大 {degree.max()} / 孤立した文書 {(degree == 0).sum()} / 同じクラスどうしを結ぶ辺の割合 {same:.3f}")
+        A = knn_kernel(k, mutual)(X, X)
+        degree = np.diff(A.indptr)
+        rows, cols = A.nonzero()
+        print(f"k={k} {'相互 k 近傍' if mutual else 'k 近傍    '}: 辺 {A.nnz // 2} / 次数の最大 {degree.max()} / 孤立した文書 {(degree == 0).sum()} / 同じクラスどうしを結ぶ辺の割合 {(y[rows] == y[cols]).mean():.3f}")
 ```
 
 ```python
-def label_propagation(A, y, labeled, alpha=0.9, iterations=50):
-    """ラベル拡散法: 隣の文書のスコアを受け取ることを繰り返す (alpha は隣からもらう割合)"""
-    d = np.asarray(A.sum(axis=1)).ravel()
-    d_inv = np.where(d > 0, 1 / np.sqrt(np.maximum(d, 1e-12)), 0)
-    W = sp.diags(d_inv) @ A @ sp.diags(d_inv)
-    Y = np.zeros((len(y), y.max() + 1)); Y[labeled, y[labeled]] = 1
-    F = Y.copy()
-    for _ in range(iterations):
-        F = alpha * (W @ F) + (1 - alpha) * Y
-    return F.argmax(axis=1)
-
 from sklearn.linear_model import LogisticRegression
+from sklearn.semi_supervised import LabelPropagation, LabelSpreading
+from sklearn.exceptions import ConvergenceWarning
+warnings.filterwarnings("ignore", category=ConvergenceWarning)   # 警告の代わりに、max_iter に達したかを n_iter_ で数える
 
+models = {
+    "LabelPropagation (k 近傍)": lambda: LabelPropagation(kernel=knn_kernel(30)),
+    "LabelSpreading (既定の knn)": lambda: LabelSpreading(kernel="knn", n_neighbors=30, alpha=0.9, max_iter=100),
+    "LabelSpreading (重みなしの k 近傍)": lambda: LabelSpreading(kernel=knn_kernel(30, weighted=False), alpha=0.9, max_iter=100),
+    "LabelSpreading (k 近傍)": lambda: LabelSpreading(kernel=knn_kernel(30), alpha=0.9, max_iter=100),
+    "LabelSpreading (相互 k 近傍)": lambda: LabelSpreading(kernel=knn_kernel(30, mutual=True), alpha=0.9, max_iter=100),
+}
 rng = np.random.default_rng(0)
-results = []
+results, not_converged = [], []
 for per_class in [2, 5, 20]:
     for trial in range(5):
         labeled = np.concatenate([rng.choice(np.where(y == c)[0], per_class, replace=False) for c in range(y.max() + 1)])
         rest = np.setdiff1d(np.arange(len(y)), labeled)
+        y_semi = np.full(len(y), -1); y_semi[labeled] = y[labeled]       # ラベルのない文書は -1
         row = {"1 クラスあたりのラベル数": per_class,
                "ロジスティック回帰 (ラベル付きのみ)": (LogisticRegression(C=10, max_iter=1000).fit(X[labeled], y[labeled]).predict(X[rest]) == y[rest]).mean()}
-        for name, mutual in [("ラベル伝播 (k 近傍)", False), ("ラベル伝播 (相互 k 近傍)", True)]:
-            row[name] = (label_propagation(knn_graph(S, 30, mutual), y, labeled)[rest] == y[rest]).mean()
-        results.append(row)
-pd.DataFrame(results).groupby("1 クラスあたりのラベル数").mean().round(3)
+        stopped = {"1 クラスあたりのラベル数": per_class}
+        for name, make in models.items():
+            model = make().fit(X, y_semi)
+            row[name] = (model.transduction_[rest] == y[rest]).mean()       # transduction_ は全文書に付けたラベル。ラベルのない文書の分だけを評価する
+            stopped[name] = model.n_iter_ >= model.max_iter
+            if per_class == 5 and trial == 0:
+                print(f"{name}: 予測したクラスの件数 {np.bincount(model.transduction_, minlength=y.max() + 1)}")
+        results.append(row); not_converged.append(stopped)
+print("max_iter に達した (収束しなかった) 試行の数\n", pd.DataFrame(not_converged).groupby("1 クラスあたりのラベル数").sum().to_string())
+summary = pd.DataFrame(results).groupby("1 クラスあたりのラベル数")
+print("正解の件数", np.bincount(y))
+print("5 回の試行の標準偏差\n", summary.std().round(3).to_string())
+summary.mean().round(3)
 ```
 
 ```python
-# k 近傍グラフでは、多くの文書の近傍に入る「ハブ」ができる。ハブは別のクラスの文書どうしをつないでしまう
-A = knn_graph(S, 30, mutual=False)
-degree = np.asarray((A > 0).sum(axis=1)).ravel()
-hubs = np.argsort(-degree)[:5]
-for h in hubs:
-    neighbors = A[h].nonzero()[1]
-    print(f"次数 {degree[h]} / クラス {df['label'][h]} / 近傍のうち同じクラス {np.mean(y[neighbors] == y[h]):.2f} | {df['text'][h].splitlines()[0][:40]}")
+# 伝播したラベルの確信度 (label_distributions_ の最大値) は使えるか。500 件を「あとから来る新しい文書」として取っておく
+rng = np.random.default_rng(1)
+new = rng.choice(len(y), 500, replace=False)
+pool = np.setdiff1d(np.arange(len(y)), new)
+labeled = np.concatenate([rng.choice(pool[y[pool] == c], 5, replace=False) for c in range(y.max() + 1)])
+y_semi = np.full(len(y), -1); y_semi[labeled] = y[labeled]
+ls = LabelSpreading(kernel=knn_kernel(30, mutual=True), alpha=0.9, max_iter=100).fit(X[pool], y_semi[pool])
+conf, pseudo = ls.label_distributions_.max(axis=1), ls.transduction_
+unl = y_semi[pool] == -1
+order = np.argsort(-conf[unl])
+correct = (pseudo[unl] == y[pool][unl])[order]
+for q in [0.1, 0.25, 0.5, 1.0]:
+    n = int(len(order) * q)
+    print(f"確信度の上位 {q:4.0%} ({n:4} 件) の正解率 {correct[:n].mean():.3f}")
+
+print(f"\n新しい文書 500 件の正解率")
+print(f"  ロジスティック回帰 (ラベル付き {len(labeled)} 件のみ): {(LogisticRegression(C=10, max_iter=1000).fit(X[labeled], y[labeled]).predict(X[new]) == y[new]).mean():.3f}")
+print(f"  LabelSpreading の predict (学習済みの文書への k 近傍で決める): {(ls.predict(X[new]) == y[new]).mean():.3f}")
+labels = np.where(unl, pseudo, y_semi[pool])                            # ラベル付きの文書は人手のラベル、ほかは疑似ラベル
+for q in [0.5, 1.0]:
+    use = ~unl | (conf >= np.quantile(conf[unl], 1 - q))                # ラベル付きの文書 + 確信度の上位 q の疑似ラベル
+    if q == 0.5:
+        print(f"  (確信度の上位 50% の疑似ラベルのクラスの件数 {np.bincount(pseudo[use & unl], minlength=y.max() + 1)})")
+    lr = LogisticRegression(C=10, max_iter=1000).fit(X[pool][use], labels[use])
+    print(f"  疑似ラベル (確信度の上位 {q:.0%}) で学習したロジスティック回帰: {(lr.predict(X[new]) == y[new]).mean():.3f}")
 ```
 
-- グラフに基づく半教師あり学習は、「似ている文書は同じラベルを持つ」という仮定で、少数のラベルをグラフの辺に沿って広げる。ラベルが極端に少ないときに効果が大きい。
-- 結果はグラフの作り方に強く左右される。普通の k 近傍グラフは、多くの点の近傍になる「ハブ」を生み、ハブを通って違うクラスにラベルが流れる。
-- 相互 k 近傍グラフ (互いに近傍である組だけを結ぶ) はハブができず、同じクラスどうしを結ぶ辺の割合が高い。その代わり、どこにもつながらない孤立点ができる。この実験では、分類の正解率の差は小さく、ラベル数によって優劣が入れ替わった。
-- ラベルが増えると、普通の教師あり学習との差は縮まり、1 クラス 20 件では逆転している。数十件以上のラベルがあるなら、まずは事前学習済みモデルのファインチューニングや、埋め込み + 分類器 (この章の「文埋め込みを特徴量にして少ない学習データで分類する」) を試す。
-- 類似度に文埋め込みを使えば、同じ方法をそのまま適用できる。高次元の埋め込みでもハブは生じる (ハブネス問題)。
-- 少数の例から語の集合を広げるブートストラッピングでも、ハブ (一般的な語) を通って無関係な語に広がる「意味ドリフト」が起きる (語彙知識と意味の変化の章の「ブートストラッピングの意味ドリフトを観察して抑える」)。
+```python
+# 普通の k 近傍では、多くの文書の近傍に入る「ハブ」ができる。ハブは別のクラスの文書どうしをつないでしまう
+G = NearestNeighbors(n_neighbors=30, metric="cosine").fit(X).kneighbors_graph()
+in_degree = np.asarray(G.sum(axis=0)).ravel()       # 何件の文書の 30 近傍に入っているか
+for h in np.argsort(-in_degree)[:5]:
+    neighbors = G[:, h].nonzero()[0]
+    print(f"{int(in_degree[h]):3} 件の近傍 / クラス {df['label'][h]} / 近傍に選んだ文書のうち同じクラス {np.mean(y[neighbors] == y[h]):.2f} | {df['text'][h].splitlines()[0][:40]}")
+```
+
+- scikit-learn の `sklearn.semi_supervised` には、グラフに基づく `LabelPropagation` (Zhu と Ghahramani の 2002 年の技術報告) と `LabelSpreading` (Zhou らの 2004 年の論文) がある。ラベルのない文書に -1 を付けて `fit` に渡すと、`transduction_` に推定したラベル、`label_distributions_` にクラスごとの確からしさが入る。
+- グラフの作り方は `kernel` で決まる。既定の `kernel="knn"` は、類似度の重みを使わず、対称にもしていない向きのある k 近傍グラフで、自分自身も近傍の 1 つに数える。重み付きのグラフや相互 k 近傍グラフを使いたいときは、ここのように `kernel(A, B)` の形の関数を渡せばよい (`fit` では `kernel(X, X)`、`predict` では `kernel(学習済みの X, 新しい X)` の形で呼ばれる)。この実験では、既定の knn (1 クラス 2 / 5 / 20 件で 0.571 / 0.636 / 0.750) より、グラフを対称にした重みなしの k 近傍 (0.630 / 0.660 / 0.763) の方が高く、差の大部分は対称にしたことによる。重みを付けた効果 (0.624 / 0.669 / 0.774) は小さく、1 クラス 2 件では逆転した。
+- 相互 k 近傍グラフは次数が k 以下に抑えられ、同じクラスどうしを結ぶ辺の割合が高い (k=30 で 0.608 に対して 0.697)。その代わり孤立した文書ができる (k=10 では 32 件、k=30 では 1 件)。孤立した文書は伝播でラベルが届かず、`label_distributions_` がすべて 0 のまま 0 番目のクラスに入るので、確信度で除くか、ラベル付きの文書で学習した分類器の予測で埋める。重み付きの k 近傍と相互 k 近傍の正解率の差は小さく (1 クラス 5 件で 0.669 と 0.686。標準偏差はどちらも 0.02 程度)、ラベル数によって優劣が入れ替わった。
+- `LabelPropagation` (ラベル付きの文書のラベルを固定して広げる) は、この実験では大きく劣った。1 クラス 2 件 (0.129) では 5 回とも `max_iter` (既定の 1000) に達して収束しなかったが、収束した 5 件 (0.344) と 20 件 (0.690) でも `LabelSpreading` より低い。予測したクラスの件数を見ると、半数以上の文書が 1 つのクラスに入っている。`LabelSpreading` は正規化したグラフと `alpha` (隣からもらう割合) で、ラベル付きの文書のラベルも少しずつ更新しながら広げる。ラベルが極端に少ないときは、まず `LabelSpreading` を使う。収束したかは `n_iter_` が `max_iter` に達していないかで確かめられる。
+- ラベルが少ないほど効果が大きい (1 クラス 5 件で、ラベル付きの文書だけのロジスティック回帰 0.635 に対して 0.686)。ラベルが増えると差はなくなり、1 クラス 20 件ではロジスティック回帰と同程度かやや上回られる。数十件以上のラベルがあるなら、埋め込み + 分類器 (この章の「文埋め込みを特徴量にして少ない学習データで分類する」) やファインチューニングを先に試す。
+- `label_distributions_` の最大値は確信度として使え、確信度の上位 10% の正解率は 0.947、全体では 0.666 だった。確信度の高い疑似ラベルは確認を省き、人手の確認やラベル付けは確信度の低い文書に回せる (この章の「ラベルを付ける文書を賢く選んで、少ないラベルで精度を上げる (能動学習)」)。新しい文書は `predict` でも分類できるが、疑似ラベルで普通の分類器を学習しておくとグラフを持ち歩かずに済む。新しい文書 500 件では、疑似ラベルをすべて使ったロジスティック回帰 (0.724) が `predict` (0.666) より高く、確信度の上位 50% に絞ったもの (0.676) は全部使ったものより低かった (上位 50% はクラスの件数が 75〜260 件と偏っていた)。1 回の分割の結果で、500 件の正解率には ±4 ポイント程度の誤差がある。
+- 普通の k 近傍グラフでは、218 件の文書の 30 近傍に入るハブができる (ここでは上位 5 件のうち 4 件が独女通信の記事)。ハブを近傍に選んだ文書の 2 割前後は別のクラスで、ハブを通って違うクラスにラベルが流れうる。類似度に文埋め込みを使っても同じ方法がそのまま使えるが、高次元の埋め込みでもハブは生じる (ハブネス問題)。少数の例から語の集合を広げるブートストラッピングでも、ハブを通って無関係な語に広がる「意味ドリフト」が起きる (語彙知識と意味の変化の章の「ブートストラッピングの意味ドリフトを観察して抑える」)。
+- 仕組みを自分で実装して確かめる版は、付録「仕組みを理解するための実装」の「ラベル伝播と相互 k 近傍グラフを自分で実装して、少数のラベルを広げる」にある。疑似ラベルの誤りは、この章の「学習データの中の付け間違えたラベルを見つける (Confident Learning)」でも探せる。scikit-learn は BSD 3-Clause ライセンス。livedoor ニュースコーパスは CC BY-ND 2.1 JP (改変禁止) なので、疑似ラベルを付けたデータを配布しない。
 
 ## BERT をファインチューニングして文書分類する (Trainer) {bert_finetune gpu norun}
 

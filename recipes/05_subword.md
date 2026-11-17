@@ -1,58 +1,6 @@
 # サブワードとトークナイザ
 
-SentencePiece や Hugging Face のトークナイザを学習・利用し、モデルに入れる ID 列を作る。
-
-## BPE を 30 行で自作して仕組みを理解する {bpe_scratch}
-
-Byte Pair Encoding が何をしているのか、最小限の実装で確かめたい。
-
-```python
-from collections import Counter
-
-def learn_bpe(words, num_merges):
-    # 各単語を文字列に分解し、語末記号 </w> を付ける
-    vocab = Counter(tuple(w) + ("</w>",) for w in words)
-    merges = []
-    for _ in range(num_merges):
-        pairs = Counter()
-        for symbols, freq in vocab.items():
-            for a, b in zip(symbols, symbols[1:]):
-                pairs[a, b] += freq
-        if not pairs:
-            break
-        best = max(pairs, key=pairs.get)      # 最頻の隣接ペアを 1 つの記号に併合
-        merges.append(best)
-        new_vocab = Counter()
-        for symbols, freq in vocab.items():
-            out, i = [], 0
-            while i < len(symbols):
-                if i + 1 < len(symbols) and (symbols[i], symbols[i + 1]) == best:
-                    out.append(symbols[i] + symbols[i + 1]); i += 2
-                else:
-                    out.append(symbols[i]); i += 1
-            new_vocab[tuple(out)] += freq
-        vocab = new_vocab
-    return merges
-
-def apply_bpe(word, merges):
-    symbols = list(word) + ["</w>"]
-    for a, b in merges:                        # 学習した順に併合を適用
-        i = 0
-        while i < len(symbols) - 1:
-            if symbols[i] == a and symbols[i + 1] == b:
-                symbols[i:i + 2] = [a + b]
-            else:
-                i += 1
-    return symbols
-
-corpus = "low low low low low lower lower newest newest newest newest newest newest widest widest widest".split()
-merges = learn_bpe(corpus, 10)
-print(merges)
-for w in ["lowest", "newer", "wider"]:
-    print(w, "→", apply_bpe(w, merges))
-```
-
-- 未知語 `lowest` が既知の部品 `low` + `est</w>` に分解される。これがサブワードで未知語がなくなる理由。
+SentencePiece や Hugging Face のトークナイザを学習・利用し、モデルに入れる ID 列を作る。BPE を自分で実装して仕組みを確かめるレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## SentencePiece でサブワードモデルを学習する {sentencepiece_train}
 

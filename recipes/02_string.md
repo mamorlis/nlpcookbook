@@ -1,6 +1,6 @@
 # 文字列処理と正規化
 
-形態素解析やモデルに入れる前の、文字レベルの下ごしらえ。日付や住所のような表記ゆれの多い表現の正規化も扱う。
+形態素解析やモデルに入れる前の、文字レベルの下ごしらえ。日付や住所のような表記ゆれの多い表現の正規化と、会社名や住所の名寄せも扱う。
 
 ## 文字コードを判定して UTF-8 に変換する {encoding_detect}
 
@@ -720,6 +720,294 @@ print(Levenshtein.distance(ref, hyp), Levenshtein.editops(ref, hyp))
 
 - 「東工大」のような略称や「ひとつばし」のような読みの違いは、文字の編集距離では拾えない。読みに変換してから比べるか、別名辞書を使う。
 - RapidFuzz は C++ 実装で、数百万件の突き合わせにも使える (`process.cdist` で行列計算)。
+
+## 取引先の会社名・住所・代表者名の表記ゆれを名寄せする (エンティティ解決) {entity_resolution}
+
+「株式会社さくら物産」「㈱さくら物産」「さくら物産 Co., Ltd.」のように表記の違う 2 つの名簿のレコードが、同じ会社を指しているかを判定したい。
+
+```python
+!pip install -q rapidfuzz kanjize
+```
+
+```python
+# 架空の取引先データを作る (会社名・住所・代表者名。社名や住所は組み合わせで作ったもので、実在の会社とは関係ない)
+# A: 社内の取引先マスタ 240 社。B: 別の部署から来た名簿 300 件で、うち 200 件は A のどれかと同じ会社、100 件は A にない会社
+import random
+import pandas as pd
+
+random.seed(0)
+STEMS = [("さくら", "Sakura"), ("富士", "Fuji"), ("大和", "Yamato"), ("東洋", "Toyo"), ("北斗", "Hokuto"),
+         ("みどり", "Midori"), ("青葉", "Aoba"), ("朝日", "Asahi"), ("太平", "Taihei"), ("若葉", "Wakaba"),
+         ("丸山", "Maruyama"), ("三協", "Sankyo"), ("日進", "Nisshin"), ("協和", "Kyowa"), ("昭和", "Showa"),
+         ("サンライズ", "Sunrise"), ("アルファ", "Alpha"), ("グリーン", "Green"), ("ミライ", "Mirai"), ("スター", "Star")]
+BIZ = [("物産", "Bussan"), ("商事", "Shoji"), ("精機", "Seiki"), ("電機", "Denki"), ("工業", "Kogyo"),
+       ("運輸", "Unyu"), ("建設", "Kensetsu"), ("食品", "Foods"), ("化学", "Kagaku"), ("製作所", "Seisakusho"),
+       ("産業", "Sangyo"), ("電子", "Denshi"), ("印刷", "Printing"), ("興産", "Kosan"), ("システムズ", "Systems")]
+PLACES = [("東京都", "千代田区", ["神田錦町", "内神田", "麹町"]), ("東京都", "港区", ["芝浦", "新橋", "赤坂"]),
+          ("大阪府", "大阪市北区", ["梅田", "天満", "中之島"]), ("愛知県", "名古屋市中区", ["栄", "丸の内", "錦"]),
+          ("福岡県", "福岡市博多区", ["博多駅前", "中洲", "祇園町"]), ("神奈川県", "横浜市西区", ["高島", "北幸", "南幸"]),
+          ("広島県", "広島市中区", ["紙屋町", "大手町", "八丁堀"]), ("埼玉県", "さいたま市大宮区", ["桜木町", "大門町", "宮町"]),
+          ("兵庫県", "神戸市中央区", ["三宮町", "元町通", "栄町通"]), ("静岡県", "静岡市葵区", ["紺屋町", "呉服町", "追手町"])]
+SURNAMES = ["高橋", "斎藤", "渡辺", "山崎", "吉田", "沢田", "浜田", "佐藤", "鈴木", "田中", "伊藤", "小林", "中村", "加藤"]
+GIVEN = ["一郎", "誠", "健太", "裕子", "美穂", "直樹", "恵", "大輔", "隆", "由美"]
+
+def new_company(stem, biz, place=None):
+    place = random.randrange(len(PLACES)) if place is None else place
+    return {"stem": stem, "biz": biz, "legal": random.choices(["株式会社", "有限会社", "合同会社"], [8, 1, 1])[0],
+            "place": place, "town": random.choice(PLACES[place][2]),
+            "num": (random.randint(1, 5), random.randint(1, 20), random.randint(1, 30)),
+            "rep": (random.choice(SURNAMES), random.choice(GIVEN))}
+
+def render_master(c):  # マスタはきれいな表記
+    pref, city, _ = PLACES[c["place"]]
+    core = c["stem"][0] + c["biz"][0]
+    ch, ban, go = c["num"]
+    return {"name": c["legal"] + core if random.random() < 0.6 else core + c["legal"],
+            "address": f"{pref}{city}{c['town']}{ch}丁目{ban}番{go}号", "rep": "".join(c["rep"])}
+
+KAN = "〇一二三四五六七八九"
+ZEN = str.maketrans("0123456789-", "０１２３４５６７８９－")
+HANKANA = {"サンライズ": "ｻﾝﾗｲｽﾞ", "アルファ": "ｱﾙﾌｧ", "グリーン": "ｸﾞﾘｰﾝ", "ミライ": "ﾐﾗｲ", "スター": "ｽﾀｰ", "システムズ": "ｼｽﾃﾑｽﾞ"}
+TYPO = {"精": "清", "機": "器", "電": "雷", "建": "健", "設": "説", "化": "花", "物": "仏", "業": "葉", "進": "新",
+        "和": "話", "洋": "羊", "産": "生", "事": "時"}
+VARIANT = {"高": "髙", "斎": "齋", "辺": "邊", "崎": "﨑", "吉": "𠮷", "沢": "澤", "浜": "濱"}
+FORMS = {"株式会社": ["株式会社{}", "{}株式会社", "(株){}", "㈱{}", "{}（株）", "{} Co., Ltd.", "{}"],
+         "有限会社": ["有限会社{}", "{}有限会社", "(有){}", "{}㈲", "{}"],
+         "合同会社": ["合同会社{}", "{}合同会社", "{} LLC", "{}"]}
+EN_FORM = {"株式会社": "Co., Ltd.", "有限会社": "Ltd.", "合同会社": "LLC"}
+
+def render_noisy(c):  # 名簿 B は表記がゆれている
+    stem, biz = c["stem"][0], c["biz"][0]
+    if random.random() < 0.2:
+        stem, biz = HANKANA.get(stem, stem), HANKANA.get(biz, biz)
+    core = stem + (" " if random.random() < 0.15 else "") + biz
+    if random.random() < 0.1 and (pos := [i for i, ch in enumerate(core) if ch in TYPO]):
+        i = random.choice(pos)
+        core = core[:i] + TYPO[core[i]] + core[i + 1:]  # 誤字
+    name = random.choice(FORMS[c["legal"]]).format(core)
+    if random.random() < 0.08:
+        name = f"{c['stem'][1]} {c['biz'][1]} {EN_FORM[c['legal']]}"  # 英文社名
+    pref, city, towns = PLACES[c["place"]]
+    town, (ch, ban, go) = c["town"], c["num"]
+    if random.random() < 0.08:  # 移転前の古い住所。半分は別の市区
+        if random.random() < 0.5:
+            pref, city, towns = random.choice(PLACES)
+        town, ch, ban, go = random.choice(towns), random.randint(1, 5), random.randint(1, 20), random.randint(1, 30)
+    elif random.random() < 0.05:
+        go += 1  # 号の誤り
+    nums = random.choice([f"{ch}丁目{ban}番{go}号", f"{ch}-{ban}-{go}", f"{KAN[ch]}丁目{ban}-{go}", f"{ch}丁目{ban}番地{go}",
+                          f"{ch}-{ban}-{go}".translate(ZEN)])
+    address = ("" if random.random() < 0.3 else pref) + city + town + nums
+    if random.random() < 0.2:
+        address += f" {random.choice(['第一', '中央', 'サン', '駅前'])}ビル{random.randint(2, 9)}F"
+    sur, given = c["rep"]
+    if random.random() < 0.3:
+        sur = "".join(VARIANT.get(x, x) for x in sur)  # 異体字
+    rep = "" if random.random() < 0.15 else sur + random.choice(["", " ", "　"]) + given
+    return {"name": name, "address": address, "rep": rep}
+
+combos = [(s, b) for s in STEMS for b in BIZ]
+random.shuffle(combos)
+companies = [new_company(s, b) for s, b in combos[:240]]
+A = pd.DataFrame([{"a_id": f"A{i:03d}"} | render_master(c) for i, c in enumerate(companies)])
+
+rows = [render_noisy(companies[i]) | {"true": f"A{i:03d}", "kind": "同じ会社"} for i in random.sample(range(240), 200)]
+for s, b in combos[240:270]:  # 同じ語幹の会社と同じ市区にある、名前の似た別会社 (さくら物産に対するさくら商事)
+    near = random.choice([c for c in companies if c["stem"] == s])
+    rows.append(render_noisy(new_company(s, b, near["place"])) | {"true": None, "kind": "似た名前の別会社"})
+for s, b in combos[270:]:
+    rows.append(render_noisy(new_company(s, b)) | {"true": None, "kind": "A にない会社"})
+for i in random.sample(range(240), 40):  # 同名の別会社。半分は同じ市区にある
+    c = companies[i]
+    rows.append(render_noisy(new_company(c["stem"], c["biz"], c["place"] if random.random() < 0.5 else None))
+                | {"true": None, "kind": "同名の別会社"})
+random.shuffle(rows)
+B = pd.DataFrame(rows)
+B.insert(0, "b_id", [f"B{i:03d}" for i in range(len(B))])
+B["split"] = ["dev" if i % 2 == 0 else "test" for i in range(len(B))]  # しきい値は dev で決め、test で評価する
+print(len(A), len(B), B.kind.value_counts().to_dict())
+pd.set_option("display.max_colwidth", None)
+pd.concat([A.head(3), B[["b_id", "name", "address", "rep", "true", "kind"]].head(8)])
+```
+
+```python
+# 正規化: NFKC (この章の「Unicode 正規化 (NFKC) で全角英数・半角カナを揃える」) → 法人格の除去、住所は丁目・番・号をハイフンに
+# 住所の正規化はこの章の「日本の住所の表記ゆれを正規化して要素に分ける」の簡易な方法を縮めたもの
+import re
+import unicodedata
+from kanjize import kanji2number
+
+# 英語の法人格は前後が英字でないときだけ除く ("prince" の "inc" などを消さない。\b は日本語の直後で働かないので使わない)
+LEGAL_RE = re.compile(r"株式会社|有限会社|合同会社|\((?:株|有|同)\)|(?<![a-z])(?:co\.?,?\s*ltd|ltd|inc|llc|corporation)(?![a-z])\.?")
+ITAIJI = str.maketrans({"髙": "高", "齋": "斎", "邊": "辺", "邉": "辺", "﨑": "崎", "𠮷": "吉", "澤": "沢", "濱": "浜"})  # NFKC では揃わない
+PREF_RE = re.compile(r"^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)")
+CITY_RE = re.compile(r"^(.+?市.+?区|.+?[市区町村])")
+
+def strip_legal(s):  # 法人格を除き、空白を詰める前の社名 (埋め込みに使う)
+    s = unicodedata.normalize("NFKC", s).lower()  # ㈱ → (株)、（株） → (株)、全角英数 → 半角、半角カナ → 全角
+    return re.sub(r"\s+", " ", LEGAL_RE.sub("", s)).strip(" ,.")
+
+def norm_name(s):
+    return re.sub(r"[\W_]+", "", strip_legal(s))  # 空白と記号を除く
+
+def norm_person(s):
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s)).translate(ITAIJI)
+
+def norm_addr(s):
+    s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", s))
+    s = re.sub(r"[一二三四五六七八九十]+(?=丁目)", lambda m: str(kanji2number(m.group())), s)
+    s = re.sub(r"(?<=\d)[‐−ー―](?=\d)", "-", s)
+    s = re.sub(r"(?<=\d)(丁目|番地|番)(?=\d)", "-", s)
+    s = re.match(r"(.*?\d+(?:-\d+)*)", s).group(1) if re.search(r"\d", s) else s  # 番地より後ろ (建物名) を落とす
+    s = PREF_RE.sub("", s)  # 都道府県は抜けていることが多いので比べない
+    m = CITY_RE.match(s)
+    return s, (m.group(1) if m else "")
+
+for df in (A, B):
+    df["n_name"] = df.name.map(norm_name)
+    df["e_name"] = df.name.map(strip_legal)
+    df["n_rep"] = df.rep.map(norm_person)
+    df[["n_addr", "city"]] = df.address.map(norm_addr).tolist()
+B[["name", "n_name", "address", "n_addr", "city", "rep", "n_rep"]].head(8)
+```
+
+```python
+# ブロッキング: 全ペア (240 × 300) を比べる代わりに、同じキーを持つペアだけを候補にする
+from collections import defaultdict
+
+KEYS = {"市区": lambda r: r.city, "社名の先頭 2 文字": lambda r: r.n_name[:2]}
+
+def block(key_names):
+    index = defaultdict(set)
+    for r in A.itertuples():
+        for k in key_names:
+            index[k, KEYS[k](r)].add(r.a_id)
+    return {r.b_id: set().union(*(index[k, KEYS[k](r)] for k in key_names)) for r in B.itertuples()}
+
+true_pairs = {(r.b_id, r.true) for r in B.itertuples() if r.true}
+for keys in [["市区"], ["社名の先頭 2 文字"], ["市区", "社名の先頭 2 文字"]]:
+    cands = block(keys)
+    n = sum(map(len, cands.values()))
+    found = sum((b, a) in true_pairs for b, s in cands.items() for a in s)
+    print(f"{' or '.join(keys):24} 候補 {n:5} ペア ({n / (len(A) * len(B)):.1%})  正解ペアの網羅率 {found}/{len(true_pairs)}")
+```
+
+```python
+# 候補ペアごとに、社名・住所・代表者名の類似度を RapidFuzz で求める (この章の「編集距離とあいまい文字列マッチング (RapidFuzz)」)
+from rapidfuzz import fuzz
+
+cands = block(["市区", "社名の先頭 2 文字"])
+pairs = pd.DataFrame([(b, a) for b, s in cands.items() for a in sorted(s)], columns=["b_id", "a_id"])
+pairs = pairs.merge(B.add_suffix("_b").rename(columns={"b_id_b": "b_id"}), on="b_id").merge(
+    A.add_suffix("_a").rename(columns={"a_id_a": "a_id"}), on="a_id")
+pairs["label"] = pairs.a_id == pairs.true_b
+pairs["name_fz"] = [fuzz.ratio(x, y) / 100 for x, y in zip(pairs.n_name_b, pairs.n_name_a)]
+pairs["addr_fz"] = [fuzz.ratio(x, y) / 100 for x, y in zip(pairs.n_addr_b, pairs.n_addr_a)]
+pairs["rep_fz"] = [fuzz.ratio(x, y) / 100 if x and y else 0.5 for x, y in zip(pairs.n_rep_b, pairs.n_rep_a)]  # 空欄は 0.5
+pairs.groupby("label")[["name_fz", "addr_fz", "rep_fz"]].describe().T.loc[(slice(None), ["mean", "25%", "50%", "75%"]), :].round(2)
+```
+
+```python
+# 社名の意味的な近さを埋め込みでも求める (文埋め込みとクラスタリングの章と同じ multilingual-e5-small、MIT ライセンス)
+# Colab の CPU で数分 (ライブラリの読み込みとモデルのダウンロードを含む)
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("intfloat/multilingual-e5-small", device="cpu")
+names = sorted(set(A.e_name) | set(B.e_name))
+vec = dict(zip(names, model.encode(["query: " + n for n in names], normalize_embeddings=True, batch_size=64)))
+pairs["name_emb"] = [float(vec[x] @ vec[y]) for x, y in zip(pairs.e_name_b, pairs.e_name_a)]
+
+examples = [("sakura bussan", "さくら物産"), ("fuji seiki", "富士精機"), ("yamato unyu", "大和運輸"), ("富士清機", "富士精機"),
+            ("さくら物産", "さくら商事"), ("さくら物産", "みどり物産"), ("サンライズ印刷", "sunrise printing")]
+for x, y in examples:
+    ex = model.encode([f"query: {x}", f"query: {y}"], normalize_embeddings=True)
+    print(f"{x:16} / {y:10}  RapidFuzz {fuzz.ratio(norm_name(x), norm_name(y)) / 100:.2f}  埋め込み {float(ex[0] @ ex[1]):.2f}")
+```
+
+```python
+# 類似度を組み合わせて「同じ会社である確率」にする (ロジスティック回帰)。重みは dev の候補ペアで学習する
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+FEATS = {"社名 (RapidFuzz)": ["name_fz"], "社名 (埋め込み)": ["name_emb"], "社名+住所+代表者": ["name_fz", "addr_fz", "rep_fz"],
+         "社名+住所+代表者+埋め込み": ["name_fz", "addr_fz", "rep_fz", "name_emb"]}
+dev = pairs[pairs.split_b == "dev"]
+best_th = {}  # 特徴量ごとの、dev で F1 が最大になるしきい値
+for name, cols in FEATS.items():
+    clf = LogisticRegression().fit(dev[cols], dev.label)
+    pairs[name] = clf.predict_proba(pairs[cols])[:, 1]
+    print(f"{name:24} 重み", dict(zip(cols, clf.coef_[0].round(1).tolist())))
+
+def outcomes(score, th, split):
+    """B の各レコードについて最も確率の高い候補を 1 つ選び、しきい値以上なら「同じ会社」と判定する。
+    レコードごとに (判定したか, 正しい相手か, 本当は A にあるか) を返す"""
+    p = pairs[pairs.split_b == split].sort_values(score, ascending=False).drop_duplicates("b_id").set_index("b_id")
+    b = B[B.split == split].set_index("b_id")
+    pred = (p[score] >= th).reindex(b.index, fill_value=False)
+    correct = pred & (p.a_id.reindex(b.index) == b.true)
+    return np.c_[pred, correct, b.true.notna()].astype(int)  # ブロッキングで漏れた正解も「本当は A にある」に入る
+
+def prf(o):
+    n_pred, tp, n_true = o.sum(0)
+    prec, rec = tp / max(n_pred, 1), tp / n_true
+    return prec, rec, 2 * prec * rec / max(prec + rec, 1e-9)
+
+def evaluate(score, th, split):
+    return prf(outcomes(score, th, split))
+
+def thresholds(score):  # dev の各レコードの最上位候補のスコアをすべてしきい値の候補にする
+    return np.unique(pairs[pairs.split_b == "dev"].groupby("b_id")[score].max())
+
+rng = np.random.default_rng(0)
+table = []
+for name in FEATS:
+    th = best_th[name] = max(thresholds(name), key=lambda t: evaluate(name, t, "dev")[2])  # dev で F1 が最大になるしきい値
+    o = outcomes(name, th, "test")
+    f1s = [prf(o[i])[2] for i in rng.integers(0, len(o), (1000, len(o)))]  # test のレコードを復元抽出して F1 の 95% 区間
+    table.append([name, th, *evaluate(name, th, "dev"), *prf(o), f"{np.percentile(f1s, 2.5):.3f}–{np.percentile(f1s, 97.5):.3f}"])
+pd.DataFrame(table, columns=["特徴量", "しきい値", "dev 適合率", "dev 再現率", "dev F1", "test 適合率", "test 再現率", "test F1",
+                            "test F1 の 95% 区間"]).round(3)
+```
+
+```python
+# しきい値を動かすと適合率と再現率が入れ替わる。実務では 2 つのしきい値で「自動で統合」「人が確認」「別の会社」に分けることが多い
+best = "社名+住所+代表者+埋め込み"
+print(pd.DataFrame([(t, *evaluate(best, t, "dev")) for t in [0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]],
+                   columns=["しきい値", "適合率", "再現率", "F1"]).round(3).to_string(index=False))
+
+ths = thresholds(best)
+hi = min(t for t in ths if evaluate(best, t, "dev")[0] == 1.0)  # dev で誤統合が 0 になる最小のしきい値
+lo = max(t for t in ths if evaluate(best, t, "dev")[1] == evaluate(best, ths[0], "dev")[1])  # dev の再現率を下げない最大のしきい値
+p = pairs[pairs.split_b == "test"].sort_values(best, ascending=False).drop_duplicates("b_id")
+auto, review = p[p[best] >= hi], p[(p[best] >= lo) & (p[best] < hi)]
+print(f"\n自動で統合 (確率 ≥ {hi:.3f}): {len(auto)} 件、うち誤り {int((auto.a_id != auto.true_b).sum())} 件")
+print(f"人が確認 ({lo:.3f} ≤ 確率 < {hi:.3f}): {len(review)} 件、うち同じ会社 {int((review.a_id == review.true_b).sum())} 件")
+print(f"別の会社とみなす: {len(B[B.split == 'test']) - len(auto) - len(review)} 件")
+```
+
+```python
+# test での誤りを見る (dev で F1 最大のしきい値)
+th = best_th[best]
+p = pairs[pairs.split_b == "test"].sort_values(best, ascending=False).drop_duplicates("b_id")
+fp = p[(p[best] >= th) & (p.a_id != p.true_b)]
+fn = B[(B.split == "test") & B.true.notna() & ~B.b_id.isin(p[(p[best] >= th) & (p.a_id == p.true_b)].b_id)]
+cols = ["name_b", "name_a", "address_b", "address_a", "rep_b", "rep_a", "kind_b", best]
+print("誤って統合したもの")
+display(fp[cols].round(2))
+print("見逃したもの")
+display(fn.merge(A, left_on="true", right_on="a_id", suffixes=("_b", "_a"))[["name_b", "name_a", "address_b", "address_a", "rep_b", "rep_a"]])
+en = p[p.name_b.str.match(r"[A-Za-z]")]  # 英文社名のレコードは何で拾えたか
+print("英文社名のレコード")
+display(en[["name_b", "name_a", "kind_b", "name_fz", "name_emb", "addr_fz", "rep_fz", best]].round(2))
+```
+
+- 名寄せは「正規化 → ブロッキングで候補を絞る → 項目ごとの類似度 → 組み合わせてしきい値で判定 → 評価」の順に作る。ブロッキングのキーは 1 つだと漏れる。市区だけでは別の市区へ移転した 9 件を、社名の先頭 2 文字だけでは英文社名や先頭の誤字 (大和→大話) の 16 件を落とした。両方の和を取ると全ペアの 14.1% に絞っても、正解ペアは 1 件も落ちなかった。ただし移転や誤字はこちらで決めた割合で入れたもので、実データでは住所の欠落や両方のキーがずれるレコードもある。
+- 社名だけでは同名の別会社と区別できない (test の F1 0.827、95% 区間 0.762–0.879)。住所と代表者名を加えると 0.952 (0.915–0.979) になった。残った誤統合 5 件は、どれも同じ市区にある同名・似た名前の別会社である。見逃し 4 件は、英文社名と、代表者名が空欄で住所も違うレコードだった。
+- 埋め込みは英文社名と日本語の社名を近づける (上の例で 0.79〜0.89) が、別の会社の「さくら物産 / みどり物産」も 0.88、「さくら物産 / さくら商事」は 0.96 になる。test の英文社名でも、同じ会社の 0.82〜0.90 に対し、別の会社の「Kyowa Unyu / 朝日運輸」が 0.78 で、差は小さい。埋め込みだけでは F1 0.784 で、加えても 0.952 のままだった。英文社名の同じ会社は確率が 0.12〜0.17 にとどまり、代表者名が空欄の 2 件は 0.01 になった。英文社名が多い名簿では、読みのローマ字に揃える方法 (この章の「漢字かな交じり文をローマ字・ひらがなにする」) も試すとよい。
+- しきい値は用途で決める。dev で誤統合が 0 になる確率 0.643 以上を自動で統合すると、test では 82 件を誤りなく統合し、0.046〜0.643 の 32 件 (うち同じ会社 10 件) が人の確認に回った。残る 36 件にも、確率 0.01 の英文社名の同じ会社が 2 件入っている。確率は候補ペアの正例と負例の比率に左右されるので、ブロッキングを変えたら学習し直す。
+- 法人格を取り除いたので「株式会社さくら物産」と「有限会社さくら物産」も同じになる。法人番号 (国税庁が法人に指定する 13 桁の番号) が両方の名簿にあれば、それで突き合わせるのが確実である。
+- 髙・齋・﨑などの異体字は NFKC では揃わないので、対応表で寄せた。人名の異体字を同一視してよいかは用途によって違う。
+- このデータは自分で作ったもので、test は 150 件 (うち同じ会社 94 件) しかない。実務ではしきい値を実データの数百ペアの人手のラベルで決める。大きな名簿には、Fellegi–Sunter のモデルでラベルなしでも重みを推定できる Splink (MIT ライセンス) などのライブラリがある。
 
 ## MinHash と LSH で大量文書からほぼ重複を見つける {minhash_lsh}
 

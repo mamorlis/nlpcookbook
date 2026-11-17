@@ -2,56 +2,103 @@
 
 分類・抽出・生成の出力を数値で評価し、その差が偶然でないかを確かめる。LLM による評価も扱う。翻訳・要約・質問応答・検索に固有の指標は、それぞれの章を参照。
 
-## 適合率・再現率・F1 を自分で計算する (micro と macro) {prf_manual}
+## scikit-learn で適合率・再現率・F1 を集計する (micro / macro 平均と抽出の評価) {prf_manual}
 
-ライブラリに頼らず、適合率・再現率・F1 を定義から計算して、micro 平均と macro 平均の違いを理解したい。
+問い合わせの自動振り分けの結果を、クラスごとの適合率・再現率・F1 と micro / macro 平均で正しく集計したい。固有表現や関係の抽出のように、予測と正解が「集合」になる出力も同じ道具で評価したい。
 
 ```python
+# scikit-learn は Colab に最初から入っている (BSD-3-Clause)。版をそろえるなら !pip install -q scikit-learn==1.6.1
+import sklearn
 from collections import Counter
+from sklearn.metrics import (accuracy_score, classification_report, multilabel_confusion_matrix,
+                             precision_recall_fscore_support)
 
-gold = ["A", "A", "A", "A", "A", "A", "B", "B", "B", "C"]
-pred = ["A", "A", "A", "A", "A", "B", "B", "B", "A", "A"]
+print("scikit-learn", sklearn.__version__)
 
-labels = sorted(set(gold) | set(pred))
-tp, fp, fn = Counter(), Counter(), Counter()
-for g, p in zip(gold, pred):
-    if g == p:
-        tp[g] += 1
-    else:
-        fp[p] += 1     # p と予測したが違った
-        fn[g] += 1     # g を見逃した
+# (正解, 予測) の組と件数。「個人情報」は 3 件しかなく、一度も正しく予測されていない
+pairs = {("料金", "料金"): 40, ("料金", "その他"): 5, ("解約", "解約"): 12, ("解約", "料金"): 3,
+         ("故障", "故障"): 6, ("故障", "その他"): 4, ("個人情報", "その他"): 2, ("個人情報", "解約"): 1,
+         ("その他", "その他"): 25, ("その他", "料金"): 3}
+gold = [g for (g, p), n in pairs.items() for _ in range(n)]
+pred = [p for (g, p), n in pairs.items() for _ in range(n)]
+print("正解のクラスの件数:", Counter(gold))
 
-def prf(tp, fp, fn):
-    p = tp / (tp + fp) if tp + fp else 0.0
-    r = tp / (tp + fn) if tp + fn else 0.0
-    f = 2 * p * r / (p + r) if p + r else 0.0
-    return p, r, f
-
-per_class = {}
-for c in labels:
-    per_class[c] = prf(tp[c], fp[c], fn[c])
-    print(f"{c}: P = {per_class[c][0]:.3f}  R = {per_class[c][1]:.3f}  F1 = {per_class[c][2]:.3f}  (TP {tp[c]}, FP {fp[c]}, FN {fn[c]})")
-
-macro_f1 = sum(f for _, _, f in per_class.values()) / len(labels)        # クラスごとの F1 の単純平均
-micro = prf(sum(tp.values()), sum(fp.values()), sum(fn.values()))         # 全クラスの TP/FP/FN を合算してから計算
-print(f"macro-F1 = {macro_f1:.3f}   micro-F1 = {micro[2]:.3f}   正解率 = {sum(tp.values()) / len(gold):.3f}")
+# zero_division=0: 一度も予測されなかったクラスの適合率 (0 / 0) を 0 とし、警告を出さない
+print(classification_report(gold, pred, digits=3, zero_division=0))
+print("正解率:", round(accuracy_score(gold, pred), 3))
 ```
 
 ```python
-from sklearn.metrics import precision_recall_fscore_support
+import numpy as np
+import pandas as pd
 
-p, r, f, _ = precision_recall_fscore_support(gold, pred, average="macro", zero_division=0)
-print("scikit-learn の macro:", round(p, 3), round(r, 3), round(f, 3))
+# 「その他」を除いた、振り分けたいクラスだけでの評価。labels= で集計に使うクラスを選ぶ
+targets = ["料金", "解約", "故障", "個人情報"]
+for avg in ["micro", "macro", "weighted"]:
+    p, r, f, _ = precision_recall_fscore_support(gold, pred, labels=targets, average=avg, zero_division=0)
+    print(f"{avg:8} (その他を除く): P = {p:.3f}  R = {r:.3f}  F1 = {f:.3f}")
 
-# 抽出タスク (固有表現抽出など、正解と予測が「集合」の場合) の F1
-gold_set, pred_set = {("山田", "PER"), ("京都", "LOC"), ("ソニー", "ORG")}, {("山田", "PER"), ("京都", "ORG"), ("東京", "LOC")}
-n = len(gold_set & pred_set)
-print("抽出の P/R/F1:", [round(x, 3) for x in prf(n, len(pred_set) - n, len(gold_set) - n)])
+# 表として扱う (output_dict=True)。F1 の低い順に並べると弱いクラスが分かる
+rep = pd.DataFrame(classification_report(gold, pred, labels=targets, output_dict=True, zero_division=0)).T
+print(rep.loc[targets].astype({"support": int}).sort_values("f1-score").round(3))
+
+# 誤りの分析には件数も見る。multilabel_confusion_matrix はクラスごとに [[TN, FP], [FN, TP]] を返す
+mcm = multilabel_confusion_matrix(gold, pred, labels=targets)
+print(pd.DataFrame({"TP": mcm[:, 1, 1], "FP": mcm[:, 0, 1], "FN": mcm[:, 1, 0]}, index=targets))
+
+# zero_division=np.nan にすると、0 / 0 になったクラスの適合率を macro 平均から除く
+for zd in [0, np.nan]:
+    p, r, f, _ = precision_recall_fscore_support(gold, pred, labels=targets, average="macro", zero_division=zd)
+    print(f"zero_division={zd}: macro P = {p:.3f}  macro F1 = {f:.3f}")
+
+# 「macro-F1」の 2 つの流儀: クラスごとの F1 の平均 (scikit-learn の macro) と、macro P と macro R の調和平均
+p, r, f, _ = precision_recall_fscore_support(gold, pred, labels=targets, average="macro", zero_division=0)
+print(f"F1 の平均 = {f:.3f}   macro P と macro R の調和平均 = {2 * p * r / (p + r):.3f}")
 ```
 
-- 単一ラベルの多クラス分類では、micro-F1 は正解率と一致する。
-- macro-F1 は少数クラス (ここでは一度も当たっていない C) の影響を強く受ける。クラスの偏りがあるときに、モデルの弱点が見える。
-- 「macro-F1」には「クラスごとの F1 の平均」と「macro 適合率と macro 再現率の調和平均」の 2 つの流儀があり、値が違う。前者が一般的。
+```python
+from sklearn.preprocessing import MultiLabelBinarizer
+
+# 抽出の評価: 文書ごとに (文字列, 種類) の集合を比べる。LLM で抜き出した固有表現や、(主語, 関係, 目的語) の 3 つ組でも同じ
+gold_docs = [{("山田", "PER"), ("京都", "LOC"), ("ソニー", "ORG")},
+             {("田中", "PER"), ("大阪", "LOC")},
+             {("トヨタ", "ORG")},
+             set(),                                     # 何も含まない文書
+             set()]
+pred_docs = [{("山田", "PER"), ("京都", "ORG"), ("東京", "LOC")},
+             {("田中", "PER"), ("大阪", "LOC")},
+             set(),
+             {("日本", "LOC")},
+             set()]                                     # 正解も予測も空
+
+def set_prf(gold_docs, pred_docs, average="micro", zero_division=0):
+    """各文書の集合を 0/1 の行列にし、「要素ごとの 2 値分類」として集計する。micro は全文書の TP・FP・FN を合算する"""
+    mlb = MultiLabelBinarizer().fit(gold_docs + pred_docs)
+    p, r, f, _ = precision_recall_fscore_support(mlb.transform(gold_docs), mlb.transform(pred_docs),
+                                                 average=average, zero_division=zero_division)
+    return round(p, 3), round(r, 3), round(f, 3)
+
+print("完全一致 (micro)         :", set_prf(gold_docs, pred_docs))
+# 文書ごとの F1 の平均。正解も予測も空の文書を 0 点 (zero_division=0) と 1 点 (=1) のどちらにするかで値が変わる
+# (片方だけ空の文書は F1 が 0 のままで、zero_division で変わるのは P・R だけ)
+print("文書ごとの平均 (samples, 空は 0):", set_prf(gold_docs, pred_docs, average="samples"))
+print("文書ごとの平均 (samples, 空は 1):", set_prf(gold_docs, pred_docs, average="samples", zero_division=1))
+# 種類を無視して文字列だけで比べる (緩い一致)
+print("種類を無視 (micro)       :", set_prf([{s for s, _ in d} for d in gold_docs],
+                                          [{s for s, _ in d} for d in pred_docs]))
+# 種類ごとの内訳: その種類の要素だけを残して集計する
+for t in ["PER", "LOC", "ORG"]:
+    print(f"  {t}:", set_prf([{e for e in d if e[1] == t} for d in gold_docs],
+                             [{e for e in d if e[1] == t} for d in pred_docs]))
+```
+
+- 単一ラベルの多クラス分類で全クラスを集計に入れると、micro 平均の P・R・F1 はどれも正解率と一致する (classification_report が micro の行の代わりに accuracy の行を出すのはこのため)。「その他」のような背景クラスを `labels=` で除くと一致しなくなり、この例では micro-F1 が 0.841 で、正解率 0.822 とは違う値になった。どのクラスを集計に入れたかを必ず書く。
+- macro 平均は件数によらず各クラスを同じ重さで平均するので、件数の少ないクラスの失敗が見える。この例では「個人情報」(3 件) は TP が 0、FN が 3 で F1 が 0 になり、その他を除いた macro-F1 は 0.622、micro-F1 は 0.841 だった。weighted 平均 (0.821) は件数で重み付けするので件数の多いクラスに引っ張られ、少数クラスの失敗が隠れやすい。
+- 一度も予測されなかったクラスは適合率が 0 / 0 になる。`zero_division` を指定しないと UndefinedMetricWarning を出して 0 として扱い、`zero_division=np.nan` にするとそのクラスを平均から除く。この例では macro 適合率が 0.698 から 0.931 に上がった (再現率は 0 と定まるので F1 は変わらない)。件数 (support) と、どちらにしたかを一緒に報告する。
+- 「macro-F1」には、クラスごとの F1 の平均 (scikit-learn の `average="macro"`) と、macro 適合率と macro 再現率の調和平均の 2 つの流儀があり、この例でも 0.622 と 0.629 で値が違う。どちらを使ったかを書き、比べる相手の論文や評価スクリプトがどちらかを確かめる。
+- 抽出の評価は、要素ごとの 2 値分類とみなすと `MultiLabelBinarizer` と `precision_recall_fscore_support` で集計できる。`average="micro"` は全文書の TP・FP・FN を合算する集計 (この例で 0.5) で、`average="samples"` は文書ごとの F1 の平均である。後者は、正解も予測も空の文書の F1 を 0 点にするか 1 点にするか (`zero_division`) で変わり、この例では 0.267 と 0.467 になった (片方だけ空の文書は F1 が 0 のままで、変わるのは P・R だけ)。空の文書が多いデータでは micro を主に使う。集合にすると同じ表現が 2 回出てきても 1 つに数えるので、出現ごとに評価するなら文字位置を要素に含める。BIO タグ列の評価は、固有表現抽出の章の「固有表現抽出をエンティティ単位で評価する (seqeval)」を使う。
+- 実データでの分類の評価と混同行列は、テキスト分類の章の「分類結果を評価する (適合率・再現率・F1・混同行列)」を参照。評価値の不確かさは、この章の「ブートストラップ法で評価値の信頼区間を求める」で信頼区間を付けて報告する。
+- 仕組みを自分で実装して確かめる版は、付録「仕組みを理解するための実装」の「適合率・再現率・F1 を自分で計算する (micro と macro)」にある。
 
 ## モデルの確信度が当てになるか調べる (較正、ECE) {calibration_ece}
 
