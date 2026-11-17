@@ -42,7 +42,7 @@ print(sp.encode(s))
 print(sp.decode(sp.encode(s)))
 ```
 
-- `▁` (U+2581) は空白 (単語境界) を表す。デコードすると元の文に完全に戻る (可逆) のが SentencePiece の特徴。
+- `▁` (U+2581) は空白（単語境界）を表す。デコードすると元の文に完全に戻る（可逆）のが SentencePiece の特徴。
 - 語彙サイズは、翻訳なら 8k〜32k、小さなコーパスなら 4k〜8k が目安。
 
 ## サブワード正則化: 分割をサンプリングしてデータ拡張する {subword_regularization}
@@ -85,7 +85,7 @@ for pieces in sp.nbest_encode(text, nbest_size=3, out_type=str):
     print(pieces)
 ```
 
-- `alpha` が小さいほど多様な (確率の低い) 分割が出る。`nbest_size=-1` は全候補からサンプリング。
+- `alpha` が小さいほど多様な（確率の低い）分割が出る。`nbest_size=-1` は全候補からサンプリング。
 - 学習時だけサンプリングし、評価時は最尤分割を使う。
 
 ## Hugging Face tokenizers で BPE / WordPiece を学習する {tokenizers_train}
@@ -129,7 +129,7 @@ print(AutoTokenizer.from_pretrained("my_tokenizer")("Hello Emma!"))
 - WordPiece にするなら `models.WordPiece` + `trainers.WordPieceTrainer` + `pre_tokenizers.Whitespace()` に差し替える。
 - 既存モデルと同じ方式で作り直すだけなら `old_tokenizer.train_new_from_iterator(lines, vocab_size)` が最短。
 
-## 事前学習モデルのトークナイザを使う (日本語 BERT) {hf_tokenizer_basics}
+## 事前学習モデルのトークナイザを使う（日本語 BERT） {hf_tokenizer_basics}
 
 BERT などのモデルに入力するために、テキストをトークン ID 列に変換したい。逆に ID からテキストに戻したい。
 
@@ -158,7 +158,7 @@ print("最大長:", tokenizer.model_max_length)
 ```
 
 - 東北大 BERT は MeCab で単語分割してから WordPiece をかけるので `fugashi` と `unidic-lite` が必要。
-- `##` は「前のトークンに続く」印。`decode` すると日本語でもトークン間に空白が入る (この章の「日本語 BERT のデコード結果から余分な空白を消す」を参照)。
+- `##` は「前のトークンに続く」印。`decode` すると日本語でもトークン間に空白が入る（この章の「日本語 BERT のデコード結果から余分な空白を消す」を参照）。
 
 ## 日本語 BERT のデコード結果から余分な空白を消す {decode_ja_spaces}
 
@@ -182,7 +182,7 @@ def decode_ja(ids):
 print(decode_ja(ids))
 ```
 
-- 単純に `.replace(" ", "")` すると英単語間の空白も消える。厳密に原文へ戻したい場合は、オフセットを返すトークナイザ (この章の「トークンと元テキストの文字位置を対応付ける (offset mapping)」) を使う。
+- 単純に `.replace(" ", "")` すると英単語間の空白も消える。厳密に原文へ戻したい場合は、オフセットを返すトークナイザ（この章の「トークンと元テキストの文字位置を対応付ける (offset mapping)」）を使う。
 
 ## パディングと切り詰めをしてバッチのテンソルを作る {padding_truncation}
 
@@ -208,8 +208,8 @@ for name, kwargs in {
     print(name, [len(x) for x in tokenizer(texts, **kwargs)["input_ids"]])
 ```
 
-- 学習時は `padding=True` を tokenizer ではなく `DataCollatorWithPadding` に任せると、バッチごとに最短で済んで速い (動的パディング)。
-- 生成モデル (GPT 系) は左パディングが必要: `tokenizer.padding_side = "left"`。
+- 学習時は `padding=True` を tokenizer ではなく `DataCollatorWithPadding` に任せると、バッチごとに最短で済んで速い（動的パディング）。
+- 生成モデル（GPT 系）は左パディングが必要: `tokenizer.padding_side = "left"`。
 
 ## 文ペアを 1 つの入力にまとめる {sentence_pair}
 
@@ -237,7 +237,7 @@ print(tokenizer.decode(batch["input_ids"][0]))
 
 ## トークンと元テキストの文字位置を対応付ける (offset mapping) {offset_mapping}
 
-各トークンが原文の何文字目から何文字目に対応するかを知りたい (固有表現抽出や抽出型 QA の後処理)。
+各トークンが原文の何文字目から何文字目に対応するかを知りたい（固有表現抽出や抽出型 QA の後処理）。
 
 ```python
 from transformers import AutoTokenizer
@@ -257,12 +257,12 @@ start_tok, end_tok = enc.char_to_token(start_char), enc.char_to_token(end_char -
 print(start_tok, end_tok, enc.tokens()[start_tok:end_tok + 1])
 ```
 
-- `return_offsets_mapping` は高速 (Rust 実装) トークナイザでのみ使える。`tokenizer.is_fast` で確認できる。
+- `return_offsets_mapping` は高速（Rust 実装）トークナイザでのみ使える。`tokenizer.is_fast` で確認できる。
 - 特殊トークンのオフセットは `(0, 0)` になる。
 
 ## 単語単位のラベルをサブワードに揃える (word_ids) {word_ids}
 
-単語ごとに付けたラベル (品詞・固有表現タグ) を、サブワード分割後のトークン列に対応させたい。
+単語ごとに付けたラベル（品詞・固有表現タグ）を、サブワード分割後のトークン列に対応させたい。
 
 ```python
 from transformers import AutoTokenizer
@@ -379,7 +379,7 @@ plt.xlabel("tokens"); plt.ylabel("documents"); plt.legend(); plt.show()
 
 - 95 パーセンタイルあたりを `max_length` にするのが定番。長い文書が多いなら、先頭 + 末尾を残す・分割して集約するなどを検討する。
 
-## トークン数を数える (LLM のコンテキスト長・料金の見積もり) {count_tokens}
+## トークン数を数える（LLM のコンテキスト長・料金の見積もり） {count_tokens}
 
 テキストが LLM の何トークンになるかを数えたい。日本語と英語でトークン数がどれくらい違うかも知りたい。
 
@@ -406,6 +406,6 @@ for name in ["Qwen/Qwen2.5-0.5B-Instruct", "xlm-roberta-base", "google/byt5-smal
     print(f"{name:30} {len(tok(text, add_special_tokens=False)['input_ids'])} トークン")
 ```
 
-- 1 文字が複数トークンに分かれると、トークン単体では表示できず `�` になる (上の「輩」)。
+- 1 文字が複数トークンに分かれると、トークン単体では表示できず `�` になる（上の「輩」）。
 - 日本語は「1 文字 ≒ 1 トークン前後」、英語は「1 単語 ≒ 1.3 トークン」が大まかな目安。モデルによって大きく違うので実測する。
 - API 型のモデルは各社が公式のトークン数カウント API を提供している。厳密な見積もりにはそちらを使う。

@@ -1,4 +1,4 @@
-# LLM の API (Gemini と Claude)
+# LLM の API（Gemini と Claude）
 
 API で大きなモデルを使う。Colab の組み込み AI、無料枠のある Gemini と有料の Claude で、呼び出し、ストリーミング、JSON スキーマによる構造化出力、トークン数と料金の確認、大量のテキストのバッチ処理を扱う。手元で動かすオープンなモデルは「大規模言語モデル (LLM)」の章を参照。
 
@@ -34,13 +34,13 @@ prompt = ("次のレビューを「ポジティブ」「ネガティブ」「中
 print(ai.generate_text(prompt))
 ```
 
-- `google.colab.ai` は Colab に組み込まれた機能で、API キーも Google Cloud のアカウントも要らない。Colab の外 (手元の Python など) では使えない。
+- `google.colab.ai` は Colab に組み込まれた機能で、API キーも Google Cloud のアカウントも要らない。Colab の外（手元の Python など）では使えない。
 - できることは「1 つのプロンプトを送ってテキストを受け取る」だけ。システムプロンプト、対話の履歴、JSON スキーマによる出力の制約、温度などの設定は渡せない。それらが必要なら、次のレシピの Gemini API を使う。
 - 使えるモデルと利用の上限は、Colab の利用状況や時期によって変わる。上限に達するとエラーになるので、大量の処理には向かない。
 - モデル名は `google/gemini-...` のような形式。`list_models()` の結果から選ぶ。
 - 送った内容は Google のサービスで処理される。個人情報や機密の文書は送らない。
 
-## Gemini API を呼び出す (無料枠) {gemini_basic key norun}
+## Gemini API を呼び出す（無料枠） {gemini_basic key norun}
 
 Gemini を API で使いたい。システムプロンプト、温度、対話の履歴などを細かく指定したい。Colab のシークレット機能で API キーを安全に扱いたい。
 
@@ -89,10 +89,10 @@ print(len(chat.get_history()), "件の発話が履歴にある")
 ```
 
 - API キーをノートブックに直接書かない。共有や GitHub への push で漏れる。
-- Gemini API には無料枠があり、Flash 系のモデルは料金なしで使える (2026 年時点)。ただし、1 分あたり・1 日あたりのリクエスト数に上限がある。上限は AI Studio の画面でプロジェクトごとに確認できる。
-- 無料枠で送った入力と出力は、Google のモデルの改善に使われることがある。個人情報や機密の文書は送らない (有料枠に切り替えると使われなくなる)。
-- 最近の Gemini は答える前に考える (思考) ため、思考のトークンも消費する。単純な処理なら `thinking_config=types.ThinkingConfig(thinking_budget=0)` で思考を止めると速くなる (止められないモデルもある)。
-- `response.text` が `None` になることがある (安全フィルタで止められた、出力の上限に達した、など)。`response.candidates[0].finish_reason` で理由を確かめる。
+- Gemini API には無料枠があり、Flash 系のモデルは料金なしで使える（2026 年時点）。ただし、1 分あたり・1 日あたりのリクエスト数に上限がある。上限は AI Studio の画面でプロジェクトごとに確認できる。
+- 無料枠で送った入力と出力は、Google のモデルの改善に使われることがある。個人情報や機密の文書は送らない（有料枠に切り替えると使われなくなる）。
+- 最近の Gemini は答える前に考える（思考）ため、思考のトークンも消費する。単純な処理なら `thinking_config=types.ThinkingConfig(thinking_budget=0)` で思考を止めると速くなる（止められないモデルもある）。
+- `response.text` が `None` になることがある（安全フィルタで止められた、出力の上限に達した、など）。`response.candidates[0].finish_reason` で理由を確かめる。
 
 ## Gemini の応答をストリーミングで受け取る {gemini_streaming key norun}
 
@@ -127,7 +127,7 @@ print("合計トークン:", last.usage_metadata.total_token_count)
 - 思考 (thinking) をするモデルでは、思考が終わるまで最初のチャンクが届かない。
 - 対話 (`client.chats`) でも `chat.send_message_stream()` で同じようにストリーミングできる。
 
-## Gemini に決まった形式 (JSON スキーマ) で出力させる {gemini_structured key norun}
+## Gemini に決まった形式（JSON スキーマ）で出力させる {gemini_structured key norun}
 
 LLM の出力を、決まった項目を持つ JSON として確実に受け取りたい。テキストから情報を抜き出して、そのままプログラムで使いたい。
 
@@ -179,7 +179,7 @@ for review in ["画面がきれいで操作も軽快。買ってよかった。"
 
 - `response_mime_type="application/json"` と `response_schema` を指定すると、スキーマに従う JSON だけが生成されるように制約される。`response.parsed` で Pydantic のオブジェクトとして受け取れる。
 - 抽出した文字列が原文に実在するかは保証されない。`e.text in text` で必ず検証する。文字位置が必要なら、自分で `text.find()` する。
-- スキーマで表せない制約 (値の範囲など) は、Pydantic の検証で確認する。`response.parsed` が `None` のときは、`response.text` を見て原因を調べる。
+- スキーマで表せない制約（値の範囲など）は、Pydantic の検証で確認する。`response.parsed` が `None` のときは、`response.text` を見て原因を調べる。
 - スキーマの項目の説明 (`Field(description=...)`) も、モデルへの指示として使われる。
 
 ## Gemini API のトークン数と使用量を確かめる {gemini_count_tokens key norun}
@@ -217,10 +217,10 @@ n_docs, per_doc = 10_000, u.total_token_count
 print(f"{n_docs} 件なら約 {n_docs * per_doc / 1e6:.1f}M トークン")
 ```
 
-- トークン数はモデルのトークナイザで決まる。他社のトークナイザ (tiktoken など) での推定は当てにならないので、使うモデルで数える。
+- トークン数はモデルのトークナイザで決まる。他社のトークナイザ（tiktoken など）での推定は当てにならないので、使うモデルで数える。
 - 無料枠では料金はかからないが、1 分あたりのトークン数やリクエスト数の上限がある。大量の文書を処理する前に、件数 × 1 件あたりのトークン数で、上限に収まるかを見積もる。
 - 思考 (thinking) をするモデルでは、出力とは別に思考のトークンも消費する。単純な処理なら思考を止める (`thinking_budget=0`)。
-- トークン数のカウント自体は無料で、生成のリクエスト数にも数えられない (レート制限はある)。
+- トークン数のカウント自体は無料で、生成のリクエスト数にも数えられない（レート制限はある）。
 
 ## Gemini で大量のテキストをまとめて処理する (Batch API) {gemini_batch key norun}
 
@@ -262,14 +262,14 @@ for review, r in zip(reviews, job.dest.inlined_responses):
     print((r.response.text.strip() if r.response else f"エラー: {r.error}"), "|", review)
 ```
 
-- バッチは非同期で処理される代わりに、料金が通常の約半額になる。急がない大量の処理 (データのラベル付け、評価、翻訳など) に向く。
-- バッチ処理は無料枠では使えないことがある (有料枠の機能として提供されている時期がある)。使えない場合は、1 件ずつ `generate_content` を呼び、レート制限に当たったら待って再試行する。
-- 数千件以上なら、リクエストを JSON Lines のファイルにしてアップロードする方法 (`client.files.upload` で上げたファイルを `src` に渡す) を使う。
+- バッチは非同期で処理される代わりに、料金が通常の約半額になる。急がない大量の処理（データのラベル付け、評価、翻訳など）に向く。
+- バッチ処理は無料枠では使えないことがある（有料枠の機能として提供されている時期がある）。使えない場合は、1 件ずつ `generate_content` を呼び、レート制限に当たったら待って再試行する。
+- 数千件以上なら、リクエストを JSON Lines のファイルにしてアップロードする方法（`client.files.upload` で上げたファイルを `src` に渡す）を使う。
 - 結果の順序に頼らず、`metadata` に付けた番号で入力と対応付けるのが安全。
 
 ## Claude API を呼び出す {claude_basic key norun}
 
-Claude を API 経由で使いたい (有料。無料で試すなら前の Gemini のレシピ)。Colab のシークレット機能で API キーを安全に扱いたい。
+Claude を API 経由で使いたい（有料。無料で試すなら前の Gemini のレシピ）。Colab のシークレット機能で API キーを安全に扱いたい。
 
 ```python
 !pip install -q anthropic
@@ -308,7 +308,7 @@ print("".join(b.text for b in r2.content if b.type == "text"))
 ```
 
 - API キーをノートブックに直接書かない。共有や GitHub への push で漏れる。
-- `response.content` はブロックのリスト (テキストのほかに思考ブロックなどが入る)。`type == "text"` のものだけを取り出す。
+- `response.content` はブロックのリスト（テキストのほかに思考ブロックなどが入る）。`type == "text"` のものだけを取り出す。
 - `max_tokens` は出力の上限。小さくしすぎると途中で切れる (`stop_reason == "max_tokens"`)。
 - 履歴に応答を積むときは、テキストだけでなく `response.content` をそのまま渡す。
 - モデル ID と料金は [公式ドキュメント](https://platform.claude.com/docs/en/about-claude/models/overview) で確認する。大量の単純な処理には、より安価な `claude-haiku-5-5` なども選べる。
@@ -339,10 +339,10 @@ with client.messages.stream(
 print("\n---\n", final.stop_reason, final.usage.output_tokens, "出力トークン")
 ```
 
-- 出力が長くなりうる場合 (`max_tokens` が大きい場合) は、ストリーミングを使うのが基本。非ストリーミングだと HTTP のタイムアウトに当たることがある。
+- 出力が長くなりうる場合（`max_tokens` が大きい場合）は、ストリーミングを使うのが基本。非ストリーミングだと HTTP のタイムアウトに当たることがある。
 - 逐次表示が不要でも、`stream.get_final_message()` だけ使えば、タイムアウトを避けつつ通常の応答と同じ形で結果を得られる。
 
-## Claude に決まった形式 (JSON スキーマ) で出力させる {claude_structured key norun}
+## Claude に決まった形式（JSON スキーマ）で出力させる {claude_structured key norun}
 
 テキストから情報を抽出して、型の決まったデータとして受け取りたい。JSON のパース失敗に悩まされたくない。
 
@@ -386,7 +386,7 @@ else:
 
 - 構造化出力では、スキーマに従う JSON しか生成されないように制約される。`Literal` で選択肢を限定すれば、分類タスクにもそのまま使える。
 - 抽出した `text` が原文に実在するかは保証されない。`e.text in text` で検証するとよい。文字位置が必要なら、自分で `text.find()` する。
-- スキーマに書けない制約 (最小値・最大値など) は、Pydantic 側の検証で確認する。
+- スキーマに書けない制約（最小値・最大値など）は、Pydantic 側の検証で確認する。
 
 ## Claude API のトークン数と料金を事前に見積もる {claude_count_tokens key norun}
 
@@ -425,9 +425,9 @@ cost = len(dataset) * (avg_in * PRICE_IN + avg_out * PRICE_OUT) / 1e6
 print(f"{len(dataset)} 件 × 入力 {avg_in:.0f} + 出力 {avg_out} トークン ≒ ${cost:.2f} (Batches API なら ${cost / 2:.2f})")
 ```
 
-- トークン数はモデルによって違う。必ず実際に使うモデルの ID で数える。他社のトークナイザ (tiktoken など) での推定は当てにならない。
+- トークン数はモデルによって違う。必ず実際に使うモデルの ID で数える。他社のトークナイザ（tiktoken など）での推定は当てにならない。
 - 出力側に思考 (thinking) のトークンも含まれて課金される点に注意。事前に数十件で実測するのが確実。
-- トークン数のカウント自体は無料 (レート制限はある)。
+- トークン数のカウント自体は無料（レート制限はある）。
 
 ## Claude で大量のテキストを安く処理する (Message Batches API) {claude_batch key norun}
 
@@ -476,6 +476,6 @@ for rid, text in reviews.items():
     print(results[rid], "|", text)
 ```
 
-- 非同期で処理される代わりに、料金が通常の半額になる。ほとんどのバッチは 1 時間以内に終わる (最大 24 時間)。
-- バッチ ID を控えておけば、Colab のセッションが切れても後から結果を取得できる (結果は 29 日間保持される)。
+- 非同期で処理される代わりに、料金が通常の半額になる。ほとんどのバッチは 1 時間以内に終わる（最大 24 時間）。
+- バッチ ID を控えておけば、Colab のセッションが切れても後から結果を取得できる（結果は 29 日間保持される）。
 - 共通の長いシステムプロンプトがあるなら、プロンプトキャッシュと併用するとさらに安くなる。

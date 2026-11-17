@@ -4,7 +4,7 @@
 
 ## 英文を単語と文に分割する (NLTK) {nltk_tokenize}
 
-英語のテキストを文に区切り、さらに単語 (トークン) に区切りたい。`split()` だと句読点がくっついてしまう。
+英語のテキストを文に区切り、さらに単語（トークン）に区切りたい。`split()` だと句読点がくっついてしまう。
 
 ```python
 import nltk
@@ -30,7 +30,7 @@ print(tt.tokenize("@nlp_bot This is sooooooo coooool!!! :-) #NLProc https://exam
 - `word_tokenize` は Penn Treebank 方式で `didn't` を `did` + `n't` に分ける。
 - 新しい NLTK では `punkt` ではなく `punkt_tab` をダウンロードする。
 
-## 略語に強いルールベースの文分割 (pySBD、多言語) {pysbd}
+## 略語に強いルールベースの文分割（pySBD、多言語） {pysbd}
 
 略語や小数点、引用符が多い文章を正確に文分割したい。日本語や中国語など 20 以上の言語で使いたい。
 
@@ -81,7 +81,7 @@ mpn = MosesPunctNormalizer(lang="en")
 print(mpn.normalize("«Bonjour» , he said…  “Curly quotes”  and ‘single’ ."))
 ```
 
-- モデルの出力 (トークン列) を評価する前に、必ずデトークナイズしてから sacreBLEU に渡す。
+- モデルの出力（トークン列）を評価する前に、必ずデトークナイズしてから sacreBLEU に渡す。
 
 ## 大文字・小文字を正しく無視して比較する (casefold) {casefold}
 
@@ -105,7 +105,7 @@ for a, b in pairs:
 ```
 
 - `casefold()` は比較専用の強い小文字化 (ß → ss)。表示用には使わない。
-- トルコ語の `İ/ı` のように言語依存の規則は Python 標準では扱えない (PyICU などが必要)。
+- トルコ語の `İ/ı` のように言語依存の規則は Python 標準では扱えない（PyICU などが必要）。
 
 ## 英語の短縮形を展開する (I'm → I am) {contractions}
 
@@ -144,10 +144,10 @@ for s in ["Crème brûlée à la café", "Dvořák, Gödel, Erdős, Søren, Łó
     print(f"{s:36} {strip_accents(s):36} {unidecode(s)}")
 ```
 
-- `strip_accents` は濁点も結合文字として落とす (ガ→カ) ので、日本語が混ざるテキストでは対象をラテン文字に限定する。
-- `unidecode` は漢字を中国語読みにするため、日本語には使えない (東京 → Dong Jing)。
+- `strip_accents` は濁点も結合文字として落とす（ガ→カ）ので、日本語が混ざるテキストでは対象をラテン文字に限定する。
+- `unidecode` は漢字を中国語読みにするため、日本語には使えない（東京 → Dong Jing）。
 
-## 語幹を取り出す (ステミング) {stemming}
+## 語幹を取り出す（ステミング） {stemming}
 
 `running` `runs` `ran` のような語形変化を雑にまとめて、検索や頻度集計で同じ語として扱いたい。
 
@@ -169,7 +169,7 @@ print(SnowballStemmer("german").stem("Bücherregale"), SnowballStemmer("spanish"
 
 - ステミングは規則で語尾を削るだけなので、`ran` はそのまま、`university` と `universe` が同じになるなど粗い。正確さが要るなら次のレンマ化を使う。
 
-## 単語を辞書の見出し語に戻す (レンマ化) {lemmatize_spacy}
+## 単語を辞書の見出し語に戻す（レンマ化） {lemmatize_spacy}
 
 `was` → `be`、`mice` → `mouse` のように、品詞を考慮して正しい原形に戻したい。
 
@@ -228,7 +228,7 @@ print(stopwords.fileids()[:10], "...")  # NLTK は多言語対応
 ```
 
 - `not` や `no` もストップワードに入っている。感情分析では否定が消えて意味が逆になるので、`stop - {"not", "no"}` のように残す。
-- BERT などのニューラルモデルにはストップワード除去は不要 (むしろ有害)。
+- BERT などのニューラルモデルにはストップワード除去は不要（むしろ有害）。
 
 ## 英語テキストを定番の手順でクリーニングする {clean_text_en}
 
@@ -259,12 +259,12 @@ print(clean(raw))
 print(clean(raw, lower=False, remove_punct=False))
 ```
 
-- 記号を「削除」ではなく「空白に置換」するのがコツ (`e-mail` が `email` ではなく `e mail` になるが、`word,word` がくっつく事故を防げる)。
+- 記号を「削除」ではなく「空白に置換」するのがコツ（`e-mail` が `email` ではなく `e mail` になるが、`word,word` がくっつく事故を防げる）。
 - 事前学習済みモデルを使う場合は、こうした前処理はせずに生のテキストを渡す。
 
 ## 英語の品詞タグ付けをする {pos_tag_en}
 
-英文の各単語に品詞 (名詞・動詞・形容詞…) を付けたい。
+英文の各単語に品詞（名詞・動詞・形容詞…）を付けたい。
 
 ```python
 import nltk
@@ -291,7 +291,7 @@ for t in nlp("Time flies like an arrow; fruit flies like a banana."):
 
 - `pos_` は Universal Dependencies の粗い品詞、`tag_` は Penn Treebank の細かい品詞。
 
-## WordNet で同義語・上位語・類似度を調べる (日本語も) {wordnet}
+## WordNet で同義語・上位語・類似度を調べる（日本語も） {wordnet}
 
 単語の同義語や上位概念を辞書から引きたい。日本語 WordNet も使いたい。
 
@@ -349,7 +349,7 @@ for n in [0, 1, 2]:
 
 ## 数値を単語で読み上げる形にする (num2words) {num2words}
 
-「42」を `forty-two` や「四十二」に、序数や年号の読みに変換したい (音声合成の前処理、テキスト正規化)。
+「42」を `forty-two` や「四十二」に、序数や年号の読みに変換したい（音声合成の前処理、テキスト正規化）。
 
 ```python
 !pip install -q num2words
@@ -394,7 +394,7 @@ for t in texts:
     print(detect(t), [str(p) for p in detect_langs(t)][:2], t, sep="\t")
 ```
 
-- 短い文字列 (「OK」「東京大学」) は誤判定しやすい。漢字だけだと日本語か中国語か区別できない。
+- 短い文字列（「OK」「東京大学」）は誤判定しやすい。漢字だけだと日本語か中国語か区別できない。
 - 数字や記号しかない文字列は例外 `LangDetectException` になるので、`try` で囲む。
 
 ## 高精度な言語判定と、混在テキストの言語区間検出 (lingua) {lingua}
@@ -426,7 +426,7 @@ for r in detector.detect_multiple_languages_of(mixed):
     print(r.language.name, "|", mixed[r.start_index:r.end_index])
 ```
 
-- 全言語を対象にするなら `LanguageDetectorBuilder.from_all_languages()` (メモリを 1GB 程度使う)。
+- 全言語を対象にするなら `LanguageDetectorBuilder.from_all_languages()`（メモリを 1GB 程度使う）。
 
 ## 中国語を単語分割する (jieba) {jieba}
 

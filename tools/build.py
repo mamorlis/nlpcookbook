@@ -97,7 +97,7 @@ def split_cells(lines: list[str]) -> list[tuple[str, str]]:
 def parse_chapter(path: Path) -> tuple[str, str, list[Recipe]]:
     m = re.match(r"(\d+|[A-Z])_", path.stem)
     if not m:
-        raise ValueError(f"{path.name}: ファイル名は NN_name.md (付録は A_name.md) の形式にしてください")
+        raise ValueError(f"{path.name}: ファイル名は NN_name.md （付録は A_name.md）の形式にしてください")
     chapter_no = int(m.group(1)) if m.group(1).isdigit() else m.group(1)
     lines = path.read_text(encoding="utf-8").split("\n")
     if not lines[0].startswith("# "):
@@ -144,9 +144,9 @@ def to_notebook(r: Recipe) -> dict:
     badge = f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({r.colab_url})"
     notes = []
     if "gpu" in r.tags:
-        notes.append("GPU ランタイム推奨 (ランタイム → ランタイムのタイプを変更 → T4 GPU)")
+        notes.append("GPU ランタイム推奨（ランタイム → ランタイムのタイプを変更 → T4 GPU）")
     if "key" in r.tags:
-        notes.append("API キーが必要 (Colab 左の 🔑 シークレットに登録)")
+        notes.append("API キーが必要（Colab 左の 🔑 シークレットに登録）")
     head = f"# {r.title}\n\n{badge}\n\nNLP クックブック {r.ident} ／ {r.chapter_title}"
     if notes:
         head += "\n\n> " + " ／ ".join(notes)
@@ -213,7 +213,7 @@ def clean_outputs(nb: dict) -> None:
                 # \r で上書きされる進捗表示は、各行の最後の状態だけ残す
                 lines = [line.rstrip("\r").split("\r")[-1] for line in text.split("\n")]
                 if len(lines) > MAX_LINES:
-                    lines = lines[:MAX_LINES] + ["... (以下省略)"]
+                    lines = lines[:MAX_LINES] + ["...（以下省略）"]
                 o["text"] = "\n".join(lines)
         cell["outputs"] = outs
     nb["metadata"].pop("widgets", None)
@@ -266,7 +266,7 @@ def dump(nb: dict, path: Path) -> None:
 def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
     total = sum(len(rs) for _, _, rs in chapters)
     main_total = sum(len(rs) for _, _, rs in chapters if rs and isinstance(rs[0].chapter_no, int))
-    count = f"全 {main_total} レシピ (付録を含めると {total} レシピ)" if main_total != total else f"全 {total} レシピ"
+    count = f"全 {main_total} レシピ（付録を含めると {total} レシピ）" if main_total != total else f"全 {total} レシピ"
     lines = [f"{count}。タイトルをクリックすると GitHub 上で、"
              "バッジをクリックすると Google Colab で開きます。", ""]
     for title, _, rs in chapters:
