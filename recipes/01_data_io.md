@@ -1,6 +1,6 @@
 # データの収集と入出力
 
-テキストを集める、ファイルから取り出す、きれいにして分割する。実験の前にやること。JSON Lines や CSV の読み書きのようなファイル操作の小技は、付録の「Colab と Python の小技」を参照。
+テキストを集める、ファイルや音声から取り出す、きれいにして分割する。実験の前にやること。JSON Lines や CSV の読み書きのようなファイル操作の小技は、付録の「Colab と Python の小技」を参照。
 
 ## 青空文庫から作品をダウンロードして本文を取り出す {aozora_download}
 
@@ -183,6 +183,225 @@ for t in doc.tables:
 - 見出しはスタイル名（`Heading 1`、日本語版 Word で作ると `見出し 1`）で判別できる。
 - 古い `.doc` 形式は読めない。LibreOffice で変換する (`!soffice --headless --convert-to docx file.doc`)。
 - PowerPoint は `python-pptx`、Excel は `pandas.read_excel` (openpyxl) で同様に読める。
+
+## Whisper で日本語の音声を書き起こす（モデルの比較、長い音声、字幕） {whisper_asr gpu}
+
+録音した音声（講演、会議、インタビュー）を日本語のテキストに書き起こして、NLP の材料にしたい。どのモデルを使えばどれくらい正確で速いか、長い音声や字幕 (SRT) はどう扱うか、どんな誤りが出るかも確かめたい。
+
+```python
+!pip install -q jiwer silero-vad
+```
+
+```python
+import io
+import numpy as np
+import pandas as pd
+import soundfile as sf
+from huggingface_hub import hf_hub_download
+from IPython.display import Audio
+
+# FLEURS（Google、CC BY 4.0）の日本語の開発用データ: 機械翻訳の評価データ FLoRes の文（英語の記事の翻訳）を読み上げた音声と、その文
+# Common Voice の日本語なども使えるが、配布元の利用条件を確かめる
+path = hf_hub_download("google/fleurs", "parquet-data/ja_jp/validation-00000-of-00001.parquet", repo_type="dataset")   # 約 220MB
+df = pd.read_parquet(path).drop_duplicates("id").sort_values("id").reset_index(drop=True)   # 同じ文を複数の話者が読んでいるので 1 文 1 録音にする
+SR = 16000                                                   # Whisper は 16kHz のモノラルを前提にする
+df["audio"] = [sf.read(io.BytesIO(a["bytes"]), dtype="float32") for a in df["audio"]]
+assert all(sr == SR for _, sr in df["audio"])                # ほかの音声は ffmpeg -ar 16000 -ac 1 で 16kHz のモノラルにしてから渡す
+df["audio"] = [x for x, _ in df["audio"]]
+print(len(df), "文", round(sum(map(len, df["audio"])) / SR / 60, 1), "分")
+print(df["raw_transcription"][3])
+Audio(df["audio"][3], rate=SR)
+```
+
+```python
+import time
+import unicodedata
+import jiwer
+import torch
+from transformers import pipeline
+
+def normalize(s):
+    """CER を測る前の正規化: 全角半角をそろえ、句読点・記号と空白を除く"""
+    s = unicodedata.normalize("NFKC", s)
+    return "".join(c for c in s if not unicodedata.category(c).startswith(("P", "Z")))
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+GEN = {"language": "ja", "task": "transcribe"}          # 言語を指定しないと、最初の 30 秒から言語を推定する
+refs = [normalize(s) for s in df["raw_transcription"]]
+audio_sec = sum(map(len, df["audio"])) / SR
+
+MODELS = {"small": "openai/whisper-small",                       # Apache 2.0
+          "large-v3-turbo": "openai/whisper-large-v3-turbo",     # MIT
+          "kotoba-v2.0": "kotoba-tech/kotoba-whisper-v2.0"}      # Apache 2.0（日本語のテレビ音声 ReazonSpeech で蒸留）
+hyps, rows = {}, []
+for short, name in MODELS.items():                     # 3 モデルで T4 なら 5〜10 分程度（ダウンロードを含む）
+    asr = pipeline("automatic-speech-recognition", model=name, dtype=DTYPE, device_map="auto")
+    asr(df["audio"][0], generate_kwargs=GEN)           # 1 回目は初期化で遅いので、測る前に 1 回動かす
+    torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
+    t = time.time()
+    out = asr(list(df["audio"]), batch_size=16, generate_kwargs=GEN)
+    sec = time.time() - t
+    hyps[short] = [o["text"] for o in out]
+    rows.append({"モデル": short, "パラメータ（億）": asr.model.num_parameters() / 1e8,
+                 "CER": jiwer.cer(refs, [normalize(h) for h in hyps[short]]), "時間（秒）": sec,
+                 "実時間の何倍速": audio_sec / sec, "最大メモリ (GB)": torch.cuda.max_memory_allocated() / 1e9})
+    del asr; torch.cuda.empty_cache()
+pd.DataFrame(rows).round(3)
+```
+
+```python
+# 文単位で再標本化するブートストラップで、CER の 95% 信頼区間とモデル間の差の信頼区間を求める
+def errors(ref, hyp):
+    m = jiwer.process_characters(ref, normalize(hyp))
+    return m.substitutions + m.deletions + m.insertions
+
+n_chars = np.array([len(r) for r in refs])
+err = {k: np.array([errors(r, h) for r, h in zip(refs, v)]) for k, v in hyps.items()}
+rng = np.random.default_rng(0)
+idx = rng.integers(0, len(refs), (2000, len(refs)))
+boot = {k: e[idx].sum(1) / n_chars[idx].sum(1) for k, e in err.items()}
+for k, b in boot.items():
+    print(f"{k:15s} CER {err[k].sum() / n_chars.sum():.3f}  95% CI [{np.percentile(b, 2.5):.3f}, {np.percentile(b, 97.5):.3f}]")
+for a, b in [("small", "large-v3-turbo"), ("kotoba-v2.0", "large-v3-turbo")]:
+    d = boot[a] - boot[b]
+    print(f"{a} - {b}: {d.mean():+.3f}  95% CI [{np.percentile(d, 2.5):+.3f}, {np.percentile(d, 97.5):+.3f}]")
+```
+
+```python
+import re
+
+# 典型的な誤り: 数字、カタカナ語（外国の固有名詞を含む）、漢字の語が、語の単位でどれくらい正しく出るか
+def hit_rate(pattern, model):
+    found = total = 0
+    for r, h in zip(refs, hyps[model]):
+        words = re.findall(pattern, r)
+        found += sum(w in normalize(h) for w in words); total += len(words)
+    return found / total, total
+
+for model in hyps:
+    rates = {k: hit_rate(p, model) for k, p in [("数字", r"\d+"), ("カタカナ 3 字以上", r"[ァ-ヴー]{3,}"), ("漢字 3 字以上", r"[一-龥]{3,}")]}
+    print(f"{model:15s}", "  ".join(f"{k} {r:.2f}（{n} 個）" for k, (r, n) in rates.items()), f"  1 - CER {1 - err[model].sum() / n_chars.sum():.2f}")
+
+# large-v3-turbo の誤りが多い文
+for i in np.argsort(-err["large-v3-turbo"] / n_chars)[:6]:
+    print(f"\n正解  : {df['raw_transcription'][i]}")
+    for model in ["large-v3-turbo", "kotoba-v2.0"]:
+        print(f"{model:6s}: {hyps[model][i]}")
+```
+
+```python
+# 長い音声: 15 文をつなげた約 4 分の音声（文の間に 1 秒の無音）。録音ごとに音量が違うのは、会議で話者とマイクの距離が違うのに近い
+long_audio = np.concatenate([x for a in df["audio"][:15] for x in (a, np.zeros(SR, np.float32))])
+long_ref = normalize("".join(df["raw_transcription"][:15]))
+sf.write("long.wav", long_audio, SR)
+# ffmpeg の dynaudnorm で、短い区間ごとに音量をそろえる（f: 区間の長さ（ミリ秒）、g: 平滑化する区間数、m: 最大の増幅率）
+!ffmpeg -y -loglevel error -i long.wav -af dynaudnorm=f=200:g=11:m=100 long_norm.wav
+long_norm = sf.read("long_norm.wav", dtype="float32")[0]
+
+starts = np.cumsum([0] + [len(a) + SR for a in df["audio"][:15]])
+db = lambda x: 20 * np.log10(np.sqrt(np.mean(x ** 2)) + 1e-9)
+print(round(len(long_audio) / SR), "秒")
+print("文ごとの音量 (dBFS)       :", [round(db(long_audio[s:e - SR])) for s, e in zip(starts, starts[1:])])
+print("文ごとの音量（そろえたあと）:", [round(db(long_norm[s:e - SR])) for s, e in zip(starts, starts[1:])])
+```
+
+```python
+asr = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3-turbo", dtype=DTYPE, device_map="auto")
+
+def report(name, text, sec):
+    m = jiwer.process_characters(long_ref, normalize(text))
+    print(f"{name:30s} CER {m.cer:.3f}（置換 {m.substitutions:3d} / 削除 {m.deletions:3d} / 挿入 {m.insertions:3d}）、{sec:.1f} 秒")
+
+# 30 秒を超える音声は、chunk_length_s で区切るか、return_timestamps=True で逐次処理する（どちらもないと ValueError になる）
+results = {}
+for name, audio, kw in [("逐次処理（音量そのまま）", long_audio, dict(return_timestamps=True)),
+                        ("逐次処理", long_norm, dict(return_timestamps=True)),
+                        ("chunk_length_s=30", long_norm, dict(chunk_length_s=30, batch_size=8)),
+                        ("chunk_length_s=30 + タイムスタンプ", long_norm, dict(chunk_length_s=30, batch_size=8, return_timestamps=True))]:
+    t = time.time()
+    results[name] = asr(audio, generate_kwargs=GEN, **kw)
+    report(name, results[name]["text"], time.time() - t)
+
+# 文ごとに、正解の文字のうち認識結果に正しく出た割合を見る
+bounds = np.cumsum([0] + [len(normalize(t)) for t in df["raw_transcription"][:15]])
+def sentence_recall(text):
+    ok = np.zeros(len(long_ref), bool)
+    for c in jiwer.process_characters(long_ref, normalize(text)).alignments[0]:
+        if c.type == "equal":
+            ok[c.ref_start_idx:c.ref_end_idx] = True
+    return [round(float(ok[a:b].mean()), 2) for a, b in zip(bounds, bounds[1:])]
+
+for name in ["逐次処理（音量そのまま）", "逐次処理", "chunk_length_s=30"]:
+    print(f"{name:24s}", sentence_recall(results[name]["text"]))
+print(results["chunk_length_s=30"]["text"][:150])
+
+# タイムスタンプ付きの分割で、正解より多く出てくる 12 文字の並び（二重に出たか、挿入されたところ）
+h = normalize(results["chunk_length_s=30 + タイムスタンプ"]["text"])
+dups = sorted({h[i:i + 12] for i in range(len(h) - 11) if h.count(h[i:i + 12]) > long_ref.count(h[i:i + 12])})
+print(len(dups), "種類:", dups[:4])
+```
+
+```python
+from silero_vad import load_silero_vad, get_speech_timestamps
+
+# 無音のところで区切り、30 秒未満の区間をまとめてバッチで認識する
+vad = load_silero_vad()                                # Silero VAD (MIT): 発話区間を検出するモデル
+speech = get_speech_timestamps(torch.from_numpy(long_norm), vad, sampling_rate=SR, max_speech_duration_s=25)
+segments = []                                          # 発話区間を、25 秒を超えない範囲でまとめる
+for s in speech:
+    if segments and s["end"] - segments[-1][0] <= 25 * SR:
+        segments[-1][1] = s["end"]
+    else:
+        segments.append([s["start"], s["end"]])
+print(len(speech), "個の発話区間 →", len(segments), "個の区間:", [round((e - s) / SR, 1) for s, e in segments])
+
+t = time.time()
+outs = asr([long_norm[s:e] for s, e in segments], batch_size=8, generate_kwargs=GEN, return_timestamps=True)
+report("無音で区切ってバッチで認識", "".join(o["text"] for o in outs), time.time() - t)
+```
+
+```python
+# タイムスタンプ付きの出力を字幕 (SRT) にする
+def srt_time(t):
+    ms = round(t * 1000)
+    h, ms = divmod(ms, 3_600_000); m, ms = divmod(ms, 60_000); s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+subs = []
+for (s, e), o in zip(segments, outs):
+    for c in o["chunks"]:
+        start, end = c["timestamp"]
+        end = end if end is not None else (e - s) / SR          # 区間の最後で終わりの時刻が出ないことがある
+        subs.append((s / SR + start, s / SR + end, c["text"].strip()))
+srt = "\n".join(f"{i}\n{srt_time(a)} --> {srt_time(b)}\n{text}\n" for i, (a, b, text) in enumerate(subs, 1))
+with open("long.srt", "w", encoding="utf-8") as f:
+    f.write(srt)
+print(len(subs), "行の字幕")
+print(srt[:500])
+```
+
+```python
+# 幻覚と繰り返し: 音声のないところに文字を出す
+rng = np.random.default_rng(0)
+tests = {"無音 10 秒": np.zeros(10 * SR, np.float32),
+         "雑音 10 秒": (rng.standard_normal(10 * SR) * 0.01).astype(np.float32),
+         "発話のあとに無音 15 秒": np.concatenate([df["audio"][0], np.zeros(15 * SR, np.float32)])}
+for name, x in tests.items():
+    text = asr(x, generate_kwargs=GEN)["text"]
+    n_speech = len(get_speech_timestamps(torch.from_numpy(x), vad, sampling_rate=SR))
+    print(f"{name}: VAD の発話区間 {n_speech} 個 / 認識結果 {len(text)} 文字: {text if len(text) <= 100 else text[:50] + '…'}")
+print("正解:", df["raw_transcription"][0])
+```
+
+- FLEURS の 135 文（約 29 分）で、CER は large-v3-turbo 0.038、kotoba-whisper-v2.0 0.054、small 0.114 で、差はブートストラップの信頼区間で 0 を含まない。FLEURS は英語の記事を訳した文の読み上げで外国の固有名詞が多く、話し言葉では順位が変わりうる（kotoba のモデルカードでは ReazonSpeech の評価データで large-v3 より CER が低い）。
+- kotoba は turbo より速く、small は小さいのに速くなかった。1 トークンずつ生成するデコーダの層数（small 12、turbo 4、kotoba 2）が効くためと考えられる。GPU メモリの最大は 5.7GB（small、バッチ 16）。
+- 語の単位で正しく出た割合は、3 字以上のカタカナ語（turbo 0.85、kotoba 0.82、small 0.72）も漢字の語（0.90、0.84、0.67）も 1 − CER より低い。1 字違えば外れになるためで、カタカナ語（外国の固有名詞を含む）だけに誤りが集中するとは言えない。「カタルーニャ語 → 語るうね語」「両替 → 業外」「千年 → 1000年」のような誤りや表記の違いが出る（正規化は評価指標と統計的検定の章の「音声認識や OCR の誤り率 (WER / CER) を計算する」を参照）。
+- 約 4 分の音声 1 本で、逐次処理（`return_timestamps=True`）は CER 0.019 だったが、`chunk_length_s=30` で分けると繰り返しや文の脱落で 0.684、タイムスタンプを付けても二重の出力や挿入で 0.187 になった。モデルカードも精度を優先するなら逐次処理、速さなら分割としているが、この例では分割による精度の落ち方が大きい。
+- 音量が 40dB ほど小さい 3 文のうち 2 文は丸ごと抜けた。ffmpeg の dynaudnorm で音量をそろえると、どの文も 9 割以上の文字が出た。
+- Silero VAD で無音のところで区切ってバッチで認識すると、CER 0.022 と逐次処理に近く、時間は短かった。区間の開始時刻を足せば字幕 (SRT) になる。句読点が要るなら日本語の形態素解析と文分割の章の「句読点のない文章に読点と句点を付ける（句読点の復元）」を参照。
+- 無音や雑音にも文字を出す（幻覚）が、VAD はどちらも発話区間 0 個と判定したので、VAD で区切れば防げる。発話のあとの無音では、この例では幻覚は出なかった。
+- 書き起こしの先は、固有表現抽出の章の「音声認識の結果から固有表現を抽出する」と、要約と平易化の章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」を参照。議事録には pyannote などの話者分離を組み合わせる（モデルの利用条件への同意と HF のトークンが要る。kotoba-whisper-v2.2 は話者分離を組み込んだパイプライン）。
 
 ## テキストデータの重複と不良データを取り除く {dedup_clean}
 

@@ -1,6 +1,6 @@
 # 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成、テキスト平易化、文体の変換と、その評価。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化、文体の変換と、その評価。
 
 ## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
 
@@ -986,6 +986,216 @@ for col, label in [("generated", "LLM の見出し"), ("lead", "本文の先頭 
 - 実際の見出しは、読者の興味を引くための表現（煽り、伏せ字、疑問形）を含むことが多く、内容の要約とは限らない。ROUGE が低くても、見出しとして悪いとは言えない。
 - 12 記事では平均値のばらつきが大きい。手法を比べるなら、数百件以上で評価し、信頼区間を付ける（評価指標と統計的検定の章を参照）。
 - 「記事にない情報は入れない」と指示しても、固有名詞や数字を作ってしまうことがある。公開する見出しに使うなら、人の確認が必要。
+
+## 日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer) {t5_finetune gpu}
+
+記事の本文から見出しを作るような「文から文へ」の課題を、数千件の正解例で系列変換モデル（エンコーダ・デコーダ型の T5）に学習させたい。LLM にプロンプトで頼むより小さく速いモデルで、データの書き方（見出しの文体）に合わせた出力を得たい。
+
+```python
+!pip install -q rouge-score fugashi unidic-lite
+```
+
+```python
+import io, tarfile, urllib.request
+import pandas as pd
+
+def load_livedoor():
+    """livedoor ニュースコーパス（株式会社ロンウイット配布）。記事は CC BY-ND 2.1 JP（表示・改変禁止）"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2].strip(), "text": "\n".join(lines[3:]).strip()})
+    return pd.DataFrame(rows)
+
+df = load_livedoor()
+# この章の「記事の見出しを生成して実際の見出しと比べる」と同じ 12 記事（LLM との比較用）。学習には使わない
+same12 = df[df["label"].isin(["topic-news", "sports-watch"])].sample(12, random_state=1)
+rest = df.drop(same12.index).sample(frac=1, random_state=0).reset_index(drop=True)
+test, valid, train = rest[:300], rest[300:500], rest[500:4500]       # 評価 300、検証 200、学習 4,000 記事
+print(len(df), "記事 → 学習", len(train), "/ 検証", len(valid), "/ 評価", len(test))
+print(train[["label", "title"]].head(3).to_string())
+```
+
+```python
+import sentencepiece as spm
+from huggingface_hub import hf_hub_download
+from tokenizers import decoders, models
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+name = "sonoisa/t5-base-japanese-v1.1"     # 日本語の T5（v1.1 の構造、約 2.5 億パラメータ）。CC BY-SA 4.0
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
+
+def load_tokenizer(fix=True):
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    if fix:
+        # transformers 5 系の T5Tokenizer は byte_fallback を落とし、語彙にない文字（大文字の英字の一部など）を <unk> にしてしまう。
+        # 元の spiece.model から語彙とスコアを読んで Unigram を組み立て直し、デコード側にもバイト列を文字に戻す処理を入れる
+        tokenizer.backend_tokenizer.model = models.Unigram(
+            [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+        tokenizer.backend_tokenizer.decoder = decoders.Sequence(
+            [decoders.ByteFallback(), decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True)])
+    return tokenizer
+
+# SentencePiece 本体と分割・復元が一致するかを、評価用の記事の見出しと本文の先頭で確かめる
+texts = test["title"].tolist() + [t[:200] for t in test["text"]]
+for fix in [False, True]:
+    tok = load_tokenizer(fix)
+    enc_ok = sum(tok(s, add_special_tokens=False)["input_ids"] == sp.encode(s) for s in texts)
+    dec_ok = sum(tok.decode(sp.encode(s)) == sp.decode(sp.encode(s)) for s in texts)
+    print(f"修正{'後' if fix else '前'}: 分割が一致 {enc_ok}/{len(texts)}  復元が一致 {dec_ok}/{len(texts)}")
+    s = "【Sports Watch】KDDIのiPhone 5"
+    print("   ", tok.tokenize(s), "→", tok.decode(tok(s)["input_ids"], skip_special_tokens=True))
+tokenizer = load_tokenizer()
+
+# 修正後のトークナイザーを保存して読み直すときは、読み込みのクラスで結果が変わる
+tokenizer.save_pretrained("t5-headline-tokenizer")
+for label, cls in [("AutoTokenizer", AutoTokenizer), ("PreTrainedTokenizerFast", PreTrainedTokenizerFast)]:
+    tok = cls.from_pretrained("t5-headline-tokenizer")
+    print(f"{label} で読み直す: 分割が一致 {sum(tok(s, add_special_tokens=False)['input_ids'] == sp.encode(s) for s in texts)}/{len(texts)}")
+```
+
+```python
+import torch
+from transformers import AutoModelForSeq2SeqLM, set_seed
+
+set_seed(0)
+# 学習するので float32 のまま読み込む。「tied weights … NOT tie them」の警告が出るが、このモデルは入力と出力の埋め込みを別々に持つ設定なので無視してよい
+model = AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda")
+print(f"{model.num_parameters() / 1e6:.0f}M パラメータ")
+SRC_LEN, TGT_LEN = 256, 64        # 本文は先頭 256 トークン（見出しに要る情報はたいてい冒頭にある）、見出しは 64 トークンまで
+
+def generate(texts, batch_size=32, **kwargs):
+    model.eval()
+    outputs = []
+    for i in range(0, len(texts), batch_size):
+        x = tokenizer(list(texts[i:i + batch_size]), max_length=SRC_LEN, truncation=True, padding=True, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**x, max_new_tokens=TGT_LEN, **kwargs)
+        outputs += tokenizer.batch_decode(out, skip_special_tokens=True)
+    return outputs
+
+samples = test.head(3)
+before = generate(samples["text"], num_beams=4)
+for t, g in zip(samples["title"], before):
+    print(f"実際: {t}\n学習前: {g!r}\n")
+
+# T5 v1.1 の構造は float16 で計算すると値があふれる。損失を float16 と float32 で比べる
+x = tokenizer(list(samples["text"]), max_length=SRC_LEN, truncation=True, padding=True, return_tensors="pt").to(model.device)
+x["labels"] = tokenizer(text_target=list(samples["title"]), max_length=TGT_LEN, truncation=True, padding=True, return_tensors="pt")["input_ids"].to(model.device)
+x["labels"][x["labels"] == tokenizer.pad_token_id] = -100
+with torch.no_grad():
+    loss32 = model(**x).loss.item()
+    with torch.autocast("cuda", dtype=torch.float16):
+        loss16 = model(**x).loss.item()
+print(f"損失 float32: {loss32:.3f}  float16 (autocast): {loss16}")
+```
+
+```python
+import time
+from datasets import Dataset
+from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
+
+def encode(batch):
+    x = tokenizer(batch["text"], max_length=SRC_LEN, truncation=True)
+    x["labels"] = tokenizer(text_target=batch["title"], max_length=TGT_LEN, truncation=True)["input_ids"]
+    return x
+
+to_ds = lambda d: Dataset.from_pandas(d[["text", "title"]], preserve_index=False).map(encode, batched=True, remove_columns=["text", "title"])
+train_ds, valid_ds = to_ds(train), to_ds(valid)
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 だと損失が nan になるので float32 で学習する
+args = Seq2SeqTrainingArguments(
+    output_dir="t5-headline", num_train_epochs=1, per_device_train_batch_size=16, per_device_eval_batch_size=32,
+    learning_rate=3e-4, warmup_steps=25, lr_scheduler_type="linear", weight_decay=0.01,
+    eval_strategy="steps", eval_steps=50, logging_steps=50, save_strategy="no", report_to="none",
+    bf16=BF16, seed=0, disable_tqdm=True)
+trainer = Seq2SeqTrainer(model=model, args=args, train_dataset=train_ds, eval_dataset=valid_ds,
+                         data_collator=DataCollatorForSeq2Seq(tokenizer, model=model), processing_class=tokenizer)
+torch.cuda.reset_peak_memory_stats()
+t0 = time.time()
+trainer.train()        # 4,000 記事 × 1 エポック（250 ステップ）。T4 (float32) では 10 分前後の見込み
+print(f"学習 {time.time() - t0:.0f} 秒、GPU メモリの最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+
+curve = pd.DataFrame([{"学習した記事数": h["step"] * 16, "検証の損失": round(h["eval_loss"], 3)} for h in trainer.state.log_history if "eval_loss" in h])
+print(curve.to_string(index=False))
+```
+
+```python
+import numpy as np
+from fugashi import Tagger
+from rouge_score import rouge_scorer
+
+tagger = Tagger()
+
+class Tok:
+    def tokenize(self, text):
+        return [w.surface for w in tagger(text)]
+
+scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], tokenizer=Tok())
+
+for t, b, g in zip(samples["title"], before, generate(samples["text"], num_beams=4)):
+    print(f"実際: {t}\n学習前: {b!r}\n学習後: {g}\n")
+
+def evaluate(refs, hyps):
+    s = [scorer.score(r, h) for r, h in zip(refs, hyps)]
+    return {"ROUGE-1": np.mean([x["rouge1"].fmeasure for x in s]), "ROUGE-2": np.mean([x["rouge2"].fmeasure for x in s]),
+            "ROUGE-L": np.mean([x["rougeL"].fmeasure for x in s]), "平均字数": np.mean([len(h) for h in hyps])}
+
+def diff_ci(refs, hyps_a, hyps_b, n_boot=1000):
+    """記事ごとの ROUGE-L の差 (b − a) を、同じ記事の組で再標本化して 95% 信頼区間を求める（対応のあるブートストラップ）"""
+    d = np.array([scorer.score(r, b)["rougeL"].fmeasure - scorer.score(r, a)["rougeL"].fmeasure for r, a, b in zip(refs, hyps_a, hyps_b)])
+    boot = np.random.default_rng(0).choice(d, (n_boot, len(d))).mean(1)
+    return f"{d.mean():+.3f}（{np.percentile(boot, 2.5):+.3f}〜{np.percentile(boot, 97.5):+.3f}）"
+
+settings = {"貪欲法": dict(num_beams=1),
+            "ビーム 4": dict(num_beams=4),
+            "ビーム 4 + 3-gram の繰り返し禁止": dict(num_beams=4, no_repeat_ngram_size=3),
+            "サンプリング (top_p=0.9)": dict(do_sample=True, top_p=0.9)}
+rows, outputs = [], {}
+for label, kw in settings.items():       # 評価 300 記事 × 4 通り。T4 では合わせて 3〜4 分の見込み
+    set_seed(0)
+    t0 = time.time()
+    outputs[label] = generate(test["text"], **kw)
+    rows.append({"デコード": label, **evaluate(test["title"], outputs[label]),
+                 "ROUGE-L の差（対 貪欲法、95%CI）": "" if label == "貪欲法" else diff_ci(test["title"], outputs["貪欲法"], outputs[label]), "秒": time.time() - t0})
+print("実際の見出しの平均字数", round(test["title"].str.len().mean(), 1))
+pd.DataFrame(rows).round(3)
+```
+
+```python
+import re
+
+# この章の「記事の見出しを生成して実際の見出しと比べる」と同じ 12 記事で、本文の先頭 30 字（同じレシピのベースライン）と比べる
+lead = [t.strip().split("。")[0][:30] for t in same12["text"]]
+t5 = generate(same12["text"], num_beams=4, no_repeat_ngram_size=3)
+untag = lambda xs: [re.sub(r"【[^】]*】", "", x).strip() for x in xs]     # 【Sports Watch】のような、連載やカテゴリの決まった表記を除く
+print(pd.DataFrame([{"手法": "T5（ファインチューニング）", **evaluate(same12["title"], t5)},
+                    {"手法": "T5（【】の表記を除いて評価）", **evaluate(untag(same12["title"]), untag(t5))},
+                    {"手法": "本文の先頭 30 字", **evaluate(same12["title"], lead)}]).round(3).to_string(index=False))
+for t, g in list(zip(same12["title"], t5))[:3]:
+    print(f"実際: {t}\nT5  : {g}")
+
+# 評価 300 記事で、【】の表記を含む見出しの割合と、それが実際の見出しと一致した割合
+tag = lambda x: re.findall(r"【[^】]*】", x)
+hyps = outputs["ビーム 4 + 3-gram の繰り返し禁止"]
+print(f"【】を含む: 実際 {np.mean([bool(tag(t)) for t in test['title']]):.0%}  T5 {np.mean([bool(tag(h)) for h in hyps]):.0%}  "
+      f"T5 が付けた【】が実際の見出しにもある {np.mean([set(tag(h)) <= set(tag(t)) for t, h in zip(test['title'], hyps) if tag(h)]):.0%}")
+```
+
+
+- 使い分け: この章の「記事の見出しを生成して実際の見出しと比べる」は、指示に従う LLM（3B）にプロンプトで頼むので学習データが要らない。T5 は数千件の正解例と学習の時間が要るかわりに、モデルが小さく（248M パラメータ）、データの見出しの書き方まで真似る。同じ 12 記事で、上の T5 は ROUGE-1 F 0.438（【】の表記を除くと 0.415）、そのレシピの LLM はノートブックの出力で 0.332 だった。ただし LLM には「30 字以内」と指示しているので平均 27 字と短く、入力も本文の先頭 600 字で、条件がそろっていない。12 記事ではばらつきも大きく、再実行で T5 の値は 0.39〜0.44 の間で変わった。
+- 大規模言語モデルの章の「LoRA で LLM を少ないメモリでファインチューニングする」は、LLM の重みを固定して一部だけを学習する。T5 は全パラメータを学習するが、モデルが小さいので T4 の float32 でも収まる（この学習で GPU メモリの最大 10.4GB）。入力と出力の形が決まった変換を大量に処理するなら系列変換モデル、指示を変えながら色々な課題に使うなら LLM、と考えるとよい。
+- 学習前のモデルは事前学習（文中の穴埋め）しかしていないので、本文の断片を繰り返すだけで見出しにならない。v1.1 の構造の T5 は float16 で計算すると値があふれ、上の出力でも損失が nan になった。T4 では float32 で学習し（`fp16=True` にしない）、bfloat16 が使える GPU (A100, L4) では `bf16=True` にする。
+- データの量と時間の目安: 4,000 記事を 1 エポック学習して、手元の GPU（float32、ほかの処理と共有）で 259 秒だった。検証の損失は 800 記事で 2.605、1,600 記事で 2.348、4,000 記事で 2.206 と、増やすほど下がり方が小さくなる（1 回の学習の途中の値なので目安）。時間を減らすなら、学習する記事数か `SRC_LEN` を減らす。
+- デコードの設定: ビーム幅 4 のビーム探索は、貪欲法より ROUGE-L が 0.017 高い（95% 信頼区間 +0.002〜+0.033）。3-gram の繰り返しを禁止しても ROUGE-L は同じで、平均字数が 37.6 字から 35.5 字に縮んだ（実際の見出しは平均 36.7 字）。貪欲法は短め（31.9 字）で、ビームの半分ほどの時間で済む。サンプリングは ROUGE-L が 0.033 低いが、毎回違う候補が出るので、複数の案から人が選ぶ使い方に向く。
+- 学習データの書き方をそのまま覚える: 【Sports Watch】のような連載やカテゴリの表記は実際の見出しの 33% にしかないのに、T5 は 65% に付け、付けた表記のうち実際の見出しにもあったのは 17% だった（上の浅田真央の例も、実際の見出しには表記がない）。不要なら、学習データの見出しから表記を除いておくか、生成後に取り除く。
+- トークナイザーの不具合: transformers 5 系の T5Tokenizer は、このモデルの SentencePiece の byte_fallback を落とすので、語彙にない文字が `<unk>` になり、デコードで消える（上の「【ports atch】」）。修正すると、600 文で分割も復元も SentencePiece と一致した。ほかのモデル（rinna など）の直し方と違い、デコーダーにもバイト列を文字に戻す処理が要る。保存したトークナイザーは、上の出力のとおり AutoTokenizer で読むと修正が失われるので、`PreTrainedTokenizerFast.from_pretrained` で読み直す。
+- データとモデルの出典とライセンス: livedoor ニュースコーパスの記事は CC BY-ND 2.1 JP（表示・改変禁止）。sonoisa/t5-base-japanese-v1.1 は、日本語の Wikipedia（2022 年 6 月 27 日時点）、OSCAR、CC-100 で事前学習した T5 で、CC BY-SA 4.0。モデルカードは Common Crawl の利用規約も守るよう求めている。学習したモデルを配布するなら同じライセンスを継承する必要があり、改変禁止の記事で学習したモデルや生成した見出しを公開するときは、扱いを確かめる。
 
 ## 文章をやさしい日本語に書き換える（テキスト平易化） {text_simplification}
 

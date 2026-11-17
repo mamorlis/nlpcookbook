@@ -1,6 +1,6 @@
 # テキスト分類
 
-文書にラベルを付ける。古典的な TF-IDF と分類結果の分析から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニング、言語間転移、感情分析、有害な表現の検出まで。
+文書にラベルを付ける。古典的な TF-IDF と分類結果の分析から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、LLM による学習データの合成、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニングと知識蒸留、言語間転移、感情分析、有害な表現の検出まで。
 
 ## TF-IDF とロジスティック回帰で日本語のニュース記事を分類する {tfidf_logreg_ja}
 
@@ -841,6 +841,272 @@ for method, a in augs.items():
 - transformers 5 系では、sarashina2.2 のトークナイザーが本来の SentencePiece (Unigram) と違う分割になる（上の出力では「みのもんた」が「み / のも / ん / た」、「初任給」が 1 字ずつに分かれる）ので、上のようにモデル部分を Unigram に戻して使う。直したあとも、言い換えに英語が混ざる（「quite the financier」「Incident」）ことがある。言い換えが元の文から離れすぎていないか（埋め込みの類似度）や、ラベルが変わっていないかを確かめてから使う。機械翻訳の章の「擬似対訳データを往復翻訳の一致度でふるいにかける」と同じ発想で、類似度の低いものを捨てる方法もある（ここでは試していない）。
 - データは CC BY-ND（改変禁止）なので、言い換えたデータを公開・配布してはいけない。NLLB は CC BY-NC 4.0（非商用）、sarashina2.2 は MIT、multilingual-e5-small は MIT、日本語 WordNet は NICT の独自ライセンス（著作権表示を残せば利用・改変・再配布可）。
 
+## LLM で学習データを合成して小さな分類器を学習する {llm_synthetic_data gpu}
+
+人手のラベル付きデータがほとんどない。手元の LLM に (1) ラベルごとの例文を書かせる、(2) ラベルのない文書にラベルを付けさせる、の 2 通りで学習データを作り、軽い分類器（TF-IDF + ロジスティック回帰、文埋め込み + ロジスティック回帰）を学習したい。人手のラベルが各クラス 10 件ある場合と比べて、合成データの量と精度の関係や、生成した文の偏りも確かめる。
+
+（T4 の GPU ランタイムで、モデルのダウンロードを含めて全体で 15〜20 分程度かかる。）
+
+```python
+import io, random, tarfile, urllib.request
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+def load_livedoor():
+    """livedoor ニュースコーパス（株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP: 改変禁止）を DataFrame にする"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+df = load_livedoor()
+pool, test = train_test_split(df, test_size=0.2, stratify=df["label"], random_state=0)
+LABELS = sorted(df["label"].unique())
+# 記事タイトルで 9 クラスに分類する。人手のラベル付きデータは各クラス 10 件。選び方（乱数の種）を 5 通り変える
+SEEDS, N = range(5), 10
+human = {s: pool.groupby("label").sample(N, random_state=s) for s in SEEDS}
+used = set().union(*[set(d.index) for d in human.values()])
+unlabeled = pool.drop(list(used)).sample(1500, random_state=0)    # ラベルのないテキストの代わり（正解は分析にだけ使う）
+print("人手:", len(human[0]), "件 × 5 通り / ラベルなし:", len(unlabeled), "件 / テスト:", len(test), "件")
+
+# ラベルの説明（LLM に渡す）。カテゴリは配信元のサイトなので、サイトの内容を短く説明する
+DESC = {
+    "dokujo-tsushin": "独身女性の恋愛・結婚・仕事・生活に関するコラム",
+    "it-life-hack": "パソコン、インターネット、ソフトウェア、IT 製品の使いこなし",
+    "kaden-channel": "家電製品やデジタル機器、ガジェットの話題",
+    "livedoor-homme": "大人の男性向けの仕事、キャリア、ライフスタイル",
+    "movie-enter": "映画の公開情報、俳優、監督、試写会",
+    "peachy": "女性向けのグルメ、美容、ファッション、エンタメ",
+    "smax": "スマートフォンや携帯電話、モバイル通信",
+    "sports-watch": "野球やサッカーなどスポーツの試合や選手",
+    "topic-news": "芸能人やネットで話題の出来事、社会のニュース",
+}
+```
+
+```python
+# 手元の LLM: SB Intuitions の sarashina2.2-3b-instruct（MIT ライセンス）
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # T4 は bf16 が使えないので float16
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tok = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tok.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tok.padding_side = "left"                               # バッチで生成するので左パディング
+lm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+def chat_prompt(msg):
+    return tok.apply_chat_template([{"role": "user", "content": msg}], add_generation_prompt=True, tokenize=False)
+```
+
+```python
+# 方法 1: ラベルごとに見出しを生成させる。(a) ラベルの説明だけを渡す、(b) 人手の 10 件から 5 件を例として見せる
+# (b) は人手のデータの選び方（種）ごとに、その種の 10 件だけを例にして作る（比べる相手の人手 10 件以外の人手のデータが混ざらないように）
+# (a) 各クラス 100 件 + (b) 各クラス 80 件 × 5 通り = 4,500 件。Colab の T4 で 6〜9 分
+def gen_prompt(label, examples=None):
+    msg = f"ニュースサイトの「{label}」カテゴリ（{DESC[label]}）に載りそうな記事の見出しを 1 つ考えてください。"
+    if examples:
+        msg += "\n\nこのカテゴリの見出しの例:\n" + "\n".join(f"- {e}" for e in examples) + "\n\n例とは違う話題で、新しい見出しを書いてください。"
+    return chat_prompt(msg + "見出しだけを 1 行で出力してください。")
+
+def clean(s):
+    s = s.strip().split("\n")[0].strip().lstrip("-・ ")
+    for p in ["見出し:", "見出し："]:
+        s = s.removeprefix(p).strip()
+    return s[1:-1] if s.startswith("「") and s.endswith("」") else s
+
+@torch.no_grad()
+def generate(prompts, batch_size=64):
+    out = []
+    for i in range(0, len(prompts), batch_size):
+        enc = tok(prompts[i:i + batch_size], return_tensors="pt", padding=True, add_special_tokens=False).to(lm.device)
+        gen = lm.generate(**enc, max_new_tokens=48, do_sample=True, temperature=1.0, top_p=0.95, pad_token_id=tok.pad_token_id)
+        out += [clean(s) for s in tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return out
+
+rng = random.Random(0)
+torch.manual_seed(0)
+rows = [("説明だけ", -1, label, gen_prompt(label)) for label in LABELS for _ in range(100)]
+for s in SEEDS:
+    for label in LABELS:
+        seed_titles = list(human[s].query("label == @label")["title"])
+        rows += [("例 5 件", s, label, gen_prompt(label, rng.sample(seed_titles, 5))) for _ in range(80)]
+gen_df = pd.DataFrame(rows, columns=["kind", "seed", "label", "prompt"])
+gen_df["title"] = generate(list(gen_df["prompt"]))
+gen_df = gen_df[gen_df["title"].str.len() > 0].drop(columns="prompt")    # 空の出力を捨てる
+synth = {k: d.reset_index(drop=True) for k, d in gen_df.groupby("kind")}
+for kind, d in synth.items():
+    print(f"--- {kind}（{len(d)} 件。例 5 件は種 0 の分を表示）")
+    for label in ["sports-watch", "smax", "dokujo-tsushin"]:
+        print(f"[{label}]", " / ".join(d.query("label == @label and seed <= 0")["title"].head(4)))
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 方法 2: ラベルのない見出しに LLM でラベルを付ける（疑似ラベル）。9 つの選択肢を番号で示し、次のトークンが「1」〜「9」になる確率を比べる
+# （大規模言語モデルの章の「選択肢の尤度を比べて LLM に分類させる」と同じ考え方）。テストデータも同じ方法で分類して、LLM そのものの正解率も見る
+# ラベルなし 1,500 件 + テスト 1,474 件。Colab の T4 で 2〜3 分
+menu = "\n".join(f"{k + 1}. {DESC[l]}" for k, l in enumerate(LABELS))
+choice_ids = [tok.convert_tokens_to_ids(str(k + 1)) for k in range(len(LABELS))]   # 「1」〜「9」はそれぞれ 1 トークン
+
+@torch.no_grad()
+def llm_classify(titles, batch_size=32):
+    probs = []
+    for i in range(0, len(titles), batch_size):
+        prompts = [chat_prompt(f"次のニュース記事の見出しは、どのカテゴリの記事ですか。\n\n{menu}\n\n見出し: {t}\n\n番号だけで答えてください。")
+                   for t in titles[i:i + batch_size]]
+        enc = tok(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(lm.device)
+        logits = lm(**enc, logits_to_keep=1).logits[:, -1, choice_ids].float()   # 最後の位置（左パディングなのでそろう）の 9 つの番号のロジットだけ
+        probs.append(logits.softmax(-1).cpu().numpy())
+    return np.concatenate(probs)
+
+P_unl = llm_classify(list(unlabeled["title"]))
+P_test = llm_classify(list(test["title"]))
+L = np.array(LABELS)
+print(f"LLM で直接テストを分類した正解率: {(L[P_test.argmax(1)] == test['label']).mean():.3f}")
+print("ラベルなしの文書に付いたラベルの件数:", dict(zip(LABELS, np.bincount(P_unl.argmax(1), minlength=len(LABELS)).tolist())))
+# 特定の番号を選びやすい偏りを、ラベルなしの文書での確率の平均で割って弱める（正解ラベルは使わない）
+prior = P_unl.mean(0)
+P_unl, P_test = P_unl / prior, P_test / prior
+P_unl, P_test = P_unl / P_unl.sum(1, keepdims=True), P_test / P_test.sum(1, keepdims=True)
+print(f"偏りを補正したあとのテストの正解率: {(L[P_test.argmax(1)] == test['label']).mean():.3f}")
+pseudo = unlabeled.assign(label=L[P_unl.argmax(1)], conf=P_unl.max(1), gold=unlabeled["label"])
+print(f"疑似ラベルの正解率（ラベルなし 1,500 件の正解と比べる。本来は分からない）: {(pseudo['label'] == pseudo['gold']).mean():.3f}")
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 人手・合成・疑似ラベルで学習し、同じテストデータで正解率を比べる（分類器は TF-IDF + LR と、文埋め込み + LR）
+# 14 条件 × 5 通り × 2 分類器 = 140 回の学習。Colab で 1〜2 分
+import gc
+from scipy import stats
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+
+lm = None; gc.collect(); torch.cuda.empty_cache()   # LLM の GPU メモリを空ける（生成や疑似ラベルをやり直すときは、LLM の読み込みのセルから）
+st = SentenceTransformer("intfloat/multilingual-e5-small", device="cuda")   # MIT ライセンス
+all_texts = sorted(set(df["title"]) | {t for d in synth.values() for t in d["title"]})
+vec = dict(zip(all_texts, st.encode(["query: " + t for t in all_texts], normalize_embeddings=True, batch_size=256)))
+embed = lambda texts: np.stack([vec[t] for t in texts])
+X_test = embed(test["title"])
+
+def make_lr():
+    return LogisticRegression(C=10, solver="liblinear")    # 何度も学習し直すので、速い liblinear（クラスごとの 2 値分類）を使う
+
+def evaluate(d):
+    tfidf = make_pipeline(TfidfVectorizer(analyzer="char", ngram_range=(1, 3), sublinear_tf=True), make_lr())
+    acc1 = tfidf.fit(d["title"], d["label"]).score(test["title"], test["label"])
+    acc2 = make_lr().fit(embed(d["title"]), d["label"]).score(X_test, test["label"])
+    return acc1, acc2
+
+def per_class(d, n, s):     # 各クラス n 件を選ぶ（足りなければ全部）
+    return pd.concat([g.sample(min(n, len(g)), random_state=s) for _, g in d.groupby("label")])
+
+def synth_ex(s):            # 種 s の人手 10 件を例にして生成したもの
+    return synth["例 5 件"].query("seed == @s")
+
+def agreed(s):   # 人手 10 件で学習した分類器の予測と LLM の疑似ラベルが一致したものだけを、人手 10 件に足す
+    pred = make_lr().fit(embed(human[s]["title"]), human[s]["label"]).predict(embed(pseudo["title"]))
+    return pd.concat([human[s], pseudo[pred == pseudo["label"]]])
+
+conditions = {
+    "人手 各 10 件": lambda s: human[s],
+    "人手 各 50 件": lambda s: pool.groupby("label").sample(50, random_state=s),
+    "人手 各 200 件": lambda s: pool.groupby("label").sample(200, random_state=s),
+    **{f"生成（説明だけ）各 {n} 件": (lambda s, n=n: per_class(synth["説明だけ"], n, s)) for n in [10, 40, 80]},
+    **{f"生成（例 5 件）各 {n} 件": (lambda s, n=n: per_class(synth_ex(s), n, s)) for n in [10, 40, 80]},
+    "人手 10 + 生成（例 5 件）各 80 件": lambda s: pd.concat([human[s], per_class(synth_ex(s), 80, s)]),
+    "疑似ラベル 全部": lambda s: pseudo,
+    "疑似ラベル 確信度の上位半分": lambda s: pseudo[pseudo["conf"] >= pseudo["conf"].median()],
+    "人手 10 + 疑似ラベル（全部）": lambda s: pd.concat([human[s], pseudo]),
+    "人手 10 + 疑似ラベル（分類器と一致）": agreed,
+}
+
+acc = {cond: np.array([evaluate(make(s)) for s in SEEDS]) for cond, make in conditions.items()}
+rows = []
+for cond, a in acc.items():
+    row = {"学習データ": cond, "件数（種 0）": len(conditions[cond](0))}
+    for j, clf_name in enumerate(["TF-IDF", "埋め込み"]):
+        diff = a[:, j] - acc["人手 各 10 件"][:, j]       # 同じ種どうしの差（人手 10 件を足す条件では、同じ人手のデータとの対応のある比較）
+        half = stats.t.ppf(0.975, len(diff) - 1) * diff.std(ddof=1) / np.sqrt(len(diff))
+        row[f"{clf_name} 正解率"] = f"{a[:, j].mean():.3f} ± {a[:, j].std(ddof=1):.3f}"
+        row[f"{clf_name} 人手 10 件との差 [95%CI]"] = f"{diff.mean():+.3f} [{diff.mean() - half:+.3f}, {diff.mean() + half:+.3f}]"
+    rows.append(row)
+pd.set_option("display.width", 200)
+print(pd.DataFrame(rows).to_string(index=False))
+```
+
+```python
+# 生成した見出しの多様性と偏り: 同じ件数（各クラス 80 件）の本物の見出しと比べる（例 5 件は種 0 の分）
+from collections import Counter
+
+real = per_class(pool.drop(list(used)), 80, 0)
+corpus_titles = set(df["title"])
+
+def stats_of(d, generated=True):
+    sims, d2 = [], []
+    for _, g in d.groupby("label"):
+        e = embed(g["title"])
+        s = e @ e.T
+        sims.append(s[np.triu_indices(len(g), 1)].mean())                      # 同じクラスの中の 2 件の類似度の平均
+        bigrams = [t[i:i + 2] for t in g["title"] for i in range(len(t) - 1)]
+        d2.append(len(set(bigrams)) / len(bigrams))                            # distinct-2（文字 2-gram の異なり / 延べ）
+    return {"件数": len(d), "完全重複の割合": 1 - d["title"].nunique() / len(d), "distinct-2": np.mean(d2),
+            "クラス内の類似度": np.mean(sims), "平均の長さ": d["title"].str.len().mean(),
+            "コーパスの見出しと一致": d["title"].isin(corpus_titles).sum() if generated else np.nan}
+
+sets = {"本物": real, "生成（説明だけ）": per_class(synth["説明だけ"], 80, 0), "生成（例 5 件）": per_class(synth_ex(0), 80, 0)}
+display(pd.DataFrame({k: stats_of(v, k != "本物") for k, v in sets.items()}).T.round(3))
+
+# 生成した見出しでよく使われる言い回し（sports-watch の先頭 4 文字の頻度と、最も多いものの例）
+for k, d in sets.items():
+    titles = d.query("label == 'sports-watch'")["title"]
+    heads = Counter(t[:4] for t in titles).most_common(5)
+    print(f"{k}:", ", ".join(f"{h}({c})" for h, c in heads))
+    print("    例:", " / ".join(titles[titles.str.startswith(heads[0][0])].head(2)))
+```
+
+```python
+# 生成した見出しのラベルは正しいか: 人手 10 件と無関係な本物の見出し（約 5,800 件）で学習した分類器を「審判」にして確かめる
+# （分析のためだけの審判。実際にラベルが少ない場面では使えない）
+judge = LogisticRegression(C=10, max_iter=1000).fit(embed(pool.drop(list(used))["title"]), pool.drop(list(used))["label"])
+print(f"審判のテストでの正解率: {judge.score(X_test, test['label']):.3f}")
+for k, d in synth.items():
+    pred = judge.predict(embed(d["title"]))
+    agree = pd.Series(pred == d["label"]).groupby(d["label"]).mean()
+    print(f"生成（{k}）: 審判と生成時のラベルが一致 {np.mean(pred == d['label']):.1%}（クラス別: 最低 {agree.idxmin()} {agree.min():.0%}、最高 {agree.idxmax()} {agree.max():.0%}）")
+
+# 疑似ラベルの偏り: LLM が付けたラベルの件数と本当の件数、確信度ごとの正解率
+print(pd.DataFrame({"疑似ラベルの件数": pseudo["label"].value_counts(), "本当の件数": pseudo["gold"].value_counts(),
+                    "クラス別の適合率": (pseudo["label"] == pseudo["gold"]).groupby(pseudo["label"]).mean().round(3)}).to_string())
+q = pd.qcut(pseudo["conf"], 4, labels=["下位 1/4", "2", "3", "上位 1/4"])
+print("確信度の 4 分位ごとの正解率:", (pseudo["label"] == pseudo["gold"]).groupby(q, observed=True).mean().round(3).to_dict())
+```
+
+- LLM に学習データを作らせ、推論の軽い小さなモデルに学ばせる方法は、ZeroGen（Ye ら, EMNLP 2022）などで研究されている。この章の「言い換えたデータを足して少ない学習データを補う（データ拡張）」が手元の文を言い換えるのに対し、方法 1 は文そのものを新しく作り、方法 2 は LLM を「ラベル付け関数」の 1 本として使う（この章の「ルールでラベルを付けて分類器を学習する（弱教師あり学習、Snorkel）」と同じ位置づけ）。データ拡張のレシピと同じく、タイトルで 9 クラス、人手は各クラス 10 件、選び方を 5 通り変えて比べた。例を見せる生成は、種ごとにその種の人手 10 件だけを例にした（別の種の人手のデータを例に使うと、実質的に人手のデータが増え、人手 10 件との比較にならない）。
+- ラベルの説明だけで生成した見出しは、各クラス 80 件（計 720 件）使っても正解率が TF-IDF で 0.392、埋め込みで 0.523 で、人手 10 件（0.604 / 0.644）に届かなかった。埋め込みでは 40 件からほとんど伸びない（0.521 → 0.523）。人手の例を 5 件見せて生成すると 0.464 / 0.571 に上がったが、それでも人手 10 件より 14.1 / 7.3 ポイント低い。人手 10 件に足しても、TF-IDF では +0.019（95% 信頼区間 −0.012〜+0.049）で改善ははっきりせず、埋め込みでは −0.032 下がった。人手を各クラス 50 件にしたとき（+0.132 / +0.099）にはまったく及ばない。なお、この信頼区間は人手のデータの選び方（例 5 件の生成では、種ごとの生成も含む）のばらつきだけを表す。テストデータ、説明だけの生成文、疑似ラベルは 1 回しか作っていないので、疑似ラベルの条件の正解率は種によらず（± 0.000）、その信頼区間は人手 10 件の側のばらつきだけを表す。
+- 生成した見出しは、完全に重複したものはほとんどない（0.1% 以下で、本物と同程度）のに、各クラス 80 件で比べると文字 2-gram の異なりの割合 (distinct-2) は本物の 0.666 に対して 0.373（説明だけ）/ 0.461（例 5 件）と低く、同じクラスの中の埋め込みの類似度も高い（本物 0.826 に対して 0.887 / 0.868）。説明だけで作った sports-watch の 80 件のうち 45 件が「新記録樹」（「新記録樹立！」など）で始まり、例を見せると本物の「【Sports Watch】」という書き出しまでまねた。重複率だけでは多様性の低さは見えないので、n-gram の異なりや言い回しの頻度も見る。また、コーパスの記事は大半が 2010〜2012 年のものなのに、生成文には 5G、令和、コロナ禍、大谷翔平の二刀流など後の時代の話題や、英語の混じった見出し（Novak Djokovic、fintech など）が出てくる。コーパスの見出しとそのまま一致したものはなかった。
+- 生成時のラベルが正しいかを、本物の約 5,800 件で学習した審判の分類器（テストで 0.820）で見ると、一致は 7 割台（説明だけ 74.9%、例 5 件 76.6%）で、topic-news（説明だけで 29%）や kaden-channel（例 5 件で 40%）が特に低かった。このコーパスのラベルは配信元のサイトなので、家電・IT・スマートフォンや、何でも載るトピックニュースの境目は、短い説明からは決まらない。Li ら (EMNLP 2023) も、合成データで学習した分類器は主観的な課題ほど本物のデータとの差が大きく、生成文の多様性も低いと報告している。
+- ここでは、疑似ラベルで学習した分類器（0.375 / 0.376）は、LLM で直接テストを分類した正解率（0.399、確率の平均で割って偏りを補正すると 0.425）より低かった。ラベルなしの 1,500 件の疑似ラベルの正解率は 0.455 で、偏りを補正したあとでも topic-news が 583 件（補正前は 643 件、本当は 169 件）に膨らみ、sports-watch は 41 件（本当は 175 件）しかなかった。確信度の上位半分に絞ると（上位 1/4 の正解率は 0.659 と高い）かえって 0.342 に下がり、人手 10 件の分類器と一致したものだけを人手 10 件に足しても、人手 10 件だけより 4.6 / 7.3 ポイント低い。疑似ラベルを使う前に、少量の人手のラベル付きデータで LLM の正解率を測り、人手 10 件の分類器より明らかに高いことを確かめる。この 3B のモデルとこのラベルの組み合わせでは、合成データだけで学習するより人手で 10 件ずつラベルを付けるほうが効き、合成データを人手の 10 件に足してもはっきりした改善はなかった。
+- LLM の出力で別のモデルを学習してよいかは、モデルや API の規約で決まる（2026 年 11 月に確かめたもの）。ここで使った sarashina2.2-3b-instruct-v0.1 は MIT ライセンスで、MIT ライセンスには出力の利用を制限する条項はない。OpenAI の利用規約は「OpenAI と競合するモデルの開発に出力を使う」ことを、Anthropic の商用利用規約（2025 年 6 月 17 日発効）は「競合する製品やサービスを作るためにサービスを使う（競合する AI モデルの学習を含む）」ことを、Gemini API の追加利用規約（2026 年 3 月 23 日発効）は「サービスと競合するモデルの開発にサービスを使う」ことを禁じている。オープンなモデルでも、Llama 3.1 のライセンスは出力で学習したモデルを配布するなら名前の先頭に「Llama」を付けることを求め、Gemma の利用規約は、Gemma と同じように動作させる目的で Gemma の合成データを使って学習（蒸留）したモデルを「Model Derivatives」に含めて規約の対象にしている（出力そのものは Model Derivatives ではないとしている）。小さな分類器が「競合」にあたるかは解釈の問題なので、業務で使う前に最新の規約を読み、必要なら法務に確認する。
+- livedoor ニュースコーパスは CC BY-ND 2.1 JP（改変禁止）。人手の見出しを例としてプロンプトに入れているので、生成したデータや疑似ラベルを付けたデータは手元の実験だけに使い、配布しない。`intfloat/multilingual-e5-small` は MIT ライセンス。sarashina2.2 のトークナイザーの修正は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。GPU メモリの最大は 10.6 GB（生成のバッチ 64 件）で、T4 の 15GB に収まる。
+
 ## ラベルを付ける文書を賢く選んで、少ないラベルで精度を上げる（能動学習） {active_learning}
 
 アノテーションの予算が限られているので、ランダムに選ぶより「モデルが迷っている文書」から優先してラベルを付け、少ない件数で精度を上げたい。livedoor ニュースコーパスの記事タイトルで、ラベルを少しずつ増やすシミュレーションをして確かめる。
@@ -1517,6 +1783,219 @@ print(clf("新型スマートフォンは有機 EL ディスプレイと高性�
 - T4 GPU で 1 エポック約 2 分。正解率は 95〜97% 程度になる。
 - 学習率 (1e-5〜5e-5) とエポック数 (2〜5) が最も効くハイパーパラメータ。小さいデータではシードによるばらつきも大きいので、複数シードで平均をとる。
 - 本来は train / dev / test の 3 分割にし、dev でモデル選択、test は最後に 1 回だけ使う。
+
+## 大きなモデルの予測確率で小さなモデルを学習する（知識蒸留） {knowledge_distillation gpu}
+
+ファインチューニングした大きな BERT は精度が高いが、CPU で大量の文書をさばくには重い。小さなモデル（生徒）を学習するときに、大きな BERT（教師）が出す各クラスの確率（ソフトラベル）も手本にして（知識蒸留）、生徒の精度を上げたい。livedoor ニュースコーパスの記事の見出しだけから 9 カテゴリを当てる課題で、生徒を普通に学習した場合と比べ、パラメータ数と推論の速さ、温度と混合の重みの影響も調べる。
+
+```python
+!pip install -q fugashi unidic-lite   # 教師（東北大 BERT）のトークナイザーが MeCab を使う
+```
+
+```python
+import io, tarfile, urllib.request
+import pandas as pd
+from datasets import ClassLabel, Dataset
+
+def load_livedoor():
+    """livedoor ニュースコーパス（株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP）を DataFrame にする"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")   # 1 行目 URL, 2 行目 日付, 3 行目 タイトル
+            rows.append({"label": parts[1], "title": lines[2], "text": "\n".join(lines[3:])})
+    return pd.DataFrame(rows)
+
+df = load_livedoor()
+names = sorted(df["label"].unique())
+ds = Dataset.from_pandas(df).cast_column("label", ClassLabel(names=names))
+ds = ds.train_test_split(test_size=0.2, stratify_by_column="label", seed=0)   # この章の「BERT をファインチューニングして文書分類する (Trainer)」と同じ分割
+print(ds)
+```
+
+```python
+import time
+import numpy as np
+import torch
+import torch.nn.functional as F
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
+                          Trainer, TrainingArguments, set_seed)
+from transformers.utils import logging
+
+logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
+BF16 = torch.cuda.get_device_capability()[0] >= 8   # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+MAX_LEN = 64   # 見出しだけを入力にする
+
+TEACHER = "tohoku-nlp/bert-large-japanese-v2"  # 東北大 BERT-large（24 層、隠れ層 1024 次元、Apache 2.0）
+STUDENT = "sbintuitions/modernbert-ja-30m"     # SB Intuitions の ModernBERT-Ja（10 層、隠れ層 256 次元、MIT）
+
+def encode(name):
+    tok = AutoTokenizer.from_pretrained(name)
+    enc = ds.map(lambda b: tok(b["title"], truncation=True, max_length=MAX_LEN,
+                               return_token_type_ids=False),   # ModernBERT は token_type_ids を受け取らない
+                 batched=True, remove_columns=["title", "text"])
+    return tok, enc
+
+class DistillTrainer(Trainer):
+    """損失 = alpha × (温度 T の KL ダイバージェンス × T²) + (1 − alpha) × 正解ラベルとの交差エントロピー"""
+    def __init__(self, *args, T=2.0, alpha=0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.T, self.alpha = T, alpha
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        labels, t_logits = inputs.pop("labels"), inputs.pop("teacher_logits", None)   # 評価のときは教師の出力がない
+        outputs = model(**inputs)
+        s_logits = outputs.logits.float()
+        loss = F.cross_entropy(s_logits, labels)
+        if t_logits is not None and self.alpha > 0:
+            T = self.T
+            kd = F.kl_div(F.log_softmax(s_logits / T, dim=-1), F.log_softmax(t_logits.float() / T, dim=-1),
+                          reduction="batchmean", log_target=True) * T * T   # T² を掛けて勾配の大きさを温度によらずそろえる
+            loss = self.alpha * kd + (1 - self.alpha) * loss
+        return (loss, outputs) if return_outputs else loss
+
+def train(name, tok, train_ds, epochs, lr, T=2.0, alpha=0.0, seed=0):
+    set_seed(seed)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        name, num_labels=len(names), id2label=dict(enumerate(names)), label2id={n: i for i, n in enumerate(names)})
+    pad = DataCollatorWithPadding(tok)
+    def collate(features):   # 教師の出力（9 次元）は長さがそろっているので、そのまま積む
+        t = [f.pop("teacher_logits") for f in features] if "teacher_logits" in features[0] else None
+        batch = pad(features)
+        if t is not None:
+            batch["teacher_logits"] = torch.tensor(t)
+        return batch
+    args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=lr, warmup_steps=0.1,   # 1 未満は全ステップ数に対する割合
+                             weight_decay=0.01, per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
+                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=seed,
+                             remove_unused_columns=False)   # teacher_logits の列を消させない
+    trainer = DistillTrainer(model=model, args=args, train_dataset=train_ds, data_collator=collate, T=T, alpha=alpha)
+    trainer.train()
+    return trainer
+
+def predict(trainer, test_ds):
+    return trainer.predict(test_ds).predictions
+```
+
+```python
+# 教師: 東北大 BERT-large をファインチューニングする（Colab の T4 で 5〜7 分の見込み）
+t0 = time.time()
+tok_t, enc_t = encode(TEACHER)
+teacher = train(TEACHER, tok_t, enc_t["train"], epochs=3, lr=2e-5)
+gold = np.array(enc_t["test"]["label"])
+logits_t = predict(teacher, enc_t["test"])
+print(f"教師の正解率: {(logits_t.argmax(-1) == gold).mean():.3f}（{time.time() - t0:.0f} 秒）")
+
+# 学習データに対する教師の出力（ロジット）を一度だけ計算して保存しておく（オフラインの蒸留）
+train_logits = predict(teacher, enc_t["train"])
+p = torch.tensor(train_logits).float()
+for T in [1, 2, 4]:
+    q = F.softmax(p / T, dim=-1)
+    print(f"T={T}: 学習データでの教師の最大確率の平均 {q.max(-1).values.mean():.3f}、"
+          f"2 番目に高い確率の平均 {q.topk(2).values[:, 1].mean():.4f}")
+```
+
+```python
+# 生徒: ModernBERT-Ja-30M を、正解ラベルだけで学習した場合 (alpha=0) と蒸留した場合で比べる。
+# 乱数の種を 3 つ変えて学習する（Colab の T4 で 1 回 1 分前後、合計 5〜7 分の見込み）
+tok_s, enc_s = encode(STUDENT)
+train_s = enc_s["train"].add_column("teacher_logits", train_logits.tolist())   # ds の同じ並びなので行がそろっている
+PRED = {}
+def run(T, alpha, seed=0):
+    tr = train(STUDENT, tok_s, train_s, epochs=3, lr=1e-4, T=T, alpha=alpha, seed=seed)
+    PRED[(T, alpha, seed)] = predict(tr, enc_s["test"]).argmax(-1)
+    return tr
+
+for seed in [0, 1, 2]:
+    student_base = run(T=1, alpha=0.0, seed=seed)   # 普通の学習（交差エントロピーだけ）
+    student_kd = run(T=2, alpha=0.5, seed=seed)     # 蒸留
+for T, alpha, label in [(1, 0.0, "普通の学習"), (2, 0.5, "蒸留 (T=2, alpha=0.5)")]:
+    accs = [(PRED[(T, alpha, s)] == gold).mean() for s in [0, 1, 2]]
+    print(f"{label}: 正解率 {np.mean(accs):.3f}（種ごと {', '.join(f'{a:.3f}' for a in accs)}）")
+```
+
+```python
+# 温度と混合の重みを変える（種は 0 だけ。Colab の T4 で 4〜6 分の見込み）
+from sklearn.metrics import f1_score
+
+for T, alpha in [(1, 0.5), (4, 0.5), (8, 0.5), (2, 0.9), (2, 1.0)]:
+    run(T, alpha)
+table = pd.DataFrame([{"T": T, "alpha": a, "正解率": (p == gold).mean(), "macro-F1": f1_score(gold, p, average="macro")}
+                      for (T, a, s), p in PRED.items() if s == 0]).sort_values(["alpha", "T"])
+print(table.round(3).to_string(index=False))
+```
+
+```python
+# テストの 1474 件をブートストラップして、差の 95% 信頼区間を出す（生徒は 3 つの種の正解率の平均。評価データの抽出によるばらつきだけを見る）
+c_base, c_kd = [np.mean([PRED[(T, a, s)] == gold for s in [0, 1, 2]], axis=0) for T, a in [(1, 0.0), (2, 0.5)]]
+c_t = (logits_t.argmax(-1) == gold).astype(float)
+rng = np.random.default_rng(0)
+idx = rng.integers(0, len(gold), (1000, len(gold)))   # 同じ組を引き直す（対応のあるブートストラップ）
+for name, a, b in [("蒸留 − 普通の学習", c_kd, c_base), ("教師 − 蒸留した生徒", c_t, c_kd)]:
+    lo, hi = np.percentile((a[idx] - b[idx]).mean(1), [2.5, 97.5])
+    print(f"{name}: {a.mean() - b.mean():+.3f}（95% 信頼区間 {lo:+.3f}〜{hi:+.3f}）")
+```
+
+```python
+# パラメータ数と推論の速さ（トークナイズの時間は含めない。Colab で 3〜4 分の見込み）
+import contextlib
+
+def count(model):
+    total = sum(p.numel() for p in model.parameters())
+    emb = model.get_input_embeddings().weight.numel()
+    return total / 1e6, (total - emb) / 1e6
+
+def bench(model, tok, device, n, bs):
+    sub = ds["test"].select(range(n))
+    batches = [tok(sub["title"][i:i + bs], truncation=True, max_length=MAX_LEN,
+                   padding=True, return_token_type_ids=False, return_tensors="pt") for i in range(0, n, bs)]
+    model = model.to(device).eval()
+    if device == "cuda":
+        ctx = torch.autocast("cuda", dtype=torch.bfloat16 if BF16 else torch.float16)
+    else:
+        ctx = contextlib.nullcontext()   # CPU は float32 のまま
+    with torch.inference_mode(), ctx:
+        model(**{k: v.to(device) for k, v in batches[0].items()})   # 1 回目は準備に時間がかかるので測らない
+        best = float("inf")
+        for _ in range(3):   # 3 回測って最も速い回をとる（ほかの処理の影響を減らす）
+            if device == "cuda": torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            for b in batches:
+                model(**{k: v.to(device) for k, v in b.items()})
+            if device == "cuda": torch.cuda.synchronize()
+            best = min(best, time.perf_counter() - t0)
+    return n / best
+
+print("CPU のスレッド数:", torch.get_num_threads())
+for name, tr, tok in [("教師 (BERT-large)", teacher, tok_t), ("生徒 (ModernBERT-Ja-30M)", student_kd, tok_s)]:
+    total, body = count(tr.model)
+    gpu = bench(tr.model, tok, "cuda", n=1024, bs=64)
+    cpu = bench(tr.model, tok, "cpu", n=128, bs=32)
+    print(f"{name}: パラメータ {total:.0f}M（埋め込みを除くと {body:.0f}M）、GPU {gpu:.0f} 件/秒、CPU {cpu:.1f} 件/秒")
+print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 蒸留した生徒（種 2）を保存して、pipeline で CPU で推論する
+from transformers import pipeline
+
+student_kd.save_model("livedoor-student"); tok_s.save_pretrained("livedoor-student")
+clf = pipeline("text-classification", model="livedoor-student", device="cpu")
+for title in ["新型スマートフォン、有機 EL と高性能カメラを搭載して来月発売へ", "日本代表が後半に逆転、W 杯予選で勝利", "30 代独身女性が語る、結婚に踏み切れない本当の理由"]:
+    print(clf(title), title)
+```
+
+- 知識蒸留（Hinton ら 2015）では、生徒に正解ラベルだけでなく、教師の確率の分布（「家電チャンネル」らしいが「IT ライフハック」の可能性も少しある、など）を真似させる。温度 T で割ってからソフトマックスをとると分布がなだらかになり、2 番目以下のクラスの情報が損失に効くようになる。T² を掛けるのは、温度を変えても蒸留の項の勾配の大きさをそろえるため（同論文）。損失の関数は短いので、Trainer の compute_loss を上書きして自分で書けばよい。教師の学習はこの章の「BERT をファインチューニングして文書分類する (Trainer)」とほぼ同じ手順だが、入力を見出しだけにし、モデルを BERT-large に変え、最良のエポックを選ぶ処理は省いた。
+- 教師は自分が学習したデータに対しては自信が強く、T=1 では最大確率の平均が 0.984、2 番目のクラスの確率の平均は 0.0095 でほぼ正解ラベルと同じだった。T=2 では 0.837 と 0.044、T=4 では 0.462 と 0.096 になり、2 番目以下のクラスの情報が表に出る。ラベルのない文書が別にあれば、教師に確率を付けさせて生徒の学習データに足すこともできる。
+- 見出しだけの課題では、教師 (BERT-large) の正解率は 0.927、生徒を普通に学習すると 0.897（3 つの種で 0.896〜0.898）、蒸留 (T=2, alpha=0.5) すると 0.909（0.906〜0.913）で、3 つの種のすべてで蒸留のほうが高かった。差は +0.012（95% 信頼区間 +0.005〜+0.019）で、教師との差 0.030 の 4 割ほどを埋めたが、教師とはまだ 0.018（同 +0.007〜+0.030）の差がある。区間の求め方は評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照。
+- 温度と混合の重みを変えた表（種 0 のみ）では、蒸留したどの設定 (0.903〜0.915) も普通の学習 (0.898) より高く、教師の確率だけで学習した alpha=1.0 が最も高かった (0.915)。ただし設定どうしの差は 1.2 ポイント程度で、1 つの種、1474 件の評価では見分けにくい。また、ここではテストデータで設定を比べているので、実際には学習データから検証用のデータを分けて温度と重みを選ぶ。
+- 生徒のパラメータは 37M で教師 (337M) の約 9 分の 1、埋め込みを除くと 11M と 304M で約 28 分の 1 である（ModernBERT-Ja は語彙が 102,400 語と大きい）。2 スレッドの CPU では教師が 5.8 件/秒、生徒が 172.2 件/秒で約 30 倍、GPU (float16) では 1523 件/秒と 9951 件/秒で約 6.5 倍速かった。速さは環境や負荷で変わるので、Colab では測り直す。GPU メモリの最大使用量は 6.9 GB だった。
+- ModernBERT-Ja-30M のモデルカードにある livedoor ニュースコーパスの評価（入力や分割はこのレシピと異なる）では、正解率が ModernBERT-Ja-30M で 97.20、東北大 BERT-base v3 で 96.91、BERT-large v2 で 97.64 で、モデルの大きさによる差がほとんどない。このような課題では蒸留の余地は小さい。このレシピで見出しだけを入力にしたのは、教師と生徒の差が出る課題にするためである。教師と生徒は語彙もトークナイザー（MeCab と WordPiece、SentencePiece）も違うが、出力の確率だけを使うので問題にならない。
+- データの livedoor ニュースコーパスは CC BY-ND 2.1 JP（改変禁止）である。教師は東北大の BERT-large (Apache 2.0)、生徒は SB Intuitions の ModernBERT-Ja-30M (MIT)。学習したモデルを配布するときは、データのライセンスとの関係に注意する。
 
 ## 英語のデータだけで学習して日本語を分類する（ゼロショットの言語間転移） {crosslingual_transfer gpu}
 
