@@ -1,6 +1,6 @@
 # テキスト分類
 
-文書にラベルを付ける。古典的な TF-IDF と分類結果の分析から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、LLM による学習データの合成、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニングと知識蒸留、言語間転移、感情分析、有害な表現の検出まで。
+文書にラベルを付ける。古典的な TF-IDF と分類結果の分析から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、LLM による学習データの合成、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニングと知識蒸留、言語間転移、感情分析（学習済みモデルと評価極性辞書）、有害な表現の検出まで。
 
 ## TF-IDF とロジスティック回帰で日本語のニュース記事を分類する {tfidf_logreg_ja}
 
@@ -2175,9 +2175,200 @@ for r in clf("値段は高いけれど、品質には満足しています。", 
     print(r["label"], round(r["score"], 3))
 ```
 
-- 二重否定、皮肉、対比（「〜だが…」）は誤りやすい。ドメインが違うと精度が落ちるので、自分のデータで少量でも評価する。
+- 二重否定、皮肉、対比（「〜だが…」）は誤りやすい。ドメインが違うと精度が落ちるので、自分のデータで少量でも評価する。評価極性辞書と規則で判定し、効いた語を示す方法は、この章の「評価極性辞書で感情を判定し、効いた語を示す（否定と逆接の規則）」を参照。
 - ここで使ったのは多言語モデル（英語・日本語・中国語など 12 言語）。日本語専用なら `koheiduck/bert-japanese-finetuned-sentiment`、英語なら `cardiffnlp/twitter-roberta-base-sentiment-latest` など。
 - 喜び・悲しみ・怒りなどの感情の種類まで知りたい場合は、この章の「喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME)」を、観点（味、価格など）ごとに判定したい場合は「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」を参照。
+
+## 評価極性辞書で感情を判定し、効いた語を示す（否定と逆接の規則） {sentiment_lexicon}
+
+学習済みモデルの判定は根拠が見えにくい。公開の評価極性辞書で文中の語のポジ・ネガを数え、否定と逆接の規則を加えて判定し、どの語が効いたかを示したい。
+
+```python
+!pip install -q fugashi==1.5.2 unidic-lite==1.0.8
+```
+
+```python
+import re, urllib.request
+
+# 日本語評価極性辞書 ver.1.0（東北大学 乾・岡崎研究室）。クレジットを明記すれば商用利用も可能。
+# 用言編は 小林ら (2005)「意見抽出のための評価表現の収集」、名詞編は 東山ら (2008)「述語の選択選好性に着目した名詞評価極性の獲得」を引用する
+BASE = "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/"
+fetch = lambda name: urllib.request.urlopen(BASE + name).read().decode("utf-8").splitlines()
+
+lexicon = {}
+# 名詞編: 語 \t 極性のタグ \t 判定の観点。タグが p（ポジ）と n（ネガ）のものだけを使う（e の中立と、?p?n などの曖昧なものは除く）
+for line in fetch("pn.csv.m3.120408.trim"):
+    f = line.split("\t")
+    if len(f) >= 2 and f[1] in ("p", "n"):
+        lexicon[f[0]] = 1 if f[1] == "p" else -1
+n_noun = len(lexicon)
+for line in fetch("wago.121808.pn"):             # 用言編: 「ポジ（評価）」などのタグ \t 形態素を空白で区切った表現
+    tag, _, expr = line.partition("\t")
+    expr = re.sub(r" (だ|です|の|な|と|に)$", "", expr).replace(" ", "")   # 「至便 です」は「至便」、「使い 難い」は「使い難い」で引く
+    if expr:
+        lexicon.setdefault(expr, 1 if tag.startswith("ポジ") else -1)   # 名詞編と重なる表現は名詞編の極性を優先する
+print(f"名詞 {n_noun} 語 + 用言 {len(lexicon) - n_noun} 語 = {len(lexicon)} 語")
+print({w: lexicon.get(w) for w in ["満足", "最悪", "美味しい", "悪い", "使い難い", "本当", "値段", "高い"]})
+```
+
+```python
+from fugashi import Tagger
+
+tagger = Tagger()
+ADVERSATIVE_PARTICLES = {"が", "けど", "けれど", "けれども", "のに", "ものの"}
+ADVERSATIVE_CONJ = {"しかし", "でも", "だが", "だけど", "けれど", "けれども", "ところが", "ただ"}
+
+def lookup(toks, i):
+    """位置 i から始まる最長の辞書の語（4 形態素まで）。最後の形態素は活用した形のほか基本形でも引く"""
+    if toks[i].feature.pos1 in ("助詞", "助動詞", "補助記号"):
+        return None
+    for n in (4, 3, 2, 1):
+        if i + n <= len(toks):
+            head, last = "".join(t.surface for t in toks[i:i + n - 1]), toks[i + n - 1]
+            for form in (last.surface, last.feature.orthBase, last.feature.lemma):
+                if form and head + form in lexicon:
+                    return head + form, n
+    return None
+
+def is_negation(t):   # 「ない」「ぬ」「ず」と、「良くない」「問題がない」の「ない」（形容詞「無い」）
+    return (t.feature.pos1 == "助動詞" and t.feature.lemma in ("ない", "ぬ", "ず")) or (t.feature.pos1 == "形容詞" and t.feature.lemma == "無い")
+
+def is_adversative(toks, i):
+    t = toks[i]
+    if t.feature.pos1 == "接続詞":
+        return t.surface in ADVERSATIVE_CONJ
+    if t.feature.pos2 == "接続助詞":
+        return t.surface in ADVERSATIVE_PARTICLES
+    # unidic-lite は「美味しいが」の「が」を格助詞と解析することがあるので、用言の直後の「が」も逆接とみなす
+    return t.surface == "が" and i > 0 and toks[i - 1].feature.pos1 in ("動詞", "形容詞", "助動詞")
+
+def analyze(text, negation=True, adversative=True):
+    toks, hits, i = list(tagger(text)), [], 0
+    while i < len(toks):
+        found = lookup(toks, i)
+        if found:
+            word, n = found
+            hits.append({"語": word, "極性": lexicon[word], "否定": 0, "重み": 1.0, "end": i + n - 1})
+            i += n
+            continue
+        t = toks[i]
+        if negation and hits and is_negation(t):
+            # 直前の極性語との間が付属語（「は」「て」「わけが」など）だけなら反転する。「良くはない」「面白くないわけがない」
+            between = toks[hits[-1]["end"] + 1:i]
+            if all(b.feature.pos1 in ("助詞", "助動詞", "接尾辞") or b.feature.pos2 == "非自立可能" or b.feature.lemma in ("訳", "筈")
+                   for b in between):
+                hits[-1]["極性"] *= -1
+                hits[-1]["否定"] += 1
+        if adversative and is_adversative(toks, i):
+            for h in hits:
+                h["重み"] *= 0.5   # 逆接より前を半分にする（= 後ろを重くする）
+        i += 1
+    return sum(h["極性"] * h["重み"] for h in hits), hits
+
+def explain(text):
+    score, hits = analyze(text)
+    label = "ポジ" if score > 0 else "ネガ" if score < 0 else "判定なし"
+    why = "  ".join(f"{h['語']}{'（否定×%d）' % h['否定'] if h['否定'] else ''} {h['極性'] * h['重み']:+g}" for h in hits)
+    print(f"{label:4} {score:+5.1f}  {text}\n{'':12}根拠: {why or '辞書の語なし'}")
+
+for text in ["この映画は本当に素晴らしかった。もう一度観たい。", "最悪の接客で、二度と行かないと決めた。", "明日は月曜日です。",
+             "期待していたほどではなかったが、悪くはない。", "面白くないわけがない。", "値段は高いけれど、品質には満足しています。",
+             "料理は美味しいが、接客が悪い。", "めっちゃ嬉しい。"]:
+    explain(text)
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+# WRIME Ver.2（宮内ら 2022 / Suzuki et al., LREC 2022, https://github.com/ids-cv/wrime）: SNS の投稿 35,000 件に、書き手本人と
+# 読み手 3 人が感情極性 (-2〜+2) を付けたもの。CC BY-NC-ND 4.0（非商用・改変禁止）
+df = pd.read_csv("https://raw.githubusercontent.com/ids-cv/wrime/master/wrime-ver2.tsv", sep="\t")
+df["readers"] = df[[f"Reader{i}_Sentiment" for i in (1, 2, 3)]].mean(axis=1)   # 読み手 3 人の平均（実数）
+test = df[(df["Train/Dev/Test"] == "test") & (df["readers"] != 0)].reset_index(drop=True)   # 平均が 0（中立）の投稿は除く
+y = np.where(test["readers"] > 0, "positive", "negative")
+print(f"評価: {len(test)} 件（書き手 {test['UserID'].nunique()} 人）ポジの割合 {(y == 'positive').mean():.3f}")
+
+scores, rows = {}, {}
+for name, kw in [("辞書だけ", dict(negation=False, adversative=False)), ("+ 否定で反転", dict(adversative=False)), ("+ 否定 + 逆接", {})]:
+    s = np.array([analyze(t, **kw)[0] for t in test["Sentence"]])
+    c = s != 0   # 辞書の語がない（または打ち消し合った）文は判定しない
+    scores[name] = s
+    rows[name] = {"判定できた割合": c.mean(), "判定できた文の正解率": (np.where(s > 0, "positive", "negative") == y)[c].mean()}
+print(pd.DataFrame(rows).T.round(3))
+
+# 規則を足して判定（ポジ / ネガ / 判定なし）が変わった文だけで比べる。判定なしは不正解と数える
+correct = lambda s: np.where(s > 0, "positive", np.where(s < 0, "negative", "")) == y
+for before, after in [("辞書だけ", "+ 否定で反転"), ("+ 否定で反転", "+ 否定 + 逆接")]:
+    ch = np.sign(scores[before]) != np.sign(scores[after])
+    print(f"{after}: 判定が変わった {ch.sum()} 件で、正解 {correct(scores[before])[ch].sum()} 件 → {correct(scores[after])[ch].sum()} 件")
+```
+
+```python
+from transformers import pipeline
+
+# この章の「日本語の感情分析（ポジネガ判定）をする」と同じ多言語モデル (Apache 2.0)。Colab の CPU で 5〜8 分程度
+clf = pipeline("text-classification", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student")
+order = np.argsort(test["Sentence"].str.len().to_numpy())   # 長さの近い文をまとめてパディングを減らす
+out = clf(list(test["Sentence"].iloc[order]), top_k=None, truncation=True, batch_size=32)
+model_pred = np.empty(len(test), dtype=object)
+posneg = lambda rs: max((r for r in rs if r["label"] != "neutral"), key=lambda r: r["score"])["label"]   # neutral を除き、ポジとネガの高いほう
+model_pred[order] = [posneg(rs) for rs in out]
+
+lex = scores["+ 否定 + 逆接"]
+covered = lex != 0
+lex_pred = np.where(lex > 0, "positive", "negative")
+acc = lambda p, m=slice(None): (p == y)[m].mean()
+print(f"モデル        : 全体 {acc(model_pred):.3f}   辞書が判定できた {covered.sum()} 件で {acc(model_pred, covered):.3f}")
+print(f"辞書 + 規則   :                辞書が判定できた {covered.sum()} 件で {acc(lex_pred, covered):.3f}")
+print(f"辞書 → モデル : 全体 {acc(np.where(covered, lex_pred, model_pred)):.3f}（辞書で判定できない文だけモデルを使う）")
+
+# 辞書とモデルの正解率の差（判定できた文）の 95% 信頼区間。同じ人の投稿は似ているので、書き手を単位にリサンプリングする
+rng = np.random.default_rng(0)
+users = test["UserID"].to_numpy()
+rows_of = {u: np.flatnonzero((users == u) & covered) for u in np.unique(users)}
+diff = [acc(lex_pred, ix) - acc(model_pred, ix)
+        for ix in (np.concatenate([rows_of[u] for u in rng.choice(list(rows_of), len(rows_of))]) for _ in range(1000))]
+print(f"差（辞書 - モデル）= {acc(lex_pred, covered) - acc(model_pred, covered):+.3f}  95% CI {np.percentile(diff, 2.5):+.3f}〜{np.percentile(diff, 97.5):+.3f}")
+```
+
+```python
+from collections import Counter
+
+# 効いた語を評価データ全体で集計する: 語の向き（否定の反転後）が、投稿の正解と逆だった割合の高い語
+agree, disagree = Counter(), Counter()
+for text, gold, s in zip(test["Sentence"], y, lex):
+    for h in analyze(text)[1] if s != 0 else []:
+        (agree if (h["極性"] > 0) == (gold == "positive") else disagree)[h["語"]] += 1
+stat = pd.DataFrame({"正解と同じ向き": agree, "逆向き": disagree}).fillna(0).astype(int)
+stat["逆向きの割合"] = (stat["逆向き"] / stat.sum(axis=1)).round(2)
+stat["辞書の極性"] = [lexicon[w] for w in stat.index]
+print(stat[stat[["正解と同じ向き", "逆向き"]].sum(axis=1) >= 15].sort_values("逆向きの割合", ascending=False).head(8))
+
+# 判定できなかった投稿によく出る内容語（辞書にない語の候補）
+miss = Counter(t.feature.orthBase for text in test["Sentence"][~covered] for t in tagger(text)
+               if t.feature.pos1 in ("名詞", "形容詞", "動詞") and t.feature.pos2 not in ("数詞", "非自立可能") and t.feature.orthBase and len(t.surface) > 1)
+print("判定できなかった投稿に多い語:", [w for w, _ in miss.most_common(15)])
+```
+
+```python
+# 弱点の例（自作の文）。モデルの判定（上と同じく neutral を除いたポジとネガの高いほう）と並べる
+for text in ["素晴らしい対応ですね、2 時間も待たされるなんて。", "このラーメン、マジで神ってる。", "エモい曲で泣いた。",
+             "バッテリーの持ちが短い。", "値段が高い。", "値段が安い。", "評価が高い。"]:
+    explain(text)
+    print(f"{'':12}モデル: {posneg(clf(text, top_k=None))}")
+
+# 辞書は書き換えるだけで直せる（分野の語を足す、誤りの多い語を外す）
+lexicon.update({"神ってる": 1, "エモい": 1})
+explain("このラーメン、マジで神ってる。")
+```
+
+- 辞書の判定は、どの語がどちら向きに効いたかをそのまま示せる。評価データ全体で集計すると、正解と逆向きに働きやすい語が分かる。WRIME では「目茶」（「めっちゃ」は語彙素で引くとこれになり、辞書ではネガなので、「めっちゃ嬉しい。」は「嬉しい」と打ち消し合って判定なしになる）、「大丈夫」「結構」「明日」（いずれもポジ）などで、強調の副詞や、文脈で向きの決まらない語が極性語として数えられている。こうした語を辞書から外したり、分野の語を足したり（最後のセル）するのは、モデルの再学習より手軽である。学習済みモデルの根拠を予測のあとから近似して見る方法は、この章の「個々の予測の根拠を可視化する (LIME)」を参照。辞書では、根拠が判定の仕組みそのものである点が違う。
+- WRIME Ver.2 のテスト（読み手 3 人の平均が中立でない 2,223 件）で、スコアが 0 でなく判定できた文は 69.9%、その 1,553 件の正解率は辞書 + 規則が 0.759、モデルが 0.740 だった。差 +0.019 の書き手単位の 95% 信頼区間は -0.007〜+0.057 で 0 をまたぎ、テストの書き手は 10 人しかないので、どちらが上とは言えない。判定できない文だけモデルに任せると、全体の正解率はモデルだけの 0.728 から 0.741 になった。
+- 否定の反転で判定が変わった 146 件では正解が 48 件から 65 件に、逆接の規則で判定が変わった 56 件では 4 件から 31 件に増えた。逆接の規則では、判定できた割合も 68.4% から 69.9% に増えた（ポジとネガの語が打ち消し合っていた文に判定が付く）。ただし規則は直前の極性語しか見ない簡単なもので、「期待していたほどではなかった」の「期待」の反転のように偶然合うものも含む。従属節の否定や否定の作用域は扱えない。否定の扱いは意味解析の章の「否定・モダリティ・時制を取り出す」を参照。
+- 皮肉（「素晴らしい対応ですね、2 時間も待たされるなんて。」）はポジの語だけを数えて誤る。「神ってる」「エモい」のような新しい語は辞書になく（辞書は 2008 年版）、「高い」「安い」「短い」のように対象によって極性が変わる語は入っていない。「値段」は名詞としてネガなので、「値段が安い。」もネガになる。モデルも皮肉は誤り、「バッテリーの持ちが短い。」「値段が高い。」もポジとした。新しい語の文にもモデルは判定を返したが、「エモい曲で泣いた。」はネガだった。
+- 形態素解析は unidic-lite (UniDic) だが、辞書の用言編は IPAdic の分割で書かれているので、複数の形態素からなる表現は表層を連結して引いている。分割の違いで引けない表現が残る。
+- 日本語評価極性辞書（用言編 約 5 千、名詞編 約 8 千 5 百の表現）は東北大学 乾・岡崎研究室の作成で、クレジットを明記すれば商用利用も可能（用言編は小林ら 2005、名詞編は東山ら 2008 を引用する）。配布元は研究室の旧サイトで、移転などで読めなくなったら、この辞書を JSON にして同梱したライブラリ oseti（MIT ライセンス。否定の反転はするが逆接の重み付けはなく、形態素解析に MeCab を使う）から取り出せる。WRIME は CC BY-NC-ND 4.0（非商用・改変禁止）で、ここでは評価にだけ使った。モデルは Apache 2.0。
 
 ## 喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME) {emotion_ja}
 

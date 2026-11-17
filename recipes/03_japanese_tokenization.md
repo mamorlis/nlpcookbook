@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読み、モーラ数やアクセントを取り出す。NEologd のような辞書の追加、KyTea のモデルの学習による分野への適応、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -120,6 +120,228 @@ HTML(f"<p style='font-size:1.4em; line-height:2.2'>{ruby(text)}</p>")
 ```
 
 - 送り仮名ごとルビが付く（「無い」全体に「ない」）。漢字部分だけに付けたい場合は、表層と読みの末尾の共通ひらがなを削る。
+
+## 発音・モーラ数・アクセントを取り出し、5-7-5 や読みの違いを調べる (pyopenjtalk) {mora_accent}
+
+読みの先にある、文の発音（「今日は」→「キョーワ」）、モーラ（拍）の数、アクセント句ごとのアクセント核を取り出したい。音声合成システム Open JTalk のテキスト処理部分を Python から使える pyopenjtalk で求め、俳句・川柳の 5-7-5 の判定と、同じ表記で読みの違う語の読み分けに使う。
+
+```python
+# pyopenjtalk は PyPI にソースだけがあり、インストール時にビルドする（Colab で 2〜5 分ほど）
+!pip install -q pyopenjtalk==0.4.1 fugashi==1.5.2 unidic-lite==1.0.8 kytea
+# KyTea の学習済みモデル（この章の「KyTea で単語分割と読みの推定をする」と同じ）
+!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz
+```
+
+```python
+import pandas as pd
+import pyopenjtalk
+
+pd.set_option("display.unicode.east_asian_width", True)
+
+# 初回の呼び出しで Open JTalk の辞書（約 23MB）を GitHub からダウンロードする
+text = "今日はいい天気ですね。"
+print(pyopenjtalk.g2p(text, kana=True))   # 発音形（カタカナ）
+print(pyopenjtalk.g2p(text))              # 音素列（大文字の母音は無声化）
+
+# run_frontend は単語ごとの解析結果を返す。orig は原形、read は読み、pron は発音、mora_size はモーラ数、
+# acc はアクセント核の位置、chain_flag が 1 なら前の単語と同じアクセント句
+cols = ["string", "pos", "orig", "read", "pron", "mora_size", "acc", "chain_flag"]
+pd.DataFrame(pyopenjtalk.run_frontend(text))[cols]
+```
+
+```python
+import re
+
+def split_mora(kana):
+    """カタカナをモーラに分ける。小書きの「ャュョァィゥェォヮ」は前の文字と合わせて 1 モーラ、「ッ」「ン」「ー」は 1 モーラ"""
+    return re.findall(r".[ァィゥェォャュョヮ]?", kana)
+
+def accent_phrases(text):
+    """アクセント句ごとに、単語・発音・モーラ数・アクセント核（下がり目の直前のモーラの位置。0 は下がらない平板型）を返す"""
+    phrases = []
+    for f in pyopenjtalk.run_frontend(text):
+        if f["mora_size"] == 0:                    # 句読点などの記号
+            continue
+        pron = f["pron"].replace("’", "")          # ’ は直前の母音の無声化の印
+        if f["chain_flag"] == 1 and phrases:       # 前の単語と同じアクセント句
+            phrases[-1]["words"].append(f["string"])
+            phrases[-1]["pron"] += pron
+        else:                                      # 句の先頭の単語の acc が句全体のアクセント核
+            phrases.append({"words": [f["string"]], "pron": pron, "acc": f["acc"]})
+    for p in phrases:
+        mora, acc = split_mora(p["pron"]), p["acc"]
+        p["mora"] = len(mora)
+        p["marked"] = "".join(m + ("＼" if i == acc else "") for i, m in enumerate(mora, 1))
+        p["HL"] = pitch(len(mora), acc)
+    return phrases
+
+def pitch(n, acc):
+    """東京方言の高低: 1 モーラ目と 2 モーラ目は高さが違い、核の後ろで下がる"""
+    if acc == 1:
+        return "H" + "L" * (n - 1)
+    high = (acc or n) - 1                          # 平板型 (0) は最後まで高い
+    return "L" + "H" * high + "L" * (n - 1 - high)
+
+for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
+    print(s)
+    for p in accent_phrases(s):
+        print(f"  {'/'.join(p['words']):16} {p['marked']:14} {p['mora']} モーラ  核 {p['acc']}  {p['HL']}")
+```
+
+```python
+# 確認: 音声合成用のフルコンテキストラベルの /F:f1_f2 はアクセント句のモーラ数と核の位置。
+# ラベルでは平板型 (0) の核を句のモーラ数で表す（Open JTalk の jpcommon_label.c）ので、そろえて比べる
+def phrases_from_labels(text):
+    out, prev = [], None
+    for lab in pyopenjtalk.extract_fullcontext(text):
+        phone = re.search(r"-(.+?)\+", lab).group(1)
+        if phone in ("sil", "pau"):                # 無音・ポーズで句が切れる
+            prev = None
+            continue
+        f = re.search(r"/F:([^/]+)", lab).group(1)
+        if f != prev:
+            out.append(tuple(int(x) for x in re.match(r"(\d+)_(\d+)", f).groups()))
+            prev = f
+    return out
+
+for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
+    mine = [(p["mora"], p["acc"] or p["mora"]) for p in accent_phrases(s)]
+    print(s, mine, mine == phrases_from_labels(s))
+```
+
+```python
+# 読みが同じでアクセントで区別する語。UniDic (unidic-lite) の aType は単語単位のアクセント型
+from fugashi import Tagger
+
+tagger = Tagger()
+rows = []
+for s in ["橋を渡る。", "箸を使う。", "端に寄る。", "雨が降る。", "飴をなめる。"]:
+    word = next(iter(tagger(s)))
+    p = accent_phrases(s)[0]
+    rows.append({"文": s, "語": word.surface, "UniDic aType": word.feature.aType,
+                 "pyopenjtalk の句": p["marked"], "句の核": p["acc"], "高低": p["HL"]})
+print("UniDic aType:", [(w.surface, w.feature.aType) for w in tagger("東京特許許可局")])
+pd.DataFrame(rows)
+```
+
+```python
+# 応用 1: 俳句・川柳の 5-7-5 を判定する。俳句の「音」はモーラで数える（拗音は 1、促音・撥音・長音も 1）
+def nodes(text):
+    return [(f["string"], f["pron"].replace("’", ""), f["mora_size"])
+            for f in pyopenjtalk.run_frontend(text) if f["mora_size"] > 0]
+
+def split_575(text, pattern=(5, 7, 5)):
+    """単語の切れ目で 5・7・5 モーラに分けられれば 3 つの句を返す。分けられなければ理由を返す"""
+    ns = nodes(text)
+    total = sum(m for _, _, m in ns)
+    if total != sum(pattern):
+        return f"{total} モーラ"
+    parts, cur, cum, goal = [], [], 0, 0
+    for surface, pron, m in ns:
+        cur.append((surface, pron))
+        cum += m
+        if cum > goal + pattern[len(parts)]:
+            return f"単語「{surface}」が句の切れ目をまたぐ"
+        if cum == goal + pattern[len(parts)]:
+            parts.append(("".join(s for s, _ in cur), "".join(p for _, p in cur)))
+            cur, goal = [], cum
+    return parts
+
+haiku = [  # 作者の没後 100 年以上たったパブリックドメインの句
+    ("古池や蛙飛び込む水の音", "松尾芭蕉"),
+    ("閑さや岩にしみ入る蝉の声", "松尾芭蕉"),
+    ("菜の花や月は東に日は西に", "与謝蕪村"),
+    ("柿くへば鐘が鳴るなり法隆寺", "正岡子規"),
+    ("やせ蛙まけるな一茶是に有", "小林一茶"),
+] + [(s, "自作") for s in [
+    "今日もまた電車が遅れ汗をかく",
+    "学校のチャイムが鳴ってほっとする",
+    "新しいスマートフォンを買いに行く",
+    "朝からアルバイトをして眠くなる",
+    "自然言語処理の小ネタを集めたい",
+]]
+rows = []
+for text, author in haiku:
+    pron = "".join(p for _, p, _ in nodes(text))
+    r = split_575(text)
+    rows.append({"句": text, "作": author, "発音": pron, "文字数": len(pron), "モーラ数": len(split_mora(pron)),
+                 "判定": " / ".join(p for p, _ in r) if isinstance(r, list) else "× " + r})
+pd.DataFrame(rows)
+```
+
+```python
+# 句の切れ目が分かっているとき（空白区切り）は句ごとに数える。字余りも分かる
+def count_parts(text):
+    return [(part, sum(m for _, _, m in nodes(part))) for part in text.split()]
+
+print(count_parts("雀の子 そこのけそこのけ 御馬が通る"))   # 小林一茶（パブリックドメイン）
+print(count_parts("ちょっと待って ショートケーキが 売り切れだ"))  # 自作
+```
+
+```python
+# 応用 2: 同じ表記で読みの違う語を、MeCab + UniDic、KyTea、pyopenjtalk で読み分けられるか比べる（例文は自作）
+import Mykytea
+
+kytea = Mykytea.Mykytea("-model model.bin")
+
+def hira2kata(s):
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
+
+def span_reading(tokens, sent, target):
+    """(表層, 読み) の列から、target の文字範囲に重なる単語の読みをつなげる"""
+    # 表層をつなぐと元の文になると仮定している。pyopenjtalk は表層を書き換えることがあり
+    # （「く」→「九」など）、長さが変わると文字位置がずれるので、写して使うときは注意する
+    i = sent.index(target)
+    j, pos, out = i + len(target), 0, []
+    for surface, yomi in tokens:
+        if pos < j and pos + len(surface) > i:
+            out.append(yomi)
+        pos += len(surface)
+    return "".join(out)
+
+readers = {
+    "MeCab+UniDic": lambda s: [(w.surface, w.feature.kana or w.surface) for w in tagger(s)],
+    "KyTea": lambda s: [(w.surface, hira2kata(w.tag[1][0][0])) for w in kytea.getTags(s)],
+    "pyopenjtalk": lambda s: [(f["string"], f["read"]) for f in pyopenjtalk.run_frontend(s)],
+}
+cases = [  # (文, 対象の語, 正しい読み)
+    ("今日は朝から雨が降っている。", "今日", "キョウ"),
+    ("今日では誰もがスマートフォンを持っている。", "今日", "コンニチ"),
+    ("魚を市場で買って帰った。", "市場", "イチバ"),
+    ("株式市場が大きく混乱した。", "市場", "シジョウ"),
+    ("彼は料理が上手だ。", "上手", "ジョウズ"),
+    ("相手の方が一枚上手だった。", "上手", "ウワテ"),
+    ("役者が舞台の上手から登場する。", "上手", "カミテ"),
+    ("生物の授業で細胞を学んだ。", "生物", "セイブツ"),
+    ("生物は早めに食べてください。", "生物", "ナマモノ"),
+    ("一日に三回薬を飲む。", "一日", "イチニチ"),
+    ("四月一日は入学式だ。", "一日", "ツイタチ"),
+    ("人気のある店に並ぶ。", "人気", "ニンキ"),
+    ("人気のない夜道を歩く。", "人気", "ヒトケ"),
+    ("この辛いカレーは汗が出る。", "辛い", "カライ"),
+    ("友達との別れが辛い。", "辛い", "ツライ"),
+    ("この店は大人気だ。", "大人気", "ダイニンキ"),
+    ("大人気ない態度をとった。", "大人気", "オトナゲ"),
+]
+rows = []
+for sent, target, gold in cases:
+    row = {"文": sent, "語": target, "正解": gold}
+    for name, f in readers.items():
+        y = span_reading(f(sent), sent, target)
+        row[name] = ("○ " if y.startswith(gold) else "× ") + y
+    rows.append(row)
+df = pd.DataFrame(rows)
+print({name: f"{df[name].str.startswith('○').sum()}/{len(df)}" for name in readers})
+df
+```
+
+- pyopenjtalk は山本龍一氏による Open JTalk（名古屋工業大学の HTS Working Group が開発した日本語音声合成システム）の Python ラッパーで、MIT ライセンス。Open JTalk 本体は修正 BSD ライセンス。初回に自動でダウンロードされる辞書 (open_jtalk_dic_utf_8-1.11) は mecab-naist-jdic を元にしたもので、同梱の COPYING によれば奈良先端科学技術大学院大学と UniDic コンソーシアムの修正 BSD ライセンス。ここでは `run_frontend`（テキスト処理）と `extract_fullcontext`（ラベル）だけを使い、音声合成はしない。品詞は IPA 辞書の体系で、「いい天気」の「いい」が動詞「いう」と解析されるような誤りもある。
+- この章の「漢字の読みを取得してふりがな（ルビ）を付ける」と「KyTea で単語分割と読みの推定をする」は単語の読みまでを出す。pyopenjtalk はその先の、助詞の「は」→「ワ」や長音（「キョウ」→「キョー」）を反映した発音、無声化、アクセント句への区切りとアクセント核を出す。アクセント核は単語ごとの辞書のアクセント型に結合の規則を当てて句ごとに決まる。UniDic の `aType` は単語単位で「東京」は 0 型だが、pyopenjtalk では「東京特許許可局」が 1 つの句（11 モーラ、核 9）になった。
+- 「橋」「箸」「端」は UniDic の aType でも pyopenjtalk でも 2・1・0 型で、助詞まで含めた句で見ると「ハシ＼ヲ」「ハ＼シヲ」「ハシニ」と違いが出る（尾高型の「橋」と平板型の「端」は、単語だけでは高低が同じになる）。アクセントは辞書と規則による東京方言の推定である。
+- 5-7-5 の判定では、発音のカタカナの文字数は小書きの「ョ」「ャ」などの分だけモーラ数より多い（「今日もまた電車が遅れ汗をかく」は 19 文字で 17 モーラ）。判定は読みの推定に左右され、芭蕉の「閑さや」は「ヒマサヤ」、一茶の「是に有」は「ゼニユー」と読まれて、どちらも 16 モーラになった（正しくは「シズカサヤ」「コレニアリ」）。合計が 17 モーラでも、単語が句の切れ目をまたぐ句（句またがり）は × になる（「朝からアルバイトをして眠くなる」）。子規の「柿くへば」は旧仮名遣いの「くへ」が「九」「へ」と解析されたが、発音は「カキクエバ」で 17 モーラになった。古典や旧仮名遣いの句は、判定の前に読みを人が確かめる（古文の解析は、この章の「古文を形態素解析する（中古和文 UniDic）」を参照）。
+- 読み分けは自作の 17 例で、正解は MeCab + UniDic が 10、KyTea と pyopenjtalk が 11 だった。例が少ないので、優劣ではなく誤り方の違いとして見る。「市場（イチバ）」「生物（ナマモノ）」「人気（ヒトケ）」は 3 つとも誤り、「舞台の上手（カミテ）」は UniDic だけ、「一枚上手（ウワテ）」「大人気ない」は pyopenjtalk だけ、「今日では（コンニチ）」「辛いカレー（カライ）」は KyTea だけが当てた。読みの候補とスコアを見たいときは、KyTea の `getAllTags` を使う（「KyTea で単語分割と読みの推定をする」を参照）。
+- 決まった語の読みやアクセントを直したいときは、pyopenjtalk のユーザー辞書（`mecab_dict_index` で CSV から作り、`update_global_jtalk_with_user_dict` で読み込む）を使う。文脈で読みが変わる語は、辞書の登録では直らない。
+- pyopenjtalk は PyPI に wheel がなく、インストール時に C++ のコードをビルドする（検証では 2 コアでインストールのセル全体が約 3 分）。派生版の pyopenjtalk-plus は、ビルド済みの wheel と独自に修正した辞書を同梱し、同じ `import pyopenjtalk` で使えると README にある（MIT ライセンス）。両方を同じ環境に入れると衝突するので、どちらか一方を入れる。
 
 ## 動詞・形容詞の活用型と活用形を調べる {conjugation}
 
@@ -765,6 +987,231 @@ for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -nota
 - 辞書にない語の推定は誤ることもある（「推し活」は「推（お）/ し活」に分割された）。Python のバインディングからは未知語かどうかは分からない。コマンド版の `kytea -unktag '[UNK]'` で同じ文を試すと、「鬼滅」「ジーピーティー」「し活」「エモ」「ポチポチ」に印が付き、「スマホ」「インスタ」は KyTea の辞書にある語だった。
 - 検証環境で 10,000 文にかかった時間は、品詞・読みありが 0.8〜0.9 秒、分割だけ (`-notags`) が約 0.15 秒、MeCab + UniDic が 0.1 秒ほど。モデルの読み込みに約 2 秒かかるので、`Mykytea` は 1 回だけ作って使い回す。
 - pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea`（`-part` で部分的アノテーション、`-dict` で辞書を与える）が要るなら、構文解析の章の「Ckylark で日本語の句構造解析をする」のようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7（2014 年）、リポジトリの最後の更新は 2020 年。
+
+## KyTea の単語分割モデルを学習して分野に合わせる（辞書・部分的アノテーション） {kytea_train}
+
+医療のような専門分野の文章で、薬剤名や交ぜ書きの用語（「せん妄」「じょく瘡」）の分割を誤る。人手で分割したコーパスから単語分割のモデルを自分で学習し、分野の語の辞書と、誤りやすい箇所だけに境界を付けたデータを加えて直したい。KyTea の学習ツール train-kytea を使う。
+
+```python
+!pip install -q kytea==0.2.0 conllu==6.1.1
+# pip の kytea には学習ツールが入っていないので、KyTea 0.4.7 のリリース（約 39MB。学習済みの日本語モデルも入っている）をビルドする。
+# リリースは configure 済みなので autoreconf も apt-get も要らない。--disable-shared で静的にリンクし、make install せずに使う。
+# Colab（2 コア）では、ダウンロードとビルドで 3 分ほどの見込み
+!wget -q https://www.phontron.com/kytea/download/kytea-0.4.7.tar.gz && tar xzf kytea-0.4.7.tar.gz
+# ビルドのログは make.log に書き、失敗したときだけ末尾を表示する
+!cd kytea-0.4.7 && ./configure -q --disable-shared > /dev/null && (make -j2 > make.log 2>&1 && echo "ビルド完了" || tail -20 make.log)
+!kytea-0.4.7/src/bin/train-kytea --help 2>&1 | grep -E "^  -(tok|part|dict|notags) "
+```
+
+```python
+import subprocess
+import urllib.request
+import Mykytea
+from conllu import parse
+
+TRAIN = "kytea-0.4.7/src/bin/train-kytea"
+
+# UD Japanese-GSD (CC BY-SA 4.0、https://github.com/UniversalDependencies/UD_Japanese-GSD)。人手で短単位に分割されている
+# 数値を再現できるように、リリース r2.19 のタグに固定する（master は UD のリリースごとに変わる）
+base = "https://raw.githubusercontent.com/UniversalDependencies/UD_Japanese-GSD/r2.19/ja_gsd-ud-"
+def load(split):
+    sents = parse(urllib.request.urlopen(base + split + ".conllu").read().decode("utf-8"))
+    return [[t["form"] for t in s if isinstance(t["id"], int)] for s in sents]   # 複数語トークンなどの行を除く
+
+def ok(w):
+    return not set(w) & set("/& \\")   # KyTea の区切り記号（タグの "/"、候補の "&"）や空白を含む語は使わない
+
+train, test = load("train"), load("test")
+train = [s for s in train if all(map(ok, s))]
+print(len(train), "文", sum(map(len, train)), "語（学習）/", len(test), "文（評価）")
+
+# 学習データは 1 行 1 文で、単語を空白で区切る（-tok の形式。品詞や読みは付けない）
+with open("gsd.tok", "w", encoding="utf-8") as f:
+    f.writelines(" ".join(s) + "\n" for s in train)
+
+def train_kytea(model, *args):
+    """train-kytea で単語分割だけのモデルを学習する（-notags: 品詞・読みは学習しない）"""
+    r = subprocess.run([TRAIN, "-tok", "gsd.tok", *args, "-notags", "-model", model], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return Mykytea.Mykytea(f"-model {model} -notags")
+
+base_model = train_kytea("gsd.model")   # データのダウンロードと学習で、Colab で 2 分ほどの見込み
+default = Mykytea.Mykytea("-model kytea-0.4.7/data/model.bin -notags")   # KyTea に同梱のモデル
+```
+
+```python
+def spans(words):
+    out, p = set(), 0
+    for w in words:
+        out.add((p, p + len(w))); p += len(w)
+    return out
+
+def word_f1(gold_sents, pred_sents):
+    """単語単位の F1: 開始位置と終了位置が両方一致した単語だけを正解とする"""
+    tp = n_gold = n_pred = 0
+    for gold, pred in zip(gold_sents, pred_sents):
+        g, p = spans(gold), spans(pred)
+        tp += len(g & p); n_gold += len(g); n_pred += len(p)
+    prec, rec = tp / n_pred, tp / n_gold
+    return round(2 * prec * rec / (prec + rec), 4)
+
+def segment_all(kytea, sents):
+    return [list(kytea.getWS("".join(s))) for s in sents]
+
+print("GSD の評価データの単語 F1")
+print("  同梱のモデル  :", word_f1(test, segment_all(default, test)))
+print("  GSD で学習    :", word_f1(test, segment_all(base_model, test)))
+for s in ["新しい産業構造を作らなければいけない。", "しばらくの完全休養とリハビリが必要とのことでした。"]:
+    print("同梱:", " ".join(default.getWS(s)))
+    print("GSD :", " ".join(base_model.getWS(s)))
+```
+
+```python
+import re
+
+# 分野の語の一覧（ここでは医療の語。実務では用語集や薬剤の一覧から作る）
+terms = """せん妄 じょく瘡 誤えん 膿瘍 てんかん 嚥下 褥瘡 喀痰 耐性 術後
+アセトアミノフェン ロキソプロフェン バラシクロビル レベチラセタム セフトリアキソン クロピドグレル
+ビソプロロール ファモチジン メトホルミン プレドニゾロン サルブタモール レボフロキサシン アモキシシリン""".split()
+
+# 分野の文（分割していない生の文）。部分的アノテーションでは、用語の前後と内部の境界だけを付ける
+domain_raw = """高齢者はせん妄を起こしやすい。
+せん妄の原因として脱水が考えられる。
+じょく瘡の深さを観察する。
+寝たきりの患者はじょく瘡ができやすい。
+誤えんを防ぐために姿勢を工夫する。
+誤えんの有無を確認した。
+てんかんの診断で紹介された。
+肝膿瘍の治療は長期に及ぶ。
+ロキソプロフェンを食後に服用する。
+アセトアミノフェンは解熱にも使われる。
+バラシクロビルの内服を終了した。
+セフトリアキソンの投与を終了した。
+クロピドグレルの内服を再開した。
+ビソプロロールで脈拍が落ち着いた。
+喀痰の量が減った。
+耐性菌の対策を強化する。
+嚥下の訓練を続けている。""".split()
+
+# 評価用の分野の文（上とは別の文。人手で短単位に分割した正解）
+domain_test = [s.split() for s in """夜間 に せん妄 が 見 られ た ため 、 家族 に 付き添い を 依頼 し た 。
+術後 せん妄 の 有無 を 毎日 評価 する 。
+じょく瘡 の 予防 に 体位 変換 を 行う 。
+仙骨 部 の じょく瘡 は 改善 し て いる 。
+誤えん の リスク が 高い ため 、 食事 形態 を 変更 し た 。
+誤えん 性 肺炎 で 入院 し た 。
+てんかん 発作 が 起き た とき の 対応 を 説明 し た 。
+肝 膿瘍 に 対し て 抗菌 薬 を 投与 し た 。
+腹部 エコー で 膿瘍 を 認め た 。
+発熱 に は アセトアミノフェン を 使用 する 。
+腰痛 に 対し て ロキソプロフェン を 処方 し た 。
+ロキソプロフェン で 胃 の 不快 感 が 出 た 。
+バラシクロビル を 腎 機能 に 合わせ て 減量 する 。
+レベチラセタム の 内服 を 継続 する 。
+尿路 感染 症 に セフトリアキソン を 点滴 する 。
+手術 の 前 に クロピドグレル を 中止 し た 。
+脈拍 が 速い ため ビソプロロール を 増量 し た 。
+ファモチジン は 腎 機能 が 低い と 減量 が 必要 だ 。
+血糖 の 管理 に メトホルミン を 用いる 。
+プレドニゾロン の 副 作用 に 注意 する 。
+喀痰 から 耐性 菌 が 検出 さ れ た 。
+嚥下 の 評価 を 行い 、 食事 を 再開 し た 。
+褥瘡 の 状態 を 毎週 記録 する 。
+吸入 に は サルブタモール を 用いる 。
+レボフロキサシン と アモキシシリン の 併用 は 避ける 。""".split("\n")]
+
+def partial_annotation(sent, terms):
+    """文字の間に "|"（境界あり）、"-"（境界なし）、" "（不明）を挟む。用語の出現箇所だけ境界を決める"""
+    b = [" "] * (len(sent) - 1)          # b[i] は sent[i] と sent[i+1] の間
+    for t in terms:
+        for m in re.finditer(re.escape(t), sent):
+            i, j = m.start(), m.end()
+            if i > 0: b[i - 1] = "|"
+            if j < len(sent): b[j - 1] = "|"
+            for k in range(i, j - 1): b[k] = "-"
+    return "".join(c + x for c, x in zip(sent, b)) + sent[-1]
+
+with open("domain.part", "w", encoding="utf-8") as f:
+    f.writelines(partial_annotation(s, terms) + "\n" for s in domain_raw)
+print(open("domain.part", encoding="utf-8").read()[:120])
+print("評価:", len(domain_test), "文", sum(map(len, domain_test)), "語（うち分野の語",
+      sum(w in terms for s in domain_test for w in s), "回）")
+```
+
+```python
+from collections import Counter
+
+# 辞書は 1 行 1 語（"語/読み" の形で読みも書ける）。3 通り作る
+freq = Counter(w for s in train for w in s)
+dicts = {
+    "terms.dict": terms,                                           # 分野の語だけ
+    "all+terms.dict": [w for w in freq if ok(w)] + terms,          # GSD の学習データの全語彙 + 分野の語
+    "freq2+terms.dict": [w for w, n in freq.items() if n >= 2 and ok(w)] + terms,   # 2 回以上出た語 + 分野の語
+}
+for name, words in dicts.items():
+    with open(name, "w", encoding="utf-8") as f:
+        f.writelines(w + "\n" for w in dict.fromkeys(words))
+    print(name, len(set(words)), "語")
+
+def term_acc(gold_sents, pred_sents):
+    """正解の中の分野の語のうち、ちょうど 1 語として切り出せた割合"""
+    hit = n = 0
+    for gold, pred in zip(gold_sents, pred_sents):
+        p, pos = spans(pred), 0
+        for w in gold:
+            if w in terms:
+                n += 1; hit += (pos, pos + len(w)) in p
+            pos += len(w)
+    return f"{hit}/{n}"
+```
+
+```python
+import pandas as pd
+
+# 学習の設定ごとにモデルを作って比べる（Colab で全部で 4 分ほどの見込み）
+settings = {
+    "GSD のみ": [],
+    "+ 辞書（分野の語だけ）": ["-dict", "terms.dict"],
+    "+ 辞書（全語彙 + 分野の語）": ["-dict", "all+terms.dict"],
+    "+ 辞書（2 回以上の語 + 分野の語）": ["-dict", "freq2+terms.dict"],
+    "+ 部分的アノテーション": ["-part", "domain.part"],
+    "+ 辞書（2 回以上の語 + 分野の語）+ 部分的アノテーション": ["-dict", "freq2+terms.dict", "-part", "domain.part"],
+}
+rows, models = [], {}
+for i, (name, args) in enumerate(settings.items()):
+    if args:
+        k = train_kytea(f"model{i}.bin", *args)
+    else:
+        k = base_model   # 「GSD のみ」は学習済みのモデルを使い回す
+    models[name] = k
+    pred = segment_all(k, domain_test)
+    rows.append({"設定": name, "分野の F1": word_f1(domain_test, pred), "分野の語": term_acc(domain_test, pred),
+                 "誤った文": sum(p != g for p, g in zip(pred, domain_test)),
+                 "GSD の F1": word_f1(test, segment_all(k, test))})
+pd.DataFrame(rows).set_index("設定")
+```
+
+```python
+# 誤りのあった文を、GSD だけのモデルと最後のモデルで見比べる
+before, after = models["GSD のみ"], models[list(settings)[-1]]
+for gold in domain_test:
+    s = "".join(gold)
+    b, a = list(before.getWS(s)), list(after.getWS(s))
+    if b != gold or a != gold:
+        print("GSD のみ:", " ".join(b))
+        print("適応後  :", " ".join(a), "" if a == gold else "  ← まだ誤り（正解: " + " ".join(gold) + "）")
+
+# 学習データの全語彙を辞書にしたモデルの出力
+for s in ["じょく瘡の予防に体位変換を行う。", "腹部エコーで膿瘍を認めた。", "新しい産業構造を作らなければいけない。"]:
+    print("全語彙の辞書:", " ".join(models["+ 辞書（全語彙 + 分野の語）"].getWS(s)))
+```
+
+- 同梱のモデルは GSD の評価データで単語 F1 が 0.8333、GSD で学習したモデルは 0.9715 だった。同梱のモデルは活用語尾を切り離す（「新し い」「作 ら な けれ ば」「で し た」）ので、この差には精度だけでなく単位の基準の違いが大きく効いている。評価データや後段の処理と同じ基準で分割したコーパスで学習する。GSD は BCCWJ の短単位（数詞だけはまとめる）で人手で分割されている。
+- この章の「KyTea で単語分割と読みの推定をする」の注意書きのとおり KyTea は点予測なので、一部の境界だけを決めた部分的アノテーションでも学習できる（付録「仕組みを理解するための実装」の「単語分割を文字単位の系列ラベリングとして解く」の CRF では、すべての文字にラベルの付いた文が要る）。ここでは分野の文 17 文の用語の前後と内部だけに境界を付けて加え、評価の 25 文で分野の語を正しく切り出せた数が 17/28 から 25/28 になり、GSD の F1 はほぼ変わらなかった（0.9715 と 0.9714）。
+- 辞書は、学習データの中で辞書の語と一致した箇所から辞書の素性の重みを学習する（KyTea のソースの `wsDictionaryFeatures` は `-dict` で与えた語だけを使う）。分野の語だけの辞書は GSD の文にほとんど現れないので、結果は辞書なしと同じになった。学習データの全語彙を辞書に入れると、分野の語は 28/28 になったが GSD の F1 が 0.9048 に下がり、辞書にない語を辞書にある短い語に切った（「体 位」「エコ ー」）。学習データでは正解の語が必ず辞書にあるので、辞書を信じすぎるようになったと考えられる。2 回以上出た語に絞ると、分野の語 27/28、GSD の F1 0.9748 になり、分野の語をほぼ切り出しつつ GSD の F1 も辞書なしより少し高かった。学習データとは別に作られた、同じ単位の一般の辞書に分野の語を足す方法も考えられるが、ここでは試していない。
+- 辞書と部分的アノテーションを両方使うと、分野の語は 28/28、誤りのある文は 25 文中 1 文になった。残った誤りの「肺 炎」は、GSD の学習データに一度も出てこず、分野の語の一覧にも入れていない語。評価の文と用語の一覧はこのレシピのために作った小さなもの（25 文、247 語）で、評価に出る用語をすべて辞書に入れているので、結果は楽観的。設定の間の 1〜2 語の差は、このデータ量ではばらつきの範囲と考える。
+- リリースの tar.gz は configure 済みなので、構文解析の章の「Ckylark で日本語の句構造解析をする」（GitHub のソースから autoreconf でビルドする）と違って apt-get が要らない。`--disable-shared` で静的にリンクすれば、`make install` や `ldconfig` をせずに `src/bin/train-kytea` を使える。学習したモデルは pip の `kytea` (0.2.0) でそのまま読み込める。tar.gz の `data/model.bin` は、この章の「KyTea で単語分割と読みの推定をする」でダウンロードするモデルと同じファイル（展開後のハッシュが一致した）。
+- 検証では、何度実行しても表の数値は同じだった（GSD は r2.19。master も同じ内容だった）。KyTea のソースは Apache License 2.0、同梱のモデルの利用条件は「KyTea で単語分割と読みの推定をする」の注意書きを参照。GSD は CC BY-SA 4.0 なので、学習したモデルを配布するときは表示と継承の条件の扱いを確かめる。用語の一覧と医療の文はこのレシピのために作った架空の例。
 
 ## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
 

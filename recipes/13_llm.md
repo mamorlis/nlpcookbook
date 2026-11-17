@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫 (Chain-of-Thought)、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証、LoRA・DPO・GRPO による調整。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方は「LLM の評価と分析」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証、LoRA による指示チューニング、報酬モデルによる応答の選択、DPO・GRPO による調整。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方は「LLM の評価と分析」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする（チャットテンプレート） {llm_chat_local}
 
@@ -356,7 +356,7 @@ print(tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_token
 !nvidia-smi --query-gpu=memory.used,memory.total --format=csv
 ```
 
-- 4bit 量子化による精度の低下は、多くのタスクでわずか。「大きなモデルの 4bit」は「小さなモデルの 16bit」より良いことが多い。
+- 4bit 量子化による精度の低下は、多くのタスクでわずか。「大きなモデルの 4bit」は「小さなモデルの 16bit」より良いことが多い。実際に測った結果は、LLM の評価と分析の章の「量子化で LLM の性能がどれだけ落ちるかを測る（bitsandbytes と GGUF）」を参照。
 - bitsandbytes は NVIDIA GPU 専用。CPU や Mac で動かすなら、GGUF 形式 + llama.cpp (Ollama) を使う。
 - 速度は 16bit より遅くなる。メモリに収まるなら `torch_dtype=torch.float16` で普通に読み込むほうが速い。
 - A100 や L4 など bfloat16 に対応した GPU（Ampere 以降）なら、`bnb_4bit_compute_dtype=torch.bfloat16` のほうが数値的に安定する。
@@ -760,6 +760,227 @@ print(pd.DataFrame({"問題数": pd.Series(top).value_counts().sort_index(),
 - コスト: 出力のトークン数は、直接の 16 トークン（上限）に対して CoT は平均 171.0 トークン、5 回の多数決では 1 問あたり 930 トークンになる。検証に使った GPU（RTX A5000、1 回のバッチは 64 件、多数決では 12 問 × 5 回の 60 件）での 1 問あたりの時間は、直接 0.03 秒以下、CoT 0.22 秒、5 回の多数決 1.27 秒だった（T4 ではもっとかかる）。例ありの CoT は出力が短い（平均 154.6 トークン）のに 0.32 秒かかった。例の分だけ入力が長くなるためと考えられる（時間の内訳は測っていない）。バッチの中で最も長い出力が終わるまで待つので、時間は出力の長さのばらつきにも左右される。CoT の 1〜2% は 400 トークンの上限で打ち切られた。
 - MGSM は 250 問しかなく、ここではさらに先頭の 100 問を使ったので、正解率の差の信頼区間の幅は 10〜21 ポイントあった。GSM8K と MGSM は公開から時間がたっており、sarashina2.2 の事前学習モデルのモデルカードによると、数学の性能を上げるための合成データでも学習している。評価データやその言い換えが学習データに含まれていれば、点数は実力より高く出る（LLM の評価と分析の章の「日本語のベンチマークで複数の LLM を同じ条件で比べる」の注意書きを参照）。データセットのライセンスは、元のリポジトリの mgsm/LICENSE では CC BY 4.0、Hugging Face のデータセットカードのメタデータでは CC BY-SA 4.0 となっている。
 - このモデルの generation_config は、サンプリングの既定値を温度 0.7、top_p 0.9 にし、repetition_penalty 1.05 を貪欲法でも掛ける。設定を変えると点数も変わるので、比べるときはそろえる。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 思考する LLM で、思考のオン・オフと思考の長さの上限を変えて正解率とコストを比べる（Qwen3 の enable_thinking と budget forcing） {thinking_budget gpu}
+
+答える前に長く考える (thinking) LLM で、思考をオンにするかオフにするか、思考を何トークンで打ち切るかによって、算数の文章題の正解率と、生成するトークン数・時間がどう変わるかを確かめ、コストに見合う設定を選びたい。
+
+```python
+!pip install -q matplotlib-fontja==1.1.0
+```
+
+```python
+import re, time, unicodedata
+import numpy as np
+import pandas as pd
+import torch
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
+
+torch.manual_seed(0)
+# MGSM (Shi et al., 2022) の日本語: この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」と同じデータ。
+# 元のリポジトリ（google-research/url-nlp の mgsm/）のライセンスは CC BY 4.0（Hugging Face のデータセットカードのメタデータは CC BY-SA 4.0）
+N = 40                                       # 時間の都合で 250 問のうち先頭の 40 問を使う
+mgsm = load_dataset("juletxara/mgsm", "ja", split="test").select(range(N))
+gold = np.array(mgsm["answer_number"], dtype=float)
+
+# Qwen3-1.7B（Alibaba の Qwen チーム、Apache 2.0）: 1 つのモデルで思考モードと非思考モードを切り替えられる
+name = "Qwen/Qwen3-1.7B"
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+THINK_END, IM_END, EOT = tokenizer.convert_tokens_to_ids(["</think>", "<|im_end|>", "<|endoftext|>"])
+
+# モデルカードが数学の問題に勧める指示（最後の答えを \boxed{} に書かせる）を日本語にしたもの
+PROMPT = "次の問題を解いてください。ステップごとに考え、最後の答えの数値を \\boxed{{}} の中に書いてください。\n\n問題: {}"
+def prompt_ids(question, thinking):
+    """enable_thinking=False にすると、チャットテンプレートが空の <think></think> を先に入れて思考を飛ばさせる"""
+    text = tokenizer.apply_chat_template([{"role": "user", "content": PROMPT.format(question)}], add_generation_prompt=True,
+                                         tokenize=False, enable_thinking=thinking)
+    return tokenizer(text, add_special_tokens=False)["input_ids"]
+print(tokenizer.decode(prompt_ids(mgsm[0]["question"], thinking=False)))
+
+class StepTimer(StoppingCriteria):
+    """生成の 1 ステップごとに経過時間を記録する（止める判定はしない）"""
+    def __init__(self):
+        self.t0, self.times = time.time(), []
+    def __call__(self, input_ids, scores, **kwargs):
+        self.times.append(time.time() - self.t0)
+        return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+
+@torch.no_grad()
+def generate(inputs, max_new_tokens, stop_ids, bs=40, **sampling):
+    """トークン列のリストをバッチで続けて生成し、生成したトークン列のリストと、バッチごとのステップ時刻のリストを返す。
+    生成したトークン列は、stop_ids のどれかが出たらそこまで（そのトークンを含む）で切る"""
+    outs, timers = [], []
+    for i in range(0, len(inputs), bs):
+        enc = tokenizer.pad({"input_ids": inputs[i:i + bs]}, return_tensors="pt").to(model.device)
+        timer = StepTimer()
+        out = model.generate(**enc, max_new_tokens=max_new_tokens, eos_token_id=stop_ids, pad_token_id=tokenizer.pad_token_id,
+                             stopping_criteria=StoppingCriteriaList([timer]), **sampling)[:, enc["input_ids"].shape[1]:]
+        for row in out.tolist():
+            ends = [j for j, t in enumerate(row) if t in stop_ids]
+            outs.append(row[:ends[0] + 1] if ends else row)
+        timers.append(np.array(timer.times))
+    return outs, timers
+
+def extract(text):
+    """出力から答えの数値を取り出す: \\boxed{} の中 → 「答え」の後ろ → 最後に出てきた数値 の順に探す"""
+    text = unicodedata.normalize("NFKC", text).replace(",", "")
+    text = re.sub(r"(\d+(?:\.\d+)?)万(\d*)", lambda m: str(round(float(m.group(1)) * 10000) + int(m.group(2) or 0)), text)   # 「3万5000」→ 35000
+    for pattern in [r"\\boxed\{[^\d\-]*(-?\d+(?:\.\d+)?)", r"答え[はが]?\s*[:：]?[^\d\-\n]*(-?\d+(?:\.\d+)?)"]:
+        found = re.findall(pattern, text)
+        if found:
+            return float(found[-1])
+    found = re.findall(r"-?\d+(?:\.\d+)?", text)
+    return float(found[-1]) if found else np.nan
+```
+
+```python
+# 1. 思考オフ: 答えの文章（途中の計算を含む）をそのまま生成させる。サンプリングの設定はモデルカードが非思考モードに勧める値
+#    Colab の T4 で 1〜2 分程度（検証の GPU での時間の約 2.5 倍として見積もった目安。T4 では測っていない）
+ANSWER_MAX = 768                 # 答えの文章の上限（思考オフと、思考のあとの答えで共通）
+NOTHINK_SAMPLING = dict(do_sample=True, temperature=0.7, top_p=0.8, top_k=20)
+off_tokens, off_timers = generate([prompt_ids(q, False) for q in mgsm["question"]], ANSWER_MAX, [IM_END, EOT], **NOTHINK_SAMPLING)
+off_text = [tokenizer.decode(t, skip_special_tokens=True) for t in off_tokens]
+
+# 2. 思考オン: </think> が出るまで、最大 T_MAX トークンまで考えさせる。設定はモデルカードが思考モードに勧める値（generation_config の既定値と同じ）
+#    Colab の T4 で 2〜3 分程度（同じく見積もり）
+T_MAX = 1024
+THINK_SAMPLING = dict(do_sample=True, temperature=0.6, top_p=0.95, top_k=20)
+think_prompts = [prompt_ids(q, True) for q in mgsm["question"]]
+thoughts, think_timers = generate(think_prompts, T_MAX, [THINK_END, IM_END, EOT], **THINK_SAMPLING)
+think_len = np.array([len(t) for t in thoughts])
+finished = np.array([t[-1] == THINK_END for t in thoughts])
+print(f"思考を自分で終えた問題: {finished.sum()} / {N}、思考の長さ（トークン）の分位点 10/50/90%:",
+      np.percentile(think_len[finished], [10, 50, 90]).round().tolist())
+# 問題は日本語だが、思考は何語で書かれるか: 思考の中の文字（かな・漢字・英字など）のうち ASCII の英字の割合
+latin = [sum(c.isascii() and c.isalpha() for c in t) / max(1, sum(c.isalpha() for c in t)) for t in tokenizer.batch_decode(thoughts)]
+print("思考の文字に占める英字の割合: 中央値", round(float(np.median(latin)), 3), "最小", round(min(latin), 3))
+print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 3. budget forcing: 思考を B トークンで打ち切り、「時間がないので今までの思考で答える」という文と </think> を足して答えを書かせる。
+#    打ち切りの文は Qwen3 の技術報告にあるもの。サンプリングで作った思考を先頭から B トークンで切るのは、
+#    初めから B トークンの上限を付けて生成するのと同じなので、思考は 1 回だけ生成し、上限ごとに答えの部分だけを生成する
+#    4 回の答えの生成で、Colab の T4 で 8〜10 分程度（同じく見積もり）
+STOP_THINKING = tokenizer("\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n",
+                          add_special_tokens=False)["input_ids"]
+NEWLINES = tokenizer("\n\n", add_special_tokens=False)["input_ids"]
+BUDGETS = [128, 256, 512, 1024]
+
+def batch_seconds(timers, steps):
+    """各バッチが steps ステップ目（それより前に全部終わったならその時点）までにかかった秒数の合計"""
+    return sum(t[min(steps, len(t)) - 1] for t in timers)
+
+def cut_thought(t, B):
+    """思考を B トークンで切る。B 以内に自分で終えたものはそのまま。</think> を出さずに <|im_end|> などで止まった思考は、その記号を落とす"""
+    if len(t) <= B and t[-1] == THINK_END:
+        return t
+    t = t[:B]
+    return t[:-1] if t and t[-1] in (IM_END, EOT) else t
+
+results, answers_text, preds = {}, {}, {}
+off_pred = np.array([extract(t) for t in off_text])
+results["思考オフ"] = {"正解率": np.mean(off_pred == gold), "思考トークン（平均）": 0, "回答トークン（平均）": np.mean([len(t) for t in off_tokens]),
+                    "思考を打ち切った割合": 0.0, "回答が上限で切れた割合": np.mean([t[-1] not in (IM_END, EOT) for t in off_tokens]),
+                    "1 問あたりの秒数": batch_seconds(off_timers, 10**9) / N}
+for B in BUDGETS:
+    cut = [cut_thought(t, B) for t in thoughts]
+    forced = np.array([not (c and c[-1] == THINK_END) for c in cut])
+    inputs = [p + c + (STOP_THINKING if f else NEWLINES) for p, c, f in zip(think_prompts, cut, forced)]
+    ans_tokens, ans_timers = generate(inputs, ANSWER_MAX, [IM_END, EOT], **THINK_SAMPLING)
+    answers_text[B] = [tokenizer.decode(t, skip_special_tokens=True) for t in ans_tokens]
+    pred = np.array([extract(t) for t in answers_text[B]])
+    label = f"思考オン（上限 {B}）"
+    preds[label] = pred
+    results[label] = {"正解率": np.mean(pred == gold), "思考トークン（平均）": np.mean([len(c) for c in cut]),
+                      "回答トークン（平均）": np.mean([len(t) for t in ans_tokens]), "思考を打ち切った割合": forced.mean(),
+                      "回答が上限で切れた割合": np.mean([t[-1] not in (IM_END, EOT) for t in ans_tokens]),
+                      "1 問あたりの秒数": (batch_seconds(think_timers, B) + batch_seconds(ans_timers, 10**9)) / N}
+    results[label]["correct"] = pred == gold
+results["思考オフ"]["correct"] = off_pred == gold
+preds = {"思考オフ": off_pred, **preds}
+
+table = pd.DataFrame({k: {m: v for m, v in r.items() if m != "correct"} for k, r in results.items()}).T
+table["合計トークン（平均）"] = table["思考トークン（平均）"] + table["回答トークン（平均）"]
+table["正解 1 問あたりのトークン"] = table["合計トークン（平均）"] / table["正解率"]
+pd.set_option("display.width", 200)
+print(table.round(3).to_string())
+print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 正解率とコスト（トークン数・時間）の関係を図にする。縦の線は正解率の 95% 信頼区間（ブートストラップ）
+import matplotlib.pyplot as plt
+import matplotlib_fontja  # import するだけで日本語のフォントになる
+
+rng = np.random.default_rng(0)
+idx = rng.integers(0, N, (2000, N))
+acc = table["正解率"].to_numpy()
+ci = np.array([np.percentile(r["correct"][idx].mean(axis=1), [2.5, 97.5]) for r in results.values()])
+err = np.abs(ci - acc[:, None]).T
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+for ax, col in zip(axes, ["合計トークン（平均）", "1 問あたりの秒数"]):
+    x = table[col].to_numpy()
+    ax.errorbar(x[1:], acc[1:], yerr=err[:, 1:], fmt="o-", capsize=3, label="思考オン（思考の上限を変える）")
+    ax.errorbar(x[:1], acc[:1], yerr=err[:, :1], fmt="s", color="tab:red", capsize=3, markersize=8, label="思考オフ")
+    for i, label in enumerate(table.index):
+        ax.annotate(label.replace("思考オン（", "").rstrip("）"), (x[i], acc[i]), textcoords="offset points",
+                    xytext=(6, 8 if i % 2 else -14), fontsize=9)
+    ax.set_xlabel(col); ax.set_ylabel("正解率"); ax.grid(alpha=0.3)
+axes[0].legend(loc="lower right")
+plt.suptitle(f"Qwen3-1.7B、MGSM 日本語 {N} 問")
+plt.tight_layout(); plt.show()
+```
+
+```python
+# 差は偶然の範囲か: 同じ問題で比べる対応のあるブートストラップで、正解率の差の 95% 信頼区間を求める
+rng = np.random.default_rng(0)
+def diff_ci(a, b, n_boot=2000):
+    x, y = results[a]["correct"].astype(float), results[b]["correct"].astype(float)
+    idx = rng.integers(0, N, (n_boot, N))
+    d = x[idx].mean(axis=1) - y[idx].mean(axis=1)
+    print(f"{a} − {b}: {(x.mean() - y.mean()) * 100:+5.1f} ポイント [{np.percentile(d, 2.5) * 100:+5.1f}, {np.percentile(d, 97.5) * 100:+5.1f}]")
+
+labels = list(results)
+diff_ci(labels[1], "思考オフ")
+diff_ci(labels[-1], "思考オフ")
+for a, b in zip(labels[2:], labels[1:-1]):
+    diff_ci(a, b)
+```
+
+```python
+# 思考の中身の例: 上限 T_MAX で正解した問題のうち思考が最も短かったもの（自分で終えた）と、T_MAX トークンでも終わらなかった問題
+def show(i, head_budget=None):
+    t = tokenizer.decode(thoughts[i])
+    status = "自分で終えた" if finished[i] else f"{T_MAX} トークンで打ち切った"
+    print(f"=== 問題 {i}（正解 {gold[i]:g}）: {mgsm[i]['question'][:70]}…")
+    print(f"--- 思考（{len(thoughts[i])} トークン、{status}）の先頭:\n{t[:500]}\n  …\n--- 思考の末尾:\n{t[-400:]}")
+    print("--- 思考の上限ごとに取り出した答え:", {B: extract(answers_text[B][i]) for B in BUDGETS})
+    if head_budget:
+        print(f"--- 上限 {head_budget} のとき（思考を打ち切った）の答えの先頭:\n{answers_text[head_budget][i][:300]}\n  …")
+    print(f"--- 上限 {T_MAX} のときの答えの末尾:\n{answers_text[T_MAX][i][-200:]}\n")
+
+ok = results[f"思考オン（上限 {T_MAX}）"]["correct"]
+show(int(np.argmin(np.where(finished & ok, think_len, 10**9))))
+show(int(np.flatnonzero(~finished)[0]), head_budget=BUDGETS[0])
+
+# MGSM の日本語訳には、英語の原文と答えが合わない問題がある。問題 18 は原文が "How many dozens of eggs will she eat in 4 weeks?"（答え 7）だが、
+# 訳では「卵を何個食べることになりますか」と「ダース」が落ちている
+print(f"問題 18（正解 {gold[18]:g}）: {mgsm[18]['question']}")
+print("取り出した答え:", {k: float(v[18]) for k, v in preds.items()})
+```
+
+- Qwen3 は 1 つのモデルで思考モードと非思考モードを切り替えられる（モデルカード）。`apply_chat_template` に `enable_thinking=False` を渡すと、最初の出力にあるとおり、テンプレートが空の `<think>\n\n</think>` をアシスタントの発話の先頭に入れ、思考を飛ばして答えから書かせる。思考モードでは `</think>`（トークン ID は `THINK_END`）までが思考である。問題文は日本語だが、思考の文字の 98.9%（中央値）は英字で、思考は英語で書かれた（答えは、例のように日本語で書かれた）。思考を 1024 トークン以内に自分で終えたのは 40 問中 24 問で、その長さの中央値は 482 トークンだった。
+- 結果（先頭の 40 問、T4 と同じ float16 で実行）: 思考オフの正解率 47.5% に対し、思考オンは上限 128 トークンで 60.0%、上限 256・512 で 65.0%、上限 1024 で 62.5% だった。思考オフとの差は、上限 128 で +12.5 ポイント [0.0, +25.0]、上限 1024 で +15.0 ポイント [0.0, +30.0] で、信頼区間の下限がちょうど 0 なので、思考の効果ははっきりしたとまでは言えない。上限どうしの差（−2.5〜+5.0 ポイント）はどれも信頼区間が 0 を含み、この件数では区別できない。正解 1 問あたりのトークン数は、思考オフ 686、上限 128 で 677、上限 1024 で 1,569 で、この設定では、思考オフとの差のほとんどは短い思考で得られ、それより長く考えさせても正解率は上がらず、コストだけが増えた（上限どうしの差は区別できない範囲）。
+- budget forcing は Muennighoff et al. (2025) の s1 が提案した方法で、思考の最大の長さは思考の終わりの記号（と「Final Answer:」）を足して打ち切り、最小の長さは終わりの記号を出させずに「Wait」を足して延ばす（ここでは打ち切りだけを試した）。打ち切りの文は Qwen3 の技術報告 (Qwen Team, 2025) にあるもので、報告では「この能力は明示的に学習させたものではなく、思考モードと非思考モードを 1 つのモデルに統合した学習から自然に現れた」としている（報告の文字列は `</think>.` と後ろにピリオドがあるが、ここでは付けていない）。思考を打ち切ったときは、答えの部分で計算を書き直す（2 つ目の例の上限 128 の答えは、途中の計算を書いたうえで 16 個を「4 セット」と数え違えて 32 と答えた）。回答のトークン数は、上限 128 では平均 278 と、思考を自分で終えた問題が多い上限 512（220）より長く、思考を削った分だけコストが減るわけではない。
+- 1 つ目の例（問題 33）は 358 トークンで思考を自分で終え、最後に答えを検算していた。2 つ目の例（問題 5）は 1024 トークンでも思考が終わらず、末尾では 2 個・3 個・4 個の場合の金額を順に確かめ直していた。この問題は上限 256 以上では正解 (64) だったが、上限 128 では 32 と答えた。モデルカードは出力の長さを 32,768 トークンまで許すことを勧めており、ここでの上限 1024 はそれよりずっと短い。思考を最後まで続けさせたときの正解率は測っていない。
+- 時間は、40 問を 1 つのバッチで生成したときの 1 問あたりの平均で、検証に使った GPU（float16、T4 ではもっとかかる）での値である。バッチの中で最も長い出力が終わるまで待つので、トークン数に比例しない（上限 256 → 512 で合計トークンは 36% 増えたが、時間は 3% 増にとどまった）。上限ごとの時間は、1 回の思考の生成で B ステップ目までにかかった時間と、答えの生成の時間の和である（思考を先頭から B トークンで切るのは、初めから上限 B で生成するのと同じなので、思考の生成は 1 回で済ませた）。
+- サンプリングの設定はモデルカードの推奨に従い、思考モードは温度 0.6・top_p 0.95・top_k 20、非思考モードは温度 0.7・top_p 0.8・top_k 20 にした（思考モードで貪欲法を使うと性能が下がり、同じ文を繰り返すことがあるとモデルカードに書かれている）。思考のオンとオフでは設定も違う。乱数の種は 1 つしか試しておらず、種を変えたときのばらつきは確かめていない。答えの上限 (768) で切れた出力は、どの条件でも 40 問中 1 問以下だった。
+- この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」と同じ MGSM の日本語を使っているが、モデル（そちらは sarashina2.2-1b-instruct）、問題数、指示文が違うので、正解率は直接比べられない。Qwen3 の技術報告によると、大きなモデルは長い CoT のデータでの学習と強化学習で思考を身につけ、1.7B などの小さなモデルはそれを蒸留して作られた。self-consistency が複数の答えを並列に作るのに対して、思考は 1 本の推論を長くする。API の LLM でも思考の量を指定できる（LLM の API の章の「Gemini API を呼び出す（無料枠）」の注意書きを参照）。MGSM は公開から時間がたっており、Qwen3 の技術報告でも事前学習モデルの評価に使われている。学習データに含まれていないかは確かめられない。また、日本語訳には英語の原文と答えが合わない問題がある。問題 18 は原文が "How many dozens of eggs will she eat in 4 weeks?"（答え 7）だが、訳では「ダース」が落ちており、日本語の問題文に対して正しい 84 を答えても不正解になる（最後の出力のとおり、どの条件でも 84 と答えた）。そのため、どの条件の正解率も 40 問中 39 問 (97.5%) が上限である。
+- ライセンスは、Qwen3-1.7B が Apache 2.0、MGSM が元のリポジトリの mgsm/LICENSE では CC BY 4.0、Hugging Face のデータセットカードのメタデータでは CC BY-SA 4.0。モデルのダウンロードは約 4 GB。GPU メモリの最大は 13.2 GB（float16、答えの生成のとき）で、T4 の 15 GB に近い。`T_MAX` や問題数を増やすときは `generate` の `bs` を下げる。
 
 ## LLM の出力から JSON を取り出して検証する {llm_json_output}
 
@@ -1292,88 +1513,500 @@ diff_ci("8 本を短くしてから選ぶ", "実際の広告 (title_org)", "ROUG
 - キーワードの語を含む割合は、LLM の見出し (0.80〜0.86) のほうが実際の広告 (0.32) よりずっと高く、実際の広告はキーワードの語をそのまま含まないことが多い。ただし、CAMERA のキーワード (kw) は検索語なので、「は な さくせい めい ほけん」のように分かち書きが崩れたものや、LP や参照と内容が合わないもの（「東京 銀座 バイト」に対して実際の広告が池袋の求人）も混じるので、実際の広告の低さには、キーワードと広告が合わない組の影響も含まれる。件数も 120 件なので、細かな差は読み取らない。
 - データは CAMERA（CyberAgent、CC BY-NC-SA 4.0）。非商用に限られ、改変したものも同じライセンスで公開する必要がある。商用の広告文生成のモデルの学習や評価には使えない。ここでは LP の画像を含まない without-lp-images のテストデータ（872 件）の parquet だけを読み込んでいる。モデルは sarashina2.2（SB Intuitions、MIT ライセンス）で、T4 と同じ float16 で実行したとき GPU メモリを最大 10.8 GB 使った。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
-## LoRA で LLM を少ないメモリでファインチューニングする {lora_finetune gpu norun}
+## ベースモデルを LoRA で指示チューニングする (SFT) {lora_finetune gpu}
 
-LLM を自分のタスク（ここでは文法誤り訂正）に適応させたい。全パラメータを更新するのは重いので、LoRA で一部だけ学習する。
+指示チューニング前のベースモデルは、質問を渡しても答えて止まるとは限らない。公開の日本語の指示データで、LoRA により少ないメモリで指示チューニング (SFT) を行い、学習前・学習後・公式の指示チューニング版の応答を同じ指示で比べたい。
 
 ```python
-!pip install -q peft datasets accelerate "torchao>=0.16"   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
+!pip install -q trl==1.18.0 peft==0.21.2 torchao==0.18.0   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
 ```
 
 ```python
+import json, os, re, time, unicodedata
+import numpy as np
+import pandas as pd
 import sentencepiece as spm
 import torch
-from datasets import Dataset
 from huggingface_hub import hf_hub_download
-from peft import LoraConfig, get_peft_model
 from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+set_seed(0)
+base_name = "sbintuitions/sarashina2.2-0.5b"                   # 指示チューニング前のベースモデル（SB Intuitions、MIT License）
+inst_name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"     # 同じベースモデルから作られた公式の指示チューニング版 (MIT License)
+tokenizer = load_tokenizer(base_name)
+print("ベースモデルのチャットテンプレート:", tokenizer.chat_template)
+
+# ベースモデルにはチャットテンプレートがないので、公式の指示チューニング版と同じ形式のものを自分で設定する。
+# 形式: <|system|>…</s><|user|>…</s><|assistant|>…</s>（<|user|> などは語彙に追加されたトークン）
+tokenizer.chat_template = ("{% for m in messages %}{{ '<|' + m['role'] + '|>' + m['content'] + eos_token }}{% endfor %}"
+                           "{% if add_generation_prompt %}{{ '<|assistant|>' }}{% endif %}")
+sample = [{"role": "system", "content": "S"}, {"role": "user", "content": "こんにちは"}, {"role": "assistant", "content": "はい。"}]
+official = AutoTokenizer.from_pretrained(inst_name)   # 公式のテンプレートと同じ文字列になるかだけを確かめる
+assert tokenizer.apply_chat_template(sample, tokenize=False) == official.apply_chat_template(sample, tokenize=False)
+print(tokenizer.apply_chat_template(sample[1:2], tokenize=False, add_generation_prompt=True))
+
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+model = AutoModelForCausalLM.from_pretrained(base_name, dtype=DTYPE, device_map="auto")
+print(f"パラメータ数: {model.num_parameters() / 1e6:.0f}M（埋め込みと出力層を含む）")
+```
+
+```python
+from datasets import Dataset, load_dataset
+
+# 指示データ: llm-jp/databricks-dolly-15k-ja (CC BY-SA 3.0)。Databricks の社員が書いた databricks-dolly-15k
+# （指示と応答の組、CC BY-SA 3.0）を、LLM-jp が DeepL で日本語に訳したもの。context は Wikipedia から引用した参考文
+raw = load_dataset("llm-jp/databricks-dolly-15k-ja", split="train")
+print(len(raw), "件", raw.to_pandas()["category"].value_counts().to_dict())
+
+def to_example(r):
+    user = r["instruction"] if not r["context"] else f"{r['instruction']}\n\n{r['context']}"
+    # trl の「会話形式の prompt-completion」: prompt と completion にメッセージのリストを入れる
+    return {"prompt": [{"role": "user", "content": user}], "completion": [{"role": "assistant", "content": r["response"]}]}
+
+# 応答が空でなく、全体が短めのもの（max_length の 512 トークンに収まる長さ）に絞る
+rows = [r for r in raw if r["response"].strip() and len(r["instruction"]) + len(r["context"]) + len(r["response"]) <= 600]
+rng = np.random.default_rng(0)
+rows = [rows[i] for i in rng.permutation(len(rows))]
+train_ds = Dataset.from_list([to_example(r) for r in rows[:8000]])
+eval_ds = Dataset.from_list([to_example(r) for r in rows[8000:8200]])   # 学習に使わない 200 件（損失の比較用）
+heldout = rows[8200:8240]                                               # 学習に使わない 40 件（応答の比較用）
+print(len(rows), "件のうち 学習", len(train_ds), "件")
+print(train_ds[0])
+```
+
+```python
+# 自動評価の指示: 決まった形を守ったかを規則で判定できる指示を 6 種類 × 10 問用意する（IFEval のような考え方）
+def n_bullets(t):
+    return sum(bool(re.match(r"\s*([-・*•]|\d+[.)．、])", l)) for l in t.splitlines()) == 3
+def strip_fence(t):
+    return re.sub(r"^```(json)?\s*|\s*```$", "", t.strip())
+def is_json(t, keys):
+    try:
+        d = json.loads(strip_fence(t))
+        return isinstance(d, dict) and set(d) == set(keys)
+    except ValueError:
+        return False
+
+CHECKS = {
+    "箇条書き 3 つ": ("{}を 3 つ、箇条書きで挙げてください。説明は不要です。", n_bullets,
+                   ["夏に食べたい果物", "朝の時間を有効に使う方法", "図書館でできること", "雨の日に家の中でできる遊び", "自転車に乗るときの注意点",
+                    "旅行の持ち物", "部屋を片付けるこつ", "野菜を使った料理", "眠れないときに試すこと", "冬に楽しめるスポーツ"]),
+    "30 文字以内": ("{}を 30 文字以内で説明してください。", lambda t: 0 < len(t) <= 30,
+                 ["虹ができる仕組み", "冷蔵庫の役割", "俳句とは何か", "光合成", "地震が起きたときに最初にすること",
+                  "月の満ち欠け", "辞書の使い道", "電子レンジの仕組み", "消しゴムで字が消える理由", "植物に水が必要な理由"]),
+    "英語で": ("次の質問に英語で答えてください。{}", lambda t: len(re.findall(r"[A-Za-z]", t)) >= 3 and not re.search(r"[ぁ-んァ-ン一-龥]", t),
+              ["日本でいちばん高い山は何ですか。", "1 年は何日ですか。", "好きな季節とその理由を教えてください。", "お茶とコーヒーの違いは何ですか。", "猫はどんな動物ですか。",
+               "朝ごはんに何を食べるとよいですか。", "雨はなぜ降るのですか。", "図書館では何ができますか。", "健康のためにできることを教えてください。", "富士山はどこにありますか。"]),
+    "はい/いいえ": ("次の質問に「はい」か「いいえ」の一言だけで答えてください。{}", lambda t: re.sub(r"[。.!！\s]", "", t) in ("はい", "いいえ"),
+                 ["水は 100 度で沸騰しますか。", "太陽は西から昇りますか。", "1 週間は 7 日ですか。", "ペンギンは空を飛べますか。", "東京は日本の首都ですか。",
+                  "氷は水に浮きますか。", "クジラは魚ですか。", "1 年は 12 か月ですか。", "月は自分で光っていますか。", "人間の心臓は 1 つですか。"]),
+    "数字だけ": ("次の問いの答えを数字だけで答えてください。{}", lambda t: re.fullmatch(r"-?\d+(\.\d+)?", unicodedata.normalize("NFKC", t).strip(" 。.")) is not None,
+               ["12 + 30 は？", "1 ダースは何個？", "1 時間は何分？", "7 × 8 は？", "三角形の内角の和は何度？",
+                "1 キロメートルは何メートル？", "100 − 37 は？", "1 日は何時間？", "正方形の辺の数は？", "15 ÷ 3 は？"]),
+    "JSON": ("次の文から情報を取り出し、キーが name と age の JSON だけを出力してください。{}", lambda t: is_json(t, ["name", "age"]),
+             ["田中さんは 28 歳です。", "佐藤花子は今年 35 歳になった。", "12 歳の鈴木くんがサッカーをしている。", "山本さん（41 歳）は会社員です。", "45 歳の高橋さんが受付にいた。",
+              "伊藤さんは 19 歳の大学生です。", "渡辺さん、52 歳。", "中村さんは先月 30 歳になりました。", "7 歳の小林さんは小学生だ。", "加藤さんの年齢は 63 歳です。"]),
+}
+if_items = [(kind, tmpl.format(x), check) for kind, (tmpl, check, xs) in CHECKS.items() for x in xs]
+kinds = [k for k, _, _ in if_items]
+if_prompts = [[{"role": "user", "content": p}] for _, p, _ in if_items]
+dolly_prompts = [to_example(r)["prompt"] for r in heldout]
+
+@torch.no_grad()
+def generate(model, prompts, max_new_tokens=256, batch_size=40):
+    """貪欲法で生成し、応答と「</s> を出して止まったか」を返す"""
+    model.eval()
+    tokenizer.padding_side = "left"
+    outs, stopped = [], []
+    for i in range(0, len(prompts), batch_size):
+        enc = tokenizer.apply_chat_template(prompts[i:i + batch_size], add_generation_prompt=True, return_tensors="pt",
+                                            return_dict=True, padding=True).to(model.device)
+        out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1,
+                             pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+        gen = out[:, enc["input_ids"].shape[1]:]
+        outs += [tokenizer.decode(g, skip_special_tokens=True).strip() for g in gen]
+        stopped += [(g == tokenizer.eos_token_id).any().item() for g in gen]
+    return outs, np.array(stopped)
+
+def evaluate(model, label):
+    t = time.time()
+    if_out, if_stop = generate(model, if_prompts)
+    d_out, d_stop = generate(model, dolly_prompts)
+    hits = np.array([check(o) for (_, _, check), o in zip(if_items, if_out)])
+    print(f"{label}: 指示に従った割合 {hits.mean():.3f}、止まった割合 {np.r_[if_stop, d_stop].mean():.3f}（{time.time() - t:.0f} 秒）")
+    return {"if_out": if_out, "hits": hits, "d_out": d_out, "stopped": np.r_[if_stop, d_stop]}
+
+results = {"学習前": evaluate(model, "学習前（ベースモデル）")}   # Colab の T4 で 1〜2 分
+for k in ["箇条書き 3 つ", "はい/いいえ", "JSON"]:
+    i = kinds.index(k)
+    print(f"\n[{if_items[i][1]}]\n→ {results['学習前']['if_out'][i][:200]}")
+
+# 参考: チャットの形式を使わず、ふつうの文章の続きとして書かせる
+enc = tokenizer("質問: 日本でいちばん高い山は何ですか。\n答え:", return_tensors="pt").to(model.device)
+out = model.generate(**enc, max_new_tokens=60, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.pad_token_id)
+print("\n[文章の続きとして]", repr(tokenizer.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)))
+```
+
+```python
+from peft import LoraConfig
+from trl import SFTConfig, SFTTrainer
 
 lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
-                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])   # アテンションの射影行列に低ランク行列を追加
-model = get_peft_model(model, lora)
-model.print_trainable_parameters()
+                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])   # すべての線形層に低ランク行列を足す
+args = SFTConfig(
+    output_dir="sft-out", num_train_epochs=1, per_device_train_batch_size=8, gradient_accumulation_steps=2,
+    learning_rate=2e-4, lr_scheduler_type="cosine", warmup_steps=10, max_length=512,
+    completion_only_loss=True,    # prompt-completion 形式のデータでは既定でも True。応答 (completion) の部分だけに損失をかける
+    packing=False,                # 複数の例を 1 本の系列に詰めない（下の注意書きを参照）
+    logging_steps=50, save_strategy="no", report_to="none", seed=0,
+    gradient_checkpointing=False, bf16=BF16, fp16=not BF16)   # SFTConfig は bf16=True と gradient_checkpointing=True が既定なので明示する
+trainer = SFTTrainer(model=model, args=args, train_dataset=train_ds, eval_dataset=eval_ds, processing_class=tokenizer, peft_config=lora)
+trainer.model.print_trainable_parameters()
+
+# 損失をかける部分の確認: SFTTrainer が作った labels で、プロンプトの部分は -100（損失を計算しない）になっている
+ex = trainer.train_dataset[0]
+ids, labels = np.array(ex["input_ids"]), np.array(ex["labels"])
+print("損失なし:", repr(tokenizer.decode(ids[labels == -100])[-60:]))
+print("損失あり:", repr(tokenizer.decode(ids[labels != -100])))
+lengths = np.array([len(x) for x in trainer.train_dataset["input_ids"]])
+print(f"トークン数: 平均 {lengths.mean():.0f}、最大 {lengths.max()}")
+# 学習と同じくランダムに 8 件ずつまとめたときに、パディングが占める割合（packing をすると減らせる分）
+pad = [1 - b.sum() / (len(b) * b.max()) for b in np.array_split(lengths[rng.permutation(len(lengths))], len(lengths) // 8)]
+print(f"パディングの割合（ランダムに 8 件ずつ）: {np.mean(pad):.2f}")
 ```
 
 ```python
-# 学習データ: 誤りを含む文 → 訂正文 (実際には数千〜数万ペアを用意する)
-pairs = [("私は学校を行きます。", "私は学校に行きます。"), ("昨日は雨が降ります。", "昨日は雨が降りました。"),
-         ("この本は面白いでした。", "この本は面白かったです。"), ("静かの部屋で勉強します。", "静かな部屋で勉強します。"),
-         ("日本語を話すことが上手になりたい。", "日本語を話すのが上手になりたい。"), ("友達を会いました。", "友達に会いました。"),
-         ("彼は背が高いだ。", "彼は背が高い。"), ("毎日、日本語が勉強します。", "毎日、日本語を勉強します。")] * 25
-INSTRUCTION = "次の文の文法誤りを訂正してください。"
+from trl.trainer.sft_trainer import DataCollatorForLanguageModeling
 
-def encode(example):
-    messages = [{"role": "user", "content": f"{INSTRUCTION}\n{example['src']}"}]
-    prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    answer_ids = tokenizer(example["tgt"] + tokenizer.eos_token, add_special_tokens=False)["input_ids"]
-    return {"input_ids": prompt_ids + answer_ids,
-            "labels": [-100] * len(prompt_ids) + answer_ids}    # プロンプト部分は損失を計算しない
-
-ds = Dataset.from_list([{"src": s, "tgt": t} for s, t in pairs]).map(encode, remove_columns=["src", "tgt"])
+# packing の確認: trl の packing は複数の例を 1 本につなぎ、位置 (position_ids) を例ごとに 0 から振り直す。
+# 2 件をつないだときの 2 件目の出力が、2 件目だけを入れたときと同じになるか（前の例を見ていないか）を確かめる
+a, b = trainer.train_dataset[0]["input_ids"], trainer.train_dataset[1]["input_ids"]
+batch = DataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id, padding_free=True)([{"input_ids": a}, {"input_ids": b}])
+ids, pos = batch["input_ids"].to(model.device), batch["position_ids"].to(model.device)
+trainer.model.eval()
+with torch.no_grad():
+    alone = trainer.model(input_ids=torch.tensor([b], device=model.device)).logits[0].float()
+    for label, kw in [("位置を振り直す（学習時と同じくキャッシュなし）", dict(position_ids=pos, use_cache=False)),
+                      ("単純につなぐだけ", dict(use_cache=False))]:
+        packed = trainer.model(input_ids=ids, **kw).logits[0, len(a):].float()
+        print(f"2 件目の logits の最大の差（{label}）: {(packed - alone).abs().max().item():.2f}")
+print("アテンションの実装:", model.config._attn_implementation)
 ```
 
 ```python
-from transformers import DataCollatorForSeq2Seq, Trainer, TrainingArguments
-
-args = TrainingArguments(output_dir="lora-out", num_train_epochs=3, per_device_train_batch_size=8, learning_rate=2e-4,
-                         warmup_steps=10, logging_steps=10, save_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
-trainer = Trainer(model=model, args=args, train_dataset=ds,
-                  data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100))
-trainer.train()
+loss_before = trainer.evaluate()["eval_loss"]   # 学習前（LoRA の B は 0 で初期化されるので、ベースモデルと同じ）
+t = time.time()
+trainer.train()   # Colab の T4 で 10〜15 分
+for log in trainer.state.log_history:
+    if "loss" in log:
+        print(f"step {log['step']:3d}  loss {log['loss']:.3f}")
+print(f"評価データ 200 件の応答部分の損失: 学習前 {loss_before:.3f} → 学習後 {trainer.evaluate()['eval_loss']:.3f}")
+print(f"学習 {time.time() - t:.0f} 秒、GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+# 参考: 全パラメータを Adam で学習すると、重み・勾配・Adam の状態だけで 1 パラメータあたり 16 バイト程度（混合精度の場合）
+n_all = sum(p.numel() for p in trainer.model.parameters())
+n_train = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+print(f"学習するパラメータ {n_train / 1e6:.1f}M（全体の {n_train / n_all:.2%}）。全パラメータを学習する場合の目安 {n_all * 16 / 1e9:.1f} GB + 活性化")
 ```
 
 ```python
-def correct(text):
-    messages = [{"role": "user", "content": f"{INSTRUCTION}\n{text}"}]
-    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
-    with torch.no_grad():
-        out = model.generate(**inputs, max_new_tokens=50, do_sample=False, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+# 学習後のモデルと公式の指示チューニング版を、同じ指示で評価する
+model = trainer.model
+results["学習後 (SFT)"] = evaluate(model, "学習後（LoRA で SFT）")   # 公式版の読み込みと合わせて Colab の T4 で 1〜3 分
+inst = AutoModelForCausalLM.from_pretrained(inst_name, dtype=DTYPE, device_map="auto")
+results["公式の instruct"] = evaluate(inst, "公式の指示チューニング版")
 
-for s in ["私は図書館を行きました。", "この映画は楽しいでした。", "きれいの花が咲いています。"]:
-    print(s, "→", correct(s))
+def rate_ci(hits):   # 割合と、ブートストラップによる 95% 信頼区間
+    boot = hits[np.random.default_rng(0).integers(0, len(hits), (2000, len(hits)))].mean(1)
+    return f"{hits.mean():.2f} [{np.percentile(boot, 2.5):.2f}, {np.percentile(boot, 97.5):.2f}]"
 
-model.save_pretrained("gec-lora")   # 保存されるのは追加した LoRA の重み (数 MB〜数十 MB) だけ
+table = pd.DataFrame({label: {**{k: r["hits"][[i for i, x in enumerate(kinds) if x == k]].mean() for k in CHECKS},
+                              "指示に従った割合（60 問）": rate_ci(r["hits"]), "止まった割合（100 問）": r["stopped"].mean().round(2),
+                              "応答の平均の長さ（文字）": round(np.mean([len(o) for o in r["if_out"] + r["d_out"]]))}
+                      for label, r in results.items()})
+print(table.to_string())
+print(f"GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 ```
 
-- 学習するパラメータは全体の 1% 未満。元のモデルの重みは固定で、アダプタだけを配布・切り替えできる。
-- 読み込み: `PeftModel.from_pretrained(ベースモデル, "gec-lora")`。推論を速くするなら `merge_and_unload()` で重みを統合する。
-- 学習率は全体のファインチューニングより高め (1e-4〜3e-4)。`r` は 8〜64 が一般的。
-- 指示に従うように調整したあと、応答の好みに合わせてさらに調整する方法は、この章の「選好データで LLM を調整する (DPO)」を参照。
-- 4bit 量子化と組み合わせる (QLoRA) と、7B クラスでも T4 で学習できる。`prepare_model_for_kbit_training` を使う。
-- ここでは 8 種類の文を 25 回ずつ繰り返しているので、1 エポック目で損失がほぼ 0 になり、学習データを丸暗記する。その結果、「楽しいでした」→「面白かったです」のように、誤りでない語まで学習データの訂正文に寄せて書き換える。実際のデータで学習するときは、検証データの損失を見てエポック数を決める。
+```python
+# 同じ指示への 3 つの応答を並べる（形を指定した指示 2 問と、学習に使っていない dolly の指示 2 問）
+for p, outs in [(if_items[i][1], [r["if_out"][i] for r in results.values()]) for i in [kinds.index("30 文字以内"), kinds.index("数字だけ")]] + \
+               [(dolly_prompts[i][0]["content"], [r["d_out"][i] for r in results.values()]) for i in [0, 1]]:
+    print("■", p[:150])
+    for label, o in zip(results, outs):
+        print(f"  [{label}] {o[:150]}")
+    print()
+
+model.save_pretrained("sft-lora")   # 保存されるのは追加した LoRA の重みだけ
+size = sum(os.path.getsize(f"sft-lora/{f}") for f in os.listdir("sft-lora") if f.endswith(".safetensors"))
+print(f"LoRA の重みのファイル: {size / 1e6:.0f} MB")
+```
+
+- 指示チューニング (SFT: supervised fine-tuning) は、指示と応答の組で、応答の部分を次のトークンの予測として学習させること。上の出力では、ベースモデルはチャットの形式で渡した指示に英語の文章やプログラムを書き続け、`</s>` を出して止まったのは 100 問中 2 問だった。ふつうの文章の続きとしてなら答えるが、次の質問と答えを自分で作り続ける。8,000 件・1 エポックの SFT のあとは止まった割合が 0.92 になり（公式の指示チューニング版は 0.93）、学習に使っていない 200 件の応答部分の損失は 2.945 → 2.386 に下がった。なお、ベースモデルのモデルカードには、事前学習の最後の段階で「さまざまな応用タスクの性能を上げるための少量のデータ」で学習したとあり、純粋に Web のテキストだけで学習したモデルではない。
+- 決まった形を守ったかの自動評価（60 問）では、指示に従った割合は学習前 0.15、学習後 0.20、公式版 0.20 で、95% 信頼区間が重なり、この問題数では差があるとは言えない。学習前の 0.15 は、何を聞かれても英語を書くので「英語で」の 10 問中 9 問が当たっただけである。学習後は「箇条書き 3 つ」が 0.9 と公式版 (0.2) より高い一方、「JSON」は 0（公式版は 1.0）で、「はい/いいえ」の一言は 3 つとも 0 だった。SFT で身につくのは主に学習データの形と文体で、学習後の応答は短く（平均 92 文字、公式版は 251 文字）、学習データと同じである調になった。dolly には JSON で答える例がほとんどない。「12 + 30」に「答えは32である。」と答えたり、参考文を答えの代わりにそのまま写したりするように、0.5B のモデルに 8,000 件学習させただけでは中身の正しさは上がらない。決まった形で答えさせたいなら、その形の例を学習データに入れる。中身の良し悪しを比べるには、評価指標と統計的検定の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」のような判定を使う。
+- 損失をかける部分: 会話形式の prompt-completion（`prompt` と `completion` にメッセージのリスト）のデータを渡すと、`SFTTrainer` はプロンプトの部分の `labels` を -100 にして、応答とその後の `</s>` だけに損失をかける（`completion_only_loss` は、この形式では既定で True）。`</s>` を学習するので、答えたあとに止まれるようになる。複数ターンの会話（`messages` の列）で応答だけに損失をかける `assistant_only_loss=True` は、チャットテンプレートに応答の範囲を示す `{% generation %}` のタグが要り、sarashina2.2 の公式のテンプレートにも、ここで設定したテンプレートにもない（trl は、学習用のテンプレートを用意してある一部のモデルでは自動で差し替えるが、sarashina2.2 はその対象ではない）。ベースモデルにはチャットテンプレートがないので、公式版と同じ形式のものを設定した（`<|user|>` などはベースモデルの語彙にも同じ ID で追加されている。特殊トークンの扱いではないので、`skip_special_tokens=True` でも消えず、上の学習前の出力にもそのまま出ている）。こうすると、学習したモデルを公式版と同じ使い方で動かせる。
+- packing: 長さがばらばらな例を 8 件ずつまとめると、上の出力ではトークンの 54% がパディングになる。`packing=True` にすると複数の例を 1 本の系列に詰めてパディングを減らせる。trl は例ごとに位置を 0 から振り直し、transformers 5 は位置の切れ目から例どうしのアテンションを遮る（学習時のようにキャッシュを使わない場合）。上の確認では、位置を振り直したときの 2 件目の logits の差は 0.04（float16 の誤差の程度）、単純につなぐと 16.02 で、前の例が見えてしまう。trl の説明では packing（padding-free）は FlashAttention 2/3 が前提とされているが、この版の transformers では sdpa でも上のとおり遮られた（版によって変わりうる）。ここでは、例ごとに扱えて分かりやすいように packing を使っていない。packing をすると 1 本に複数の例が入り、同じデータでもステップ数が減るので、学習率やステップ数を合わせ直す必要がある（ここでは時間を比べていない）。
+- LoRA (Hu et al., 2021) は、元の重みを固定し、線形層に低ランクの行列の積 BA（ランク `r`）を足して、A と B だけを学習する。B は 0 で初期化するので、学習前は元のモデルと同じ出力になる。`lora_alpha / r` が足す量の倍率。`target_modules` はアテンションの 4 つの射影と MLP の 3 つの線形層で、学習するパラメータは 10.1M（全体の 1.25%）、保存される重みは 40MB だった。学習中の GPU メモリの最大使用量は 8.6GB。全パラメータを Adam で学習すると、混合精度では重み・勾配・Adam の状態だけで 1 パラメータあたり 16 バイト程度 (Rajbhandari et al., 2020)、このモデルで 12.8GB に活性化の分が加わり、T4 (16GB) では厳しい。4bit 量子化と組み合わせる (QLoRA) と、もっと大きなモデルも T4 で学習できる（`prepare_model_for_kbit_training` を使う）。
+- 読み込みは `PeftModel.from_pretrained(ベースモデル, "sft-lora")`、推論を速くするなら `merge_and_unload()` で重みを統合する。LoRA の学習率は全パラメータの学習より高め（ここでは 2e-4）。`SFTConfig` は trl 1.18.0 では `bf16=True`、`gradient_checkpointing=True`、学習率 2e-5 が既定なので、T4 向けに fp16 を明示している。検証に使った GPU（T4 と同じ float16 の経路）では学習が 209 秒、全体で約 5 分だった。T4 では学習が 10〜15 分程度、全体で 20 分程度と見込んでいる（T4 では測っていない）。
+- ベース → SFT → 選好や報酬による調整、という順番がふつうである。この章の「選好データで LLM を調整する (DPO)」と「正解を判定できる課題で LLM を強化学習する (GRPO)」は、公式の指示チューニング版から始めている（その学習方法はモデルカードに書かれていない）。ここで作ったモデルから始めるなら、`merge_and_unload()` で統合したモデルを渡し、トークナイザーはここで設定したチャットテンプレートを持つもの（`tokenizer.save_pretrained` で保存したもの）か公式版のものを使う。ベースモデルのトークナイザーのままではチャットテンプレートがない。SFT は「手本の応答をまねる」学習で、手本より良い応答は学べない。DPO は 2 つの応答のどちらが良いか、GRPO は正解かどうかで、手本のない改善を目指す。
+- データ: llm-jp/databricks-dolly-15k-ja (CC BY-SA 3.0) は、Databricks の社員が書いた databricks-dolly-15k を LLM-jp が DeepL で訳したもので、訳の崩れも混じる。元のデータセットカードによると、要約や閉じた QA などの参考文 (context) は Wikipedia から引用したもので、引用の番号（[42] など）が残っていることがある。CC BY-SA は改変したデータを同じライセンスで公開することを求めるので、データを加工して配布するときは注意する。モデルはどちらも MIT License。トークナイザーの修正 (`load_tokenizer`) については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N) {reward_best_of_n gpu}
+
+LLM に同じ質問への応答を N 個サンプリングさせ、公開の報酬モデルで採点して最も点の高いものを選びたい (Best-of-N)。N を増やすと品質がどれだけ上がるかを、正解のある課題と別の判定役で確かめ、報酬モデルの偏り（報酬ハッキング）も調べる。選んだ最良と最悪の組を DPO の選好データにしたい。
+
+```python
+import itertools, json, random, re, time, unicodedata
+from collections import Counter
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from scipy.stats import spearmanr
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, set_seed
+
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+set_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+# 応答を生成するモデル: この章の DPO・GRPO のレシピと同じ 0.5B のモデル (MIT License)
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
+tokenizer = load_tokenizer(name)
+model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+
+# 報酬モデル: Skywork-Reward-V2 (Liu et al., 2025) の Qwen3-1.7B 版 (Apache 2.0)。2,600 万組の選好データで学習した
+# Bradley-Terry 型の報酬モデルで、質問と応答の会話を入れると 1 つの実数（報酬）を返す。点の絶対値に意味はなく、同じ質問の中で比べる
+rm_name = "Skywork/Skywork-Reward-V2-Qwen3-1.7B"
+rm_tokenizer = AutoTokenizer.from_pretrained(rm_name)
+rm = AutoModelForSequenceClassification.from_pretrained(rm_name, dtype=DTYPE, device_map="auto").eval()
+
+@torch.no_grad()
+def reward(question, responses, bs=8):
+    """1 つの質問への複数の応答を採点する。モデルカードの推奨に従い、システムプロンプトは付けない"""
+    texts = [rm_tokenizer.apply_chat_template([{"role": "user", "content": question}, {"role": "assistant", "content": r}], tokenize=False)
+             for r in responses]
+    scores = []
+    for i in range(0, len(texts), bs):
+        enc = rm_tokenizer(texts[i:i + bs], return_tensors="pt", padding=True).to(rm.device)
+        scores += rm(**enc).logits[:, 0].float().tolist()
+    return np.array(scores)
+
+# 日本語での挙動を確かめる: モデルカードの例（りんごの問題）を日本語に訳し、正しい応答・誤った応答・英語の応答を比べる
+q = "りんごが 12 個あります。4 個を友達にあげ、1 個買い足して、自分と兄弟 2 人の 3 人で等しく分けます。1 人何個もらえますか。"
+cands = {
+    "正しい（日本語）": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。3 人で分けるので 9 ÷ 3 = 3。答えは 1 人 3 個です。",
+    "誤り（日本語）": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。兄弟 2 人で分けるので 9 ÷ 2 = 4.5。答えは 1 人 4 個です。",
+    "正しい（英語）": "12 - 4 = 8 apples. After buying 1 more, 8 + 1 = 9. Split among 3 people, 9 / 3 = 3. Each person gets 3 apples.",
+    "答えだけ（正しい）": "3 個です。",
+    "質問と無関係": "東京は日本の首都で、人口は約 1,400 万人です。",
+}
+for k, s in zip(cands, reward(q, list(cands.values()))):
+    print(f"{s:7.2f}  {k}")
+```
+
+```python
+# 正解のある課題: MGSM（CC BY 4.0。Hugging Face のメタデータは CC BY-SA 4.0）の日本語の先頭 100 問（この章の Chain-of-Thought のレシピと同じ）
+# 指示はそのレシピの「CoT (0-shot)」と同じ。温度 0.7・top_p 0.9（開発元の既定値）で 1 問につき N = 8 個サンプリングする。
+# 開発元の既定値では repetition_penalty 1.05 も掛かる（貪欲法にも掛かる）
+N_MAX, N_Q = 8, 100
+mgsm = load_dataset("juletxara/mgsm", "ja", split="test").select(range(N_Q))
+gold = np.array(mgsm["answer_number"], dtype=float)
+INSTRUCTION = "次の問題に答えてください。ステップごとに考えて途中の計算を書き、最後に「答えは〇〇です。」と書いてください。"
+math_q = [f"{INSTRUCTION}\n\n問題: {q}" for q in mgsm["question"]]
+
+@torch.no_grad()
+def generate(questions, n, max_new_tokens, bs=64):
+    """質問ごとに n 個の応答と、長さの上限で打ち切られたかどうかを返す（n = 1 なら貪欲法、n > 1 ならサンプリング）"""
+    outs, cut, step = [], [], max(1, bs // n)
+    for i in range(0, len(questions), step):
+        enc = tokenizer.apply_chat_template([[{"role": "user", "content": q}] for q in questions[i:i + step]], add_generation_prompt=True,
+                                            return_tensors="pt", return_dict=True, padding=True).to(model.device)
+        out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=n > 1, num_return_sequences=n, pad_token_id=tokenizer.pad_token_id)
+        gen = out[:, enc["input_ids"].shape[1]:]
+        outs += tokenizer.batch_decode(gen, skip_special_tokens=True)
+        cut += [o[-1].item() not in (tokenizer.eos_token_id, tokenizer.pad_token_id) for o in gen]
+    return [outs[j * n:(j + 1) * n] for j in range(len(questions))], np.array(cut).reshape(len(questions), n)
+
+def extract(text):
+    """答えの数値を取り出す（この章の Chain-of-Thought のレシピの取り出し方の簡略版）: 「答え」の後ろ → 最後に出てきた数値"""
+    text = unicodedata.normalize("NFKC", text).replace(",", "")
+    found = re.findall(r"答え[はが]?\s*[:：]?[^\d\-\n]*(-?\d+(?:\.\d+)?)", text) or re.findall(r"-?\d+(?:\.\d+)?", text)
+    return float(found[-1]) if found else None
+
+t = time.time()
+greedy, _ = generate(math_q, 1, 320)
+math_out, math_cut = generate(math_q, N_MAX, 320)         # 800 個の応答。貪欲法と合わせて Colab の T4 で 8〜10 分程度
+print(f"生成 {time.time() - t:.0f} 秒")
+t = time.time()
+math_score = np.array([reward(q, outs) for q, outs in zip(math_q, math_out)])    # 100 問 × 8 個
+print(f"採点 {time.time() - t:.0f} 秒")
+math_ans = [[extract(o) for o in outs] for outs in math_out]
+correct = np.array([[a == g for a in row] for row, g in zip(math_ans, gold)])
+greedy_correct = np.array([extract(o[0]) == g for o, g in zip(greedy, gold)])
+print(f"報酬の平均: 正解の応答 {math_score[correct].mean():.2f}、不正解の応答 {math_score[~correct].mean():.2f}")
+print(f"上限の 320 トークンで打ち切られた応答の割合 {math_cut.mean():.3f}（その報酬の平均 {math_score[math_cut].mean():.2f}）")
+```
+
+```python
+# N を変えて比べる。8 個から n 個を選ぶすべての組み合わせで計算して平均する（どの n 個を使うかによるばらつきをならす）
+def vote(answers):
+    answers = [a for a in answers if a is not None]
+    return Counter(answers).most_common(1)[0][0] if answers else None
+
+def per_question(i, n):
+    combos = list(itertools.combinations(range(N_MAX), n))
+    return {"ランダムに 1 つ": correct[i].mean(),
+            "報酬モデルで最良 (Best-of-N)": np.mean([correct[i, list(c)][np.argmax(math_score[i, list(c)])] for c in combos]),
+            "多数決 (self-consistency)": np.mean([vote([math_ans[i][j] for j in c]) == gold[i] for c in combos]),
+            "どれか 1 つが正解（上限）": np.mean([correct[i, list(c)].any() for c in combos])}
+
+table = {n: pd.DataFrame([per_question(i, n) for i in range(N_Q)]) for n in [1, 2, 4, 8]}
+print(pd.DataFrame({n: d.mean() for n, d in table.items()}).T.rename_axis("N").round(3).to_string())
+print(f"貪欲法 1 回: {greedy_correct.mean():.3f}")
+
+def diff_ci(x, y, n_boot=2000):   # 同じ問題で比べる対応のあるブートストラップで、正解率の差の 95% 信頼区間
+    idx = np.random.default_rng(0).integers(0, len(x), (n_boot, len(x)))
+    d = x[idx].mean(1) - y[idx].mean(1)
+    return f"{(x.mean() - y.mean()) * 100:+.1f} ポイント [{np.percentile(d, 2.5) * 100:+.1f}, {np.percentile(d, 97.5) * 100:+.1f}]"
+
+bon8, maj8 = table[8]["報酬モデルで最良 (Best-of-N)"].values, table[8]["多数決 (self-consistency)"].values
+print("Best-of-8 − ランダムに 1 つ:", diff_ci(bon8, table[8]["ランダムに 1 つ"].values))
+print("Best-of-8 − 貪欲法 1 回:", diff_ci(bon8, greedy_correct.astype(float)))
+print("Best-of-8 − 8 個の多数決:", diff_ci(bon8, maj8))
+```
+
+```python
+# 正解のない課題: 質問への応答の役に立ち方。この章の DPO のレシピと同じ絞り込みと並べ替えで、その学習側の質問 (data[:2000]) の先頭 50 件を使う
+# （評価側の data[2000:2200] は使わない。ここで作る選好データを DPO の学習に使っても、評価の質問と重ならない）
+# llm-jp/hh-rlhf-12k-ja (MIT License): Anthropic の hh-rlhf (MIT License) の一部を DeepL で日本語に訳したもの。有用さ (helpful-*) の部分だけを使う
+raw = load_dataset("llm-jp/hh-rlhf-12k-ja", split="train")
+data = [r["conversations"][0]["value"] for r in raw
+        if r["source"].startswith("helpful") and len(r["conversations"]) == 1 and r["chosen"] != r["rejected"]
+        and len(r["conversations"][0]["value"]) <= 200 and max(len(r["chosen"]), len(r["rejected"])) <= 400]
+random.Random(0).shuffle(data)
+help_q = data[:50]
+
+t = time.time()
+help_out, help_cut = generate(help_q, N_MAX, 384)   # 400 個の応答（上限は DPO のレシピと同じ 384 トークン）。Colab の T4 で 3〜4 分程度
+help_score = np.array([reward(q, outs) for q, outs in zip(help_q, help_out)])
+print(f"生成と採点 {time.time() - t:.0f} 秒")
+best, worst = help_score.argmax(1), help_score.argmin(1)
+rows = np.arange(len(help_q))
+length = np.array([[len(o) for o in outs] for outs in help_out])
+print(f"応答の平均の長さ: 最良 {length[rows, best].mean():.0f} 文字、全体 {length.mean():.0f} 文字、最悪 {length[rows, worst].mean():.0f} 文字")
+def mean_rho(score, length, keep):   # 同じ質問の中での報酬と長さの順位相関 (Spearman) の平均。keep の応答だけで計算する
+    return np.nanmean([spearmanr(s[k], l[k]).statistic for s, l, k in zip(score, length, keep) if k.sum() >= 3])
+math_len = np.array([[len(o) for o in outs] for outs in math_out])
+print(f"上限の 384 トークンで打ち切られた応答の割合 {help_cut.mean():.3f}")
+print(f"同じ質問の中での報酬と長さの順位相関の平均: {mean_rho(help_score, length, np.ones_like(help_cut)):.3f}"
+      f"（打ち切られた応答を除くと {mean_rho(help_score, length, ~help_cut):.3f}）")
+print(f"算数の問題では {mean_rho(math_score, math_len, np.ones_like(math_cut)):.3f}（打ち切られた応答を除くと {mean_rho(math_score, math_len, ~math_cut):.3f}）")
+i = 0
+print("\n質問:", help_q[i])
+for j in np.argsort(-help_score[i]):
+    print(f"{help_score[i, j]:6.2f}  {help_out[i][j][:80]!r}")
+```
+
+```python
+# 別の判定役で確かめる: この章の DPO のレシピと同じく sarashina2.2-3b-instruct (MIT License) に 2 つの応答を比べさせる。
+# 順番を入れ替えて 2 回聞いて平均する。比べる相手は、報酬モデルを使わない場合（8 個のうち 1 個目 = ランダムに 1 つ）
+judge_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+jtok = load_tokenizer(judge_name)
+judge = AutoModelForCausalLM.from_pretrained(judge_name, dtype=DTYPE, device_map="auto").eval()
+id_a, id_b = [jtok(c, add_special_tokens=False)["input_ids"][-1] for c in ("A", "B")]
+
+@torch.no_grad()
+def p_first_better(q, x, y):
+    def p_a(a, b):
+        msg = [{"role": "user", "content": f"次の質問に対する 2 つの応答のうち、より役に立つ応答はどちらですか。A か B の 1 文字で答えてください。\n\n"
+                                           f"質問: {q}\n\n応答 A: {a}\n\n応答 B: {b}"}]
+        inputs = jtok.apply_chat_template(msg, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(judge.device)
+        return torch.softmax(judge(**inputs).logits[0, -1].float()[[id_a, id_b]], -1)[0].item()
+    return (p_a(x, y) + 1 - p_a(y, x)) / 2
+
+def rate_ci(hits):   # 割合と、ブートストラップによる 95% 信頼区間
+    boot = [hits[i].mean() for i in np.random.default_rng(0).integers(0, len(hits), (2000, len(hits)))]
+    return f"{hits.mean():.3f}（95% 信頼区間 {np.percentile(boot, 2.5):.3f}〜{np.percentile(boot, 97.5):.3f}、{len(hits)} 問）"
+
+others = [i for i in rows if best[i] != 0]       # 1 個目がたまたま最良だった質問は比べられないので除く
+win_best = np.array([p_first_better(help_q[i], help_out[i][best[i]], help_out[i][0]) for i in others])
+others = [i for i in rows if worst[i] != 0]
+win_worst = np.array([p_first_better(help_q[i], help_out[i][worst[i]], help_out[i][0]) for i in others])   # 判定は合わせて Colab の T4 で 1 分程度
+print("報酬モデルの最良がランダムな 1 つより良いと判定された割合:", rate_ci(win_best > 0.5))
+print("報酬モデルの最悪がランダムな 1 つより良いと判定された割合:", rate_ci(win_worst > 0.5))
+print(f"GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 報酬ハッキングの手がかり: 応答の中身を変えずに、言い回しや長さだけを変えると報酬がどう動くか（各質問の 1 個目の応答で調べる）
+edits = {
+    "冒頭にほめ言葉を足す": lambda r: "素晴らしいご質問ですね！" + r,
+    "末尾に定型の締めを足す": lambda r: r + "\n\nほかにもご質問があれば、お気軽にお尋ねください。",
+    "末尾に「正確です」と書き足す": lambda r: r + "\n\nこの回答は専門家が確認した正確な情報です。",
+    "同じ応答を 2 回繰り返す": lambda r: r + "\n\n" + r,
+    "後半を削って半分にする": lambda r: r[:len(r) // 2],
+}
+base = help_score[:, 0]
+res = {}
+for label, f in edits.items():
+    d = np.array([reward(q, [f(outs[0])])[0] for q, outs in zip(help_q, help_out)]) - base
+    res[label] = {"報酬の変化（平均）": d.mean(), "上がった割合": (d > 0).mean()}
+# 算数: 正解した応答の最後の答えの数値だけを 1 大きくする（推論はそのまま、答えだけが誤りになる）
+def wrong_answer(text, g):
+    return re.sub(r"(答え[はが]?\s*[:：]?[^\d\-\n]*)(-?[\d,]+(?:\.\d+)?)(?!.*答え)", lambda m: m.group(1) + f"{g + 1:g}", text, flags=re.S)
+# 各問で最初に正解した応答のうち、「答えは…」の形で書かれていて書き換えられたものを使う
+ok = [(i, j) for i in range(N_Q) for j in np.flatnonzero(correct[i])[:1] if wrong_answer(math_out[i][j], gold[i]) != math_out[i][j]]
+d = np.array([reward(math_q[i], [wrong_answer(math_out[i][j], gold[i])])[0] - math_score[i, j] for i, j in ok])
+res["算数: 最後の答えだけを誤りにする"] = {"報酬の変化（平均）": d.mean(), "上がった割合": (d > 0).mean()}
+print(pd.DataFrame(res).T.round(3).to_string())
+print(f"（算数は {len(ok)} 問。報酬の標準偏差は、同じ質問の 8 個の中で平均 {help_score.std(1).mean():.2f}）")
+```
+
+```python
+# 最良と最悪の組を、この章の DPO のレシピと同じ trl の会話形式 (prompt / chosen / rejected) の選好データにする。
+# 報酬の差が小さい組は、報酬モデルの誤差で順番が入れ替わりやすいので除く（ここでは差が 2 未満）
+pairs = [{"prompt": [{"role": "user", "content": q}],
+          "chosen": [{"role": "assistant", "content": outs[b]}], "rejected": [{"role": "assistant", "content": outs[w]}],
+          "margin": float(s[b] - s[w])}
+         for q, outs, s, b, w in zip(help_q, help_out, help_score, best, worst) if s[b] - s[w] >= 2]
+print(f"{len(help_q)} 問から {len(pairs)} 組。報酬の差の中央値 {np.median([p['margin'] for p in pairs]):.2f}")
+print(f"chosen のほうが長い組の割合: {np.mean([len(p['chosen'][0]['content']) > len(p['rejected'][0]['content']) for p in pairs]):.3f}")
+with open("bon_pairs.jsonl", "w") as f:
+    for p in pairs:
+        f.write(json.dumps(p, ensure_ascii=False) + "\n")
+p = max(pairs, key=lambda p: p["margin"])
+print("\n質問:", p["prompt"][0]["content"], "\n[chosen]", p["chosen"][0]["content"][:200], "\n[rejected]", p["rejected"][0]["content"][:200])
+```
+
+- Best-of-N は、モデルの重みを変えずに推論時の計算を増やして品質を上げる方法で、N 個の候補を生成し、報酬モデルの点が最も高いものを選ぶ（WebGPT (Nakano et al., 2021) などで使われた）。生成と採点が N 倍になるので、時間もほぼ N 倍かかる。検証に使った GPU（T4 と同じ float16 の経路）では全体で約 5 分（算数の 900 個の生成 131 秒、採点 24 秒、質問の 400 個の生成と採点 81 秒）、GPU メモリの最大使用量は 11.9GB だった（0.5B の生成モデル、1.7B の報酬モデル、3B の判定役を同時に載せた状態）。T4 では生成が遅いので、この 2〜2.5 倍程度かかると見込んでいる（T4 では測っていない）。乱数の種を固定しても、GPU の計算の違いでサンプリングの結果が変わることがあり、そのときは表の値も変わる。
+- 報酬モデル: Skywork-Reward-V2 は Skywork が 2025 年に公開した報酬モデルの系列（0.6B〜8B の 8 種類）で、Qwen3 から作った 4 種類は Apache 2.0、Llama から作ったものは Llama 3.1・3.2 のライセンスに従う。モデルカードには対応言語の記載がない。最初のセルの 5 件では、日本語の正しい応答 (4.18) が誤った応答 (−1.25) より高く、同じ内容の英語の応答 (2.05) より日本語のほうが高かった。この例では、説明のない「3 個です。」(−2.36) も途中の説明がある応答より低かった（1 問だけの結果である）。MGSM の 800 個の応答でも、正解の応答の平均 5.06 に対して不正解は −1.04 で、日本語でも正誤をある程度見分けている。
+- 算数（正解のある課題）: ランダムに 1 つ選ぶと正解率 0.199 のところ、報酬モデルで選ぶと N = 2、4、8 で 0.267、0.321、0.340 に上がり、N = 8 では +14.1 ポイント [+8.3, +20.2] だった。ただし、貪欲法 1 回 (0.260) との差（+8.0 ポイント [−1.0, +17.0]）と、8 個の多数決 (0.310) との差（+3.0 ポイント [−3.0, +9.0]）は、100 問では偶然の範囲である。8 個のどれかが正解だった問題は 0.490 あり、報酬モデルはその 3 割ほどで正解を選び損ねている。N を増やすと上がり方は小さくなる（4 → 8 で +1.9 ポイント）。
+- 正解のない課題: 判定役 (3B) は、報酬モデルの最良の応答を、ランダムに選んだ 1 つより良いと 0.667（95% 信頼区間 0.524〜0.810、42 問）で判定し、最悪の応答は 0.244（同 0.133〜0.356、45 問）だった。この判定役と人の選好の一致率は、この章の DPO のレシピでは 0.650 程度だったので、目安にとどまる。また、Best-of-N は候補の中から選ぶだけなので、全部に誤りがあれば最良にも残る（上の例で最も点の高い応答にも「combined（combined）」のような崩れた表現がある）。
+- 報酬ハッキング（長さ）: この報酬モデルは、同じ質問の中では長い応答をやや好んだ（報酬と長さの順位相関の平均 0.191。最良の応答の平均 611 文字、全体 569 文字、最悪 538 文字）。上限の 384 トークンで打ち切られた応答は 3.0% で、それを除いても 0.225 だった。ただし、同じ応答を 2 回繰り返して長くすると報酬は平均 −0.720 で、上がったのは 16% だけなので、長ければよいわけではない。後半を削って半分にすると全部で下がった (−4.312) が、文の途中で切れたことへの罰も含まれていると考えられる。算数では逆に長い応答ほど報酬が低い（−0.265）。320 トークンで打ち切られて答えまで届かなかった応答（12.2%、報酬の平均 −4.34）の影響もあるが、それを除いても −0.170 で、原因は確かめていない。
+- 報酬ハッキング（言い回し）: 末尾に「ほかにもご質問があれば、お気軽にお尋ねください。」と足すだけで 86% の応答で報酬が上がった（平均 +0.335。同じ質問の 8 個の報酬の標準偏差は平均 1.56 なので、点の近い候補の順位は入れ替わりうる）。冒頭のほめ言葉はほとんど効かず （−0.011、上がったのは 54%）、「専門家が確認した正確な情報です」という自己申告は逆に下がった (−1.124)。算数で最後の答えだけを誤りに書き換えると 31 問すべてで下がった（平均 −6.549）。中身と関係のない言い回しで点が上がるので、N を大きくしたり、この報酬モデルで強化学習したりすると、こうした言い回しが増えると考えられる（確かめていない）。報酬モデルの点を上げすぎると本当の品質から離れていくこと（過最適化）は Gao et al. (2023) が Best-of-N と強化学習の両方で調べている。報酬だけでなく、別の評価（正解率や判定役）と出力の例も見る。
+- 選好データ: 報酬の差が 2 以上の 49 組（差の中央値 5.04）を bon_pairs.jsonl に保存した。質問は DPO のレシピの学習側 (`data[:2000]`) から取ったので、そのレシピの `train` を、このファイルから `margin` の列を除いて読み込んだものに置き換えれば、評価の質問と重ならずに DPO に使える（ここでは学習していない）。そのレシピの選好データは別のモデルの応答（方策外のデータ）だったが、これは調整するモデル自身の応答（方策上のデータ）で、人ではなく報酬モデルが選んでいる。そのため、報酬モデルの癖もそのまま選好として学習される。ここでは chosen のほうが長い組が 0.633 あり、学習すると応答が長くなる方向に働きうる。実際には数百問以上で作り、長さの比や言い回しの偏りを確かめる。
+- 関係するレシピ: この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の多数決は、答えが一致するかだけで選ぶので、答えを機械的に比べられる課題にしか使えない。Best-of-N は報酬モデルの点で選ぶので、自由な文章にも使える。この章の「正解を判定できる課題で LLM を強化学習する (GRPO)」は、同じように 1 問に複数の応答を生成し、その報酬の差でモデル自身を学習する。判定役のモデルの信頼性の確かめ方は、評価指標と統計的検定の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」を参照。トークナイザーの修正 (`load_tokenizer`) については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
 ## 選好データで LLM を調整する (DPO) {dpo gpu}
 
@@ -1555,7 +2188,7 @@ print(f"勝率の内訳: 調整後のほうが長い {longer.sum()} 問で {(win
 print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 ```
 
-- DPO (Direct Preference Optimization; Rafailov et al., 2023) は、選好データから報酬モデルを学習して強化学習 (PPO) で最適化する RLHF の手順を、1 つの分類のような損失に置き換えたもの。参照モデルからのずれを β で抑えながら、chosen の尤度を rejected より相対的に上げる。実際には、この章の「LoRA で LLM を少ないメモリでファインチューニングする」のような指示チューニング (SFT) の後に行う。
+- DPO (Direct Preference Optimization; Rafailov et al., 2023) は、選好データから報酬モデルを学習して強化学習 (PPO) で最適化する RLHF の手順を、1 つの分類のような損失に置き換えたもの。参照モデルからのずれを β で抑えながら、chosen の尤度を rejected より相対的に上げる。実際には、この章の「ベースモデルを LoRA で指示チューニングする (SFT)」のような指示チューニングの後に行う。
 - 上の出力では、評価データ（学習に使っていない 200 組）で報酬が chosen > rejected になった割合は 0.680（95% 信頼区間 0.615〜0.745）で、偶然 (0.5) より高い。ただし DPO が上げるのは chosen と rejected の差だけで、対数尤度そのものは chosen も rejected も上がり（平均で +12.82 と +6.95）、「chosen のほうが尤度が高い」割合は 0.480 → 0.485 とほとんど変わらなかった。
 - 一方、生成した応答を判定役のモデルに比べさせると、調整後が良いとされたのは 100 問中 0.340（95% 信頼区間 0.250〜0.430）で、調整前より悪いと判定された。応答は短くなり（平均 480 → 435 文字）、長くならなかった 71 問では勝率が 0.268 と特に低い。GPU の計算は実行ごとにわずかに変わることがあり、勝率は小数第 2 位で変わりうるので、100 問の信頼区間の幅で見る。選好の正解率が上がっても、生成が良くなるとは限らない。
 - 原因は確かめていないが、学習データの応答は hh-rlhf の論文（2022 年）のモデルの出力を機械翻訳したもので、ここでは 400 文字以下に絞っており、このモデル自身の応答とは文体も長さも違う（方策外のデータ）。調整するモデル自身に応答を複数生成させ、それに人や強いモデルが選好を付けたデータ（方策上のデータ）を使う方法もある。
