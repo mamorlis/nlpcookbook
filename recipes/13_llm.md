@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、量子化、プロンプトと推論の工夫 (Chain-of-Thought)、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証、LoRA・DPO による調整。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方は「LLM の評価と分析」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫 (Chain-of-Thought)、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証、LoRA・DPO・GRPO による調整。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方は「LLM の評価と分析」の章、LLM による評価は「評価指標と統計的検定」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする（チャットテンプレート） {llm_chat_local}
 
@@ -137,7 +137,191 @@ for w, s in zip(words, batched):
 
 - 右パディングのままだと、短いプロンプトの後ろにパディングが入り、その続きを生成することになって出力が壊れる。
 - バッチ内の長さを揃える（長さでソートする）とパディングが減って効率が良い。
-- 数万件以上を本格的に処理するなら、vLLM などの推論サーバー（連続バッチ処理）が桁違いに速い。
+- 数万件以上を本格的に処理するなら、vLLM などの推論エンジン（連続バッチ処理）を使う。この章の「vLLM で大量のプロンプトをまとめて高速に生成する」を参照。
+
+## vLLM で大量のプロンプトをまとめて高速に生成する {vllm_generation gpu}
+
+この章の「複数のプロンプトをまとめてバッチ生成する」よりも多くの入力を、もっと速く処理したい。推論エンジンの vLLM で手元のモデルを動かし、transformers の `generate` と速度と出力を比べたい。
+
+```python
+# vLLM 0.34.0 は torch 2.14.0 を指定しているので、Colab の torch 2.14.1 が入れ替わる（Colab で 2〜4 分。pip が依存関係の衝突を表示するが、このレシピは動く）
+# 新しいランタイムで、torch を import する前に実行する（すでに import していたらランタイムを再起動する）
+!pip install -q vllm==0.34.0
+
+# 依存ライブラリ (nvidia-cutlass-dsl) は .pth ファイルで import の検索パスを足すが、.pth は Python の起動時にしか読まれない。
+# このままだと vLLM の起動中に「No module named 'cutlass'」で止まるので、ランタイムを再起動するか、次の 2 行で読み直す
+import site
+for d in site.getsitepackages() + [site.getusersitepackages()]: site.addsitedir(d)
+```
+
+```python
+import gc, json, shutil, time
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+import vllm
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+print("torch", torch.__version__, "/ vLLM", vllm.__version__)
+torch.manual_seed(0)
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # SB Intuitions、MIT ライセンス
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tokenizer.padding_side = "left"
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+# この章の「複数のプロンプトをまとめてバッチ生成する」の 8 語を 16 語に増やし、4 種類の質問と組み合わせた 64 件
+words = ["形態素解析", "機械翻訳", "固有表現抽出", "要約", "質問応答", "感情分析", "音声認識", "情報検索",
+         "構文解析", "単語埋め込み", "言語モデル", "文書分類", "対話システム", "文字認識", "照応解析", "かな漢字変換"]
+templates = ["「{}」を一文で説明してください。", "「{}」の具体的な使い道を一つ挙げてください。",
+             "「{}」を小学生にもわかるように説明してください。", "「{}」の難しいところは何ですか。簡潔に答えてください。"]
+conversations = [[{"role": "user", "content": t.format(w)}] for w in words for t in templates]
+prompts = [tokenizer.apply_chat_template(c, add_generation_prompt=True, tokenize=False) for c in conversations]
+MAX_NEW = 128
+REP = 1.05   # モデルの generation_config.json の値。transformers は自動で使うが、vLLM は SamplingParams で指定しないと使わない
+
+@torch.no_grad()
+def hf_generate(batch):
+    """貪欲法で生成し、生成したトークン ID の列（パディングと文末記号を除く）を返す"""
+    enc = tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+    out = model.generate(**enc, max_new_tokens=MAX_NEW, do_sample=False, repetition_penalty=REP, pad_token_id=tokenizer.pad_token_id)
+    return [[t for t in row if t not in (tokenizer.pad_token_id, tokenizer.eos_token_id)] for row in out[:, enc["input_ids"].shape[1]:].tolist()]
+
+results = {}
+def record(label, outs, seconds):
+    n_tok = sum(len(o) for o in outs)
+    results[label] = {"件数": len(outs), "秒": seconds, "1 件あたりの秒": seconds / len(outs), "出力トークン/秒": n_tok / seconds}
+
+hf_generate(prompts[:2])                                 # 1 回目は準備に時間がかかるので、計測の前に動かしておく
+torch.cuda.synchronize(); t = time.perf_counter()
+hf_single = [hf_generate([p])[0] for p in prompts[:8]]   # 1 件ずつは時間がかかるので先頭の 8 件だけ
+torch.cuda.synchronize(); record("transformers 1 件ずつ", hf_single, time.perf_counter() - t)
+t = time.perf_counter()
+hf_batch = hf_generate(prompts)                          # 64 件を 1 回のバッチで
+torch.cuda.synchronize(); record("transformers バッチ", hf_batch, time.perf_counter() - t)
+print(pd.DataFrame(results).T.round(2).to_string())
+print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.tokenizers import get_tokenizer
+
+def gpu_memory():
+    """GPU 全体の使用量 (GB)。Colab では GPU を 1 人で使うので、このノートブックと vLLM のエンジン（子プロセス）の合計になる"""
+    free, total = torch.cuda.mem_get_info()
+    return (total - free) / 1e9
+
+del model; gc.collect(); torch.cuda.empty_cache()        # transformers のモデルを GPU から外して、vLLM に場所を空ける
+
+# vLLM も transformers の AutoTokenizer でトークナイザーを読むので、同じ不具合が起きる
+s = "東京都千代田区の国立国会図書館に行った。"
+print("vLLM が既定で読むトークナイザー:", get_tokenizer(name).encode(s, add_special_tokens=False))
+print("SentencePiece（学習時と同じ分割）:", sp.encode(s))
+
+# 直したトークナイザーを保存して vLLM に渡す。AutoTokenizer で読み直すと tokenizer_config.json の
+# LlamaTokenizer として組み立て直されてまた壊れるので、tokenizer.json をそのまま使うクラスに書き換える
+tok_dir = "sarashina_tokenizer"
+tokenizer.save_pretrained(tok_dir)
+cfg = json.load(open(f"{tok_dir}/tokenizer_config.json"))
+cfg["tokenizer_class"] = "PreTrainedTokenizerFast"
+json.dump(cfg, open(f"{tok_dir}/tokenizer_config.json", "w"), ensure_ascii=False, indent=1)
+shutil.copy(hf_hub_download(name, "config.json"), tok_dir)   # ないと vLLM がこのディレクトリの config.json を探して ERROR を表示する（動作は変わらない）
+
+t = time.perf_counter()
+llm = LLM(name, tokenizer=tok_dir,
+          dtype="bfloat16" if BF16 else "float16",   # T4 は bfloat16 に非対応なので float16 にする
+          max_model_len=2048,                        # 1 件の最大の長さ（プロンプト + 出力）。既定はモデルの上限 (8192)
+          gpu_memory_utilization=0.6,                # GPU メモリ全体のうち vLLM が使う割合（モデル、CUDA グラフ、KV キャッシュ）。既定は 0.9
+          seed=0)
+print(f"起動 {time.perf_counter() - t:.0f} 秒、GPU メモリ {gpu_memory():.1f} GB")   # torch.compile と CUDA グラフの準備をするので時間がかかる（Colab で 2〜5 分）
+print("vLLM のトークナイザーの分割が SentencePiece と一致:", llm.get_tokenizer().encode(s, add_special_tokens=False) == sp.encode(s))
+```
+
+```python
+# 貪欲法 (temperature=0)。max_tokens の既定は 16 なので必ず指定する
+greedy = SamplingParams(temperature=0, max_tokens=MAX_NEW, repetition_penalty=REP)
+ids = lambda outs: [[t for t in o.outputs[0].token_ids if t != tokenizer.eos_token_id] for o in outs]
+
+llm.chat(conversations[:2], greedy, use_tqdm=False)     # 1 回目は準備に時間がかかるので、計測の前に動かしておく
+t = time.perf_counter()
+vl_single = [ids(llm.chat([c], greedy, use_tqdm=False))[0] for c in conversations[:8]]
+record("vLLM 1 件ずつ", vl_single, time.perf_counter() - t)
+t = time.perf_counter()
+outs = llm.chat(conversations, greedy, use_tqdm=False)  # llm.chat はチャットテンプレートを当ててから生成する
+vl_batch = ids(outs)
+record("vLLM まとめて", vl_batch, time.perf_counter() - t)
+print(pd.DataFrame(results).T.round(2).to_string())
+
+# 入力: llm.chat が作ったトークン列は、transformers の apply_chat_template と同じか
+enc = [tokenizer(p, add_special_tokens=False)["input_ids"] for p in prompts]
+print("\nプロンプトのトークン列が一致:", sum(o.prompt_token_ids == e for o, e in zip(outs, enc)), "/", len(outs))
+# 出力: transformers のバッチ生成と vLLM の出力が一致するか。違う場合は何トークン目から分かれたか
+def prefix(a, b):
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+same = [a == b for a, b in zip(hf_batch, vl_batch)]
+split = [prefix(a, b) for a, b, s in zip(hf_batch, vl_batch, same) if not s]
+print(f"出力が完全に一致: {sum(same)} / {len(same)} 件。一致しない {len(split)} 件で分かれた位置（トークン目）: {sorted(split)}")
+print(f"transformers の 1 件ずつとバッチの一致: {sum(a == b for a, b in zip(hf_single, hf_batch))} / 8 件、"
+      f"vLLM の 1 件ずつとまとめての一致: {sum(a == b for a, b in zip(vl_single, vl_batch))} / 8 件")
+diff = [k for k, s in enumerate(same) if not s]
+i = diff[0] if diff else 0
+print("\n例:", conversations[i][0]["content"])
+print("  transformers:", tokenizer.decode(hf_batch[i]))
+print("  vLLM        :", outs[i].outputs[0].text)
+```
+
+```python
+# 1 つのプロンプトから複数の候補を作る: n で本数、temperature と top_p で多様さ、seed で再現性を決める
+sampling = SamplingParams(n=4, temperature=0.8, top_p=0.95, max_tokens=MAX_NEW, repetition_penalty=REP, seed=0)
+llm.chat(conversations[:2], sampling, use_tqdm=False)   # 計測の前に動かしておく
+t = time.perf_counter()
+outs_n = llm.chat(conversations, sampling, use_tqdm=False)
+seconds = time.perf_counter() - t
+n_tok = sum(len(c.token_ids) for o in outs_n for c in o.outputs)
+print(f"64 件 × 4 本 = {sum(len(o.outputs) for o in outs_n)} 本: {seconds:.1f} 秒、{n_tok / seconds:.0f} トークン/秒")
+print("4 本がすべて違う文になったプロンプト:", sum(len({c.text for c in o.outputs}) == 4 for o in outs_n), "/", len(outs_n))
+outs_n2 = llm.chat(conversations, sampling, use_tqdm=False)   # 同じ設定でもう一度
+print("もう一度実行して 4 本とも同じだったプロンプト:",
+      sum([c.text for c in a.outputs] == [c.text for c in b.outputs] for a, b in zip(outs_n, outs_n2)), "/", len(outs_n))
+print("\n" + conversations[0][0]["content"])
+for c in outs_n[0].outputs:
+    print(" -", c.text.replace("\n", " ")[:80])
+print(f"\nGPU メモリの使用量（このノートブックと vLLM のエンジン）: {gpu_memory():.1f} GB")
+```
+
+```python
+# enforce_eager=True: CUDA グラフを作らずに 1 演算ずつ実行する。起動は速いが、生成は遅くなる
+del llm; gc.collect(); torch.cuda.empty_cache()          # 前のエンジンを止めて GPU を空ける
+print(f"止めたあとの GPU メモリ: {gpu_memory():.1f} GB")
+t = time.perf_counter()
+llm = LLM(name, tokenizer=tok_dir, dtype="bfloat16" if BF16 else "float16", max_model_len=2048,
+          gpu_memory_utilization=0.6, enforce_eager=True, seed=0)
+startup = time.perf_counter() - t
+llm.chat(conversations[:2], greedy, use_tqdm=False)
+t = time.perf_counter()
+vl_eager = ids(llm.chat(conversations, greedy, use_tqdm=False))
+record("vLLM まとめて (enforce_eager)", vl_eager, time.perf_counter() - t)
+print(f"起動 {startup:.0f} 秒、GPU メモリ {gpu_memory():.1f} GB")
+print(pd.DataFrame(results).T.round(2).to_string())
+print("CUDA グラフありとの出力の一致:", sum(a == b for a, b in zip(vl_batch, vl_eager)), "/", len(vl_eager))
+```
+
+- vLLM (Kwon et al., 2023) は、KV キャッシュをブロック単位で管理する PagedAttention と、終わった系列の空きにすぐ次の入力を入れる連続バッチ処理 (continuous batching) で、多数の入力を GPU にすき間なく流す推論エンジンである（Apache 2.0 ライセンス）。T4 (compute capability 7.5) は bfloat16 と FlashAttention に対応していないので `dtype="float16"` にし、アテンションは vLLM が自動で Triton の実装 (TRITON_ATTN) を選ぶ。上の出力は float16 と TRITON_ATTN を指定して T4 より速い別の GPU で実行したもので、T4 の実機では確かめていない。
+- インストール: vLLM 0.34.0 は torch の版を固定しているので、Colab の torch 2.14.1 が 2.14.0 に入れ替わり、huggingface-hub なども上がる（検証の環境で 120 秒。pip が依存関係の衝突を表示する）。新しいランタイムで最初に実行すれば再起動は要らないが、依存ライブラリが .pth ファイルで足す検索パスを `site.addsitedir` で読み直す必要がある（ないと、エンジンの起動中に `No module named 'cutlass'` で止まった）。一般に、読み込み済みの torch は入れ替えられないので、先に torch を import していたらランタイムを再起動する。
+- 速度（同じ 64 件、貪欲法、最大 128 トークン）: transformers は 1 件ずつで 1 件あたり 1.68 秒、64 件のバッチで 2,662 トークン/秒、vLLM は 1 件ずつで 0.30 秒、まとめて 12,059 トークン/秒（transformers のバッチの約 4.5 倍）だった。ただし vLLM の起動に 139 秒かかった（torch.compile と CUDA グラフの準備）ので、数十件を一度だけ処理するなら transformers のバッチ生成で足りる。一般に、件数が多く、出力の長さがばらつくほど vLLM が有利になる。時間は共有の GPU で測った目安で、T4 では遅くなる。
+- 出力の一致: `llm.chat` が作ったプロンプトのトークン列は 64 件すべてで `apply_chat_template` と同じだったが、どちらも貪欲法なのに生成した文が完全に一致したのは 55 / 64 件で、残りは 10〜111 トークン目で分かれた（例では「地球」と「場所」）。float16 ではアテンションの実装やバッチの組み方で末尾の桁が変わり、確率がほぼ同じ候補の順位が入れ替わるためで、同じ方式でも 1 件ずつとまとめての一致は vLLM で 6 / 8 件、transformers で 7 / 8 件だった。vLLM に切り替えたら評価をやり直す。
+- トークナイザー: vLLM も transformers の `AutoTokenizer` で読むので、sarashina2.2 では同じ不具合が起きる（上の出力の「東京都千代田区の」の分割）。直したトークナイザーを保存し、`tokenizer_config.json` のクラスを `PreTrainedTokenizerFast` に書き換えて `tokenizer=` に渡すと、SentencePiece と一致した。不具合の内容は、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。モデルは sarashina2.2-0.5b-instruct（SB Intuitions、MIT ライセンス）。
+- `SamplingParams`: `max_tokens` の既定は 16 で、指定しないと出力が途中で切れる。`SamplingParams` を渡さないときだけモデルの generation_config.json（temperature 0.7、top_p 0.9、repetition_penalty 1.05）が既定値になるので、渡すときは必要な値をすべて書く。`n=4` では 256 本を 2.6 秒（10,180 トークン/秒）で作り、64 件すべてで 4 本が別の文になった。`seed=0` で同じ呼び出しをもう一度実行すると、この実行では 64 件すべてで同じ 4 本になったが、float16 の計算の揺れで変わることもありうるので、完全な再現は前提にしない。
+- GPU メモリ: vLLM は起動時に `gpu_memory_utilization`（GPU 全体に対する割合。既定は 0.9）の分を先に確保し、モデルと CUDA グラフの残りを KV キャッシュにする。ここでは 0.6（T4 で約 9.5GB）にし、transformers のモデルは先に GPU から外した。検証では 24GB の GPU でほぼ同じ量になる 0.38 にし、このノートブックと vLLM のエンジンの分だけを数えると最大 10.1 GB、`del llm` の後は 0.3 GB だった。起動時に「No available memory for the cache blocks」で止まったら、`gpu_memory_utilization` を上げるか `max_model_len` を下げる。
+- `enforce_eager=True` にすると、起動は 34 秒と短くなったが、生成は 2,129 トークン/秒と既定（CUDA グラフあり）の約 6 分の 1 になった。確保するメモリは変わらず（どちらも起動の直後に 9.8 GB）、CUDA グラフの分は KV キャッシュに回る。出力の一致は 53 / 64 件だった。試行錯誤の段階など、起動の速さを優先するときに使う。
 
 ## LLM を 4bit 量子化して少ないメモリで動かす {llm_4bit gpu norun}
 
@@ -1379,3 +1563,174 @@ print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e
 - データ: hh-rlhf の元のデータセットカードには、選好（報酬）モデルの学習用で、対話エージェントを教師ありで学習するためのものではない（有害なモデルになりうる）と書かれている。DPO は報酬モデルを作らず、対話モデルそのものをこの応答で直接学習するので、この注意が当てはまる。ここで作るモデルは手法を試すためのもので、公開や実用には使わない。harmless-base には差別や暴力などの不快な内容が含まれるので、ここでは使っていない。日本語は DeepL による翻訳で、訳の崩れも混じる（上の 1 件目の「」の対応など）。
 - `DPOConfig` は、`TrainingArguments` と違って `bf16=True`、学習率 1e-6、`gradient_checkpointing=True` が既定。T4 では bf16 が使えないので fp16 を明示し、LoRA では学習率を上げる（ここでは 5e-5）。β を大きくすると参照モデルから離れにくくなる。`loss_type="ipo"` などで損失を IPO などに変えられる。trl 1.18.0 で確かめた（版によって引数や既定値が変わることがある）。
 - GPU メモリの最大使用量は学習時の 9.2GB で、3B の判定役を読み込んだ後も変わらなかった。sarashina2.2 のトークナイザーの修正 (`load_tokenizer`) については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 正解を判定できる課題で LLM を強化学習する (GRPO) {grpo gpu}
+
+算数の文章題のように正解を機械的に判定できる課題で、正解なら報酬を与える関数を書き、LLM が自分で生成した答えから強化学習 (GRPO) で学ばせたい。学習の前後で、学習に使っていない問題の正解率を比べる。
+
+```python
+!pip install -q trl==1.18.0 peft==0.21.2 torchao==0.18.0   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
+```
+
+```python
+import json, re, time, unicodedata
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from datasets import Dataset, load_dataset
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
+
+set_seed(0)
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # この章の LoRA・DPO のレシピと同じ 0.5B のモデル (MIT License)
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
+
+# 学習用: SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0)。GSM8K (Cobbe et al., 2021、MIT License) のテストの 251 問目以降の
+# 1,069 問を GPT-4 で日本語に訳したもの。先頭の 250 問は MGSM と重なるので、開発元があえて除いている
+train_raw = load_dataset("json", data_files=hf_hub_download("SakanaAI/gsm8k-ja-test_250-1319", "gsm8k-ja-test_250-1319.jsonl",
+                                                            repo_type="dataset"), split="train")
+# 評価用: MGSM の日本語（juletxara/mgsm の ja）の 250 問全部。GSM8K のテストの先頭 250 問を人手で訳したもので、学習用の問題とは重ならない
+# ライセンスは、元のリポジトリでは CC BY 4.0、データセットカードのメタデータでは CC BY-SA 4.0
+test_raw = load_dataset("juletxara/mgsm", "ja", split="test")
+print(len(train_raw), len(test_raw))
+print(train_raw[1]["question"], "→", train_raw[1]["answer_number"])
+```
+
+```python
+# 指示: この章の Chain-of-Thought のレシピの「CoT (0-shot)」と同じ。途中の計算を書かせ、最後に答えを決まった形で書かせる
+INSTRUCTION = "次の問題に答えてください。ステップごとに考えて途中の計算を書き、最後に「答えは〇〇です。」と書いてください。"
+def to_prompt(question):
+    return [{"role": "user", "content": f"{INSTRUCTION}\n\n問題: {question}"}]
+
+def normalize(text):
+    return unicodedata.normalize("NFKC", text).replace(",", "")
+
+def final_answer(text):
+    """決まった形（応答の最後の「答えは〇〇です。」）で書かれた答えを取り出す。形が違えば None"""
+    m = re.search(r"答えは\s*[^\d\-\n]{0,5}?(-?\d+(?:\.\d+)?)[^\d\n]{0,10}$", normalize(text).strip())
+    return float(m.group(1)) if m else None
+
+def loose_answer(text):
+    """形を問わず取り出す（この章の Chain-of-Thought のレシピの取り出し方の簡略版）: 「答え」の後ろ → 最後に出てきた数値"""
+    text = normalize(text)
+    found = re.findall(r"答え[はが]?\s*[:：]?[^\d\-\n]*(-?\d+(?:\.\d+)?)", text) or re.findall(r"-?\d+(?:\.\d+)?", text)
+    return float(found[-1]) if found else None
+
+# 報酬関数: GRPOTrainer は、生成した応答 (completions) と、データセットのほかの列（ここでは answer_number）をキーワード引数で渡す
+def correct_reward(completions, answer_number, **kwargs):
+    """決まった形で書いた答えが正解なら 1、それ以外は 0"""
+    return [1.0 if final_answer(c[0]["content"]) == float(a) else 0.0 for c, a in zip(completions, answer_number)]
+
+def format_reward(completions, **kwargs):
+    """正誤に関係なく、応答が「答えは〇〇です。」の形で終わっていれば 0.2"""
+    return [0.2 if final_answer(c[0]["content"]) is not None else 0.0 for c in completions]
+
+examples = [[{"content": "3 + 4 = 7 なので、答えは7個です。"}], [{"content": "答えは7個です。よって 3 + 4 = 7"}], [{"content": "答えは8です。"}]]
+print(correct_reward(examples, [7, 7, 7]), format_reward(examples))
+```
+
+```python
+@torch.no_grad()
+def evaluate(model, questions, max_new_tokens=320, bs=64):
+    """貪欲法で解かせて、応答の文字列のリストと、生成した平均のトークン数を返す"""
+    model.eval()
+    tokenizer.padding_side = "left"
+    outs, n_tok = [], []
+    for i in range(0, len(questions), bs):
+        enc = tokenizer.apply_chat_template([to_prompt(q) for q in questions[i:i + bs]], add_generation_prompt=True,
+                                            return_tensors="pt", return_dict=True, padding=True).to(model.device)
+        out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        gen = out[:, enc["input_ids"].shape[1]:]
+        n_tok += (gen != tokenizer.pad_token_id).sum(1).tolist()
+        outs += tokenizer.batch_decode(gen, skip_special_tokens=True)
+    return outs, np.mean(n_tok)
+
+def scores(outs, gold):
+    gold = np.array(gold, dtype=float)
+    strict = np.array([final_answer(o) == g for o, g in zip(outs, gold)])
+    loose = np.array([loose_answer(o) == g for o, g in zip(outs, gold)])
+    return strict, loose, np.mean([final_answer(o) is not None for o in outs])
+
+gold = test_raw["answer_number"]
+t = time.time()
+before, before_len = evaluate(model, test_raw["question"])   # Colab の T4 で 1〜2 分
+b_strict, b_loose, b_fmt = scores(before, gold)
+print(f"学習前: 正解率（決まった形の答え）{b_strict.mean():.3f}、正解率（形を問わない）{b_loose.mean():.3f}、"
+      f"形を守った割合 {b_fmt:.3f}、平均 {before_len:.0f} トークン（{time.time() - t:.0f} 秒）")
+print("--- 学習前の出力の例:\n", before[0])
+```
+
+```python
+from peft import LoraConfig
+from trl import GRPOConfig, GRPOTrainer
+
+train_ds = Dataset.from_list([{"prompt": to_prompt(r["question"]), "answer_number": r["answer_number"]} for r in train_raw])
+lora = LoraConfig(r=16, lora_alpha=32, task_type="CAUSAL_LM",
+                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+args = GRPOConfig(
+    output_dir="grpo-out", max_steps=40, learning_rate=5e-5, warmup_steps=5,
+    num_generations=8,                  # 1 問につき 8 個の応答を生成し、その中で報酬を比べる（グループ）
+    per_device_train_batch_size=8, gradient_accumulation_steps=4,   # 1 ステップの更新に 32 応答 = 4 問 × 8 個
+    steps_per_generation=8,             # 生成は 64 応答（8 問）をまとめて行い、2 ステップの更新に使う（生成の回数を減らして時間を短くする）
+                                        # そのため 2 ステップ目の更新は、1 ステップ前のモデルが生成した応答を使う
+    max_completion_length=320, temperature=1.0,
+    logging_steps=5, save_strategy="no", report_to="none", seed=0,
+    gradient_checkpointing=False, bf16=BF16, fp16=not BF16)   # GRPOConfig は bf16=True と gradient_checkpointing=True が既定なので明示する
+trainer = GRPOTrainer(model=model, reward_funcs=[correct_reward, format_reward], args=args,
+                      train_dataset=train_ds, processing_class=tokenizer, peft_config=lora)
+trainer.model.print_trainable_parameters()
+t = time.time()
+trainer.train()   # Colab の T4 で 20〜25 分程度
+print(f"学習 {time.time() - t:.0f} 秒、GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 報酬の推移（5 ステップごとの平均。1 ステップ = 4 問 × 8 個の応答）
+logs = pd.DataFrame([l for l in trainer.state.log_history if "reward" in l])
+cols = {"step": "ステップ", "rewards/correct_reward/mean": "正解の報酬", "rewards/format_reward/mean": "形式の報酬",
+        "reward_std": "報酬の標準偏差", "completions/mean_length": "応答の長さ", "completions/clipped_ratio": "打ち切りの割合"}
+print(logs[list(cols)].rename(columns=cols).round(3).to_string(index=False))
+```
+
+```python
+# 学習後に、同じ評価用の問題を解かせて比べる
+model = trainer.model
+t = time.time()
+after, after_len = evaluate(model, test_raw["question"])   # Colab の T4 で 1〜2 分
+a_strict, a_loose, a_fmt = scores(after, gold)
+print(pd.DataFrame({"学習前": [b_strict.mean(), b_loose.mean(), b_fmt, before_len], "学習後": [a_strict.mean(), a_loose.mean(), a_fmt, after_len]},
+                   index=["正解率（決まった形の答え）", "正解率（形を問わない）", "形を守った割合", "平均のトークン数"]).round(3).to_string())
+
+def diff_ci(x, y, n_boot=2000):   # 同じ問題で比べる対応のあるブートストラップで、正解率の差の 95% 信頼区間
+    idx = np.random.default_rng(0).integers(0, len(x), (n_boot, len(x)))
+    d = x[idx].mean(1) - y[idx].mean(1)
+    return f"{(x.mean() - y.mean()) * 100:+.1f} ポイント [{np.percentile(d, 2.5) * 100:+.1f}, {np.percentile(d, 97.5) * 100:+.1f}]"
+
+print("学習後 − 学習前（決まった形の答え）:", diff_ci(a_strict, b_strict))
+print("学習後 − 学習前（形を問わない）:", diff_ci(a_loose, b_loose))
+print(f"GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+# 問題ごとの入れ替わり（形を問わない正解で数える）
+print(pd.crosstab(pd.Series(b_loose, name="学習前"), pd.Series(a_loose, name="学習後")).rename(index=str, columns=str).to_string())
+
+# 出力の例: 学習前は形を守らずに正解していた問題と、学習前は正解で学習後に間違えた問題
+for label, hits in [("形が直った", ~b_strict & b_loose & a_strict), ("学習後に間違えた", b_loose & ~a_loose)]:
+    i = int(np.flatnonzero(hits)[0])
+    print(f"\n=== {label}例: 問題 {i}（正解 {gold[i]:g}）\n[前] {before[i][-250:]}\n[後] {after[i][-250:]}")
+```
+
+- GRPO (Group Relative Policy Optimization) は、Shao et al. (2024) が DeepSeekMath の論文で提案した強化学習の方法で、PPO の価値関数のモデルを使わず、同じ問題に対して生成した複数の応答（グループ、ここでは 8 個）の報酬の平均と標準偏差から、各応答がグループの中でどれだけ良かったか（アドバンテージ）を決める。DeepSeek-R1 (2025) は、数学の問題で、決まった形で書かせた最終的な答えの正誤と、形式を守ったかどうかを規則で判定する報酬を使った。ここも同じ考え方で、正解の報酬 (1) と形式の報酬 (0.2) を足している（このように規則で判定できる報酬は、検証できる報酬 (verifiable rewards) と呼ばれる）。グループの 8 個がすべて同じ報酬だとアドバンテージが 0 になって学習に使われないので、学習前に正解がほとんど出ない課題（正解率がほぼ 0）では、正解の報酬からは学べない（形式の報酬で差がつけば、形式だけは学ぶ）。
+- この章の「選好データで LLM を調整する (DPO)」との違い: DPO は人が付けた選好の組（chosen と rejected）が要り、その応答は別のモデルの出力（方策外のデータ）だった。GRPO は選好の組も推論の過程の手本も要らず、問題と正解の数値と、それを判定する報酬関数だけで学習できる。応答は学習中のモデル自身がその場で生成する（方策上のデータ）。その代わり、学習のたびに生成するので時間がかかる。正解を機械的に判定できない課題（応答の役に立ち方など）には、判定役のモデル（報酬モデル）が要る。
+- 上の出力では、正解率（決まった形の答え）は 0.072 → 0.212（+14.0 ポイント [+8.8, +19.2]）、形を守った割合は 0.200 → 0.944 に上がった。しかし形を問わない正解率は 0.252 → 0.216（−3.6 ポイント [−9.6, +1.6]）で、上がらなかった（信頼区間は 0 をまたぐ）。問題ごとに見ると、30 問が正解から不正解に、21 問が不正解から正解に変わった。この実行で身についたのは「決まった形で答える」ことで、40 ステップ（160 問）の学習では解く力は上がらなかった。報酬の推移でも、正解の報酬の上昇（0.05 前後 → 0.12〜0.26）は形式の報酬の上昇 (0.05 → 0.18) と同時に起きている。1 ステップは 4 問だけなので、正解の報酬は問題の難しさで大きく揺れる。また、GPU の計算は実行ごとにわずかに変わり、それがサンプリングで生成する応答と学習の経過を変えるので、同じ種でも学習後の正解率は実行ごとに変わる。1 回の実行で結論を出さず、種を変えて何回か学習して比べる。
+- 応答は短くなった（評価で平均 192 → 130 トークン、学習中に上限の 320 トークンで打ち切られた割合は 0.21 → 0.01〜0.05）。打ち切られた応答は最後の「答えは〇〇です。」まで書けずに報酬が 0 になるので、短い応答が有利になると考えられる（短くなったことが正解率に影響したかどうかは確かめていない）。報酬が形式だけで取れるように設計すると、推論を書かずに答えだけを出すような、報酬は上がるが目的に合わない学習（報酬ハッキング）が起きることがある。報酬だけでなく、応答の長さと出力の例も見る。
+- この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」との関係: 指示文はそのレシピの「CoT (0-shot)」と同じで、推論を書かせてから答えさせる。GRPO は推論の過程には報酬を与えず、最後の答えだけを判定する。推論の書き方は、正解に結びつくかどうかを通じて間接的に学ばれるだけで、上の「形が直った例」でも、学習後の途中の計算は筋が通らないのに最後の答えは正解になっている。そのレシピでは、形の違う答えも取り出せるように取り出し方を工夫したが、ここでは答えの形そのものを LoRA の重みに覚えさせた。正解の判定には、そのレシピの取り出し方より厳しい「決まった形」を使っている。取り出し方が緩いと、途中に出てきた数値がたまたま正解と一致しただけの応答にも報酬を与えてしまう。
+- 時間とメモリ: 検証に使った GPU（T4 と同じ float16 の経路）では学習が 497 秒、全体で約 11 分、GPU メモリの最大使用量は 10.5GB だった。T4 では応答の生成が遅いので、この 2〜2.5 倍程度かかると見込んでいる（T4 では測っていない）。応答の生成は `use_vllm=True` で vLLM を使うと速くなるとされるが、Colab の torch などを入れ替えることになるので、ここでは使っていない（確かめていない）。`GRPOConfig` は trl 1.18.0 では `beta=0`（参照モデルとの KL の罰則なし、参照モデルを読み込まない）、学習率 1e-6、`bf16=True`、`gradient_checkpointing=True`、`loss_type="dapo"` が既定で、版によって変わることがある。
+- データ: 学習用の SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0) は、データセットカードによると GPT-4 (gpt-4-0125-preview) で訳したもので、評価用の MGSM と重ならないように GSM8K のテストの 251 問目以降だけを使っている。どちらも GSM8K のテストの問題なので、ここで学習したモデルを GSM8K で評価すると、学習した問題で評価することになる。MGSM のライセンスと、評価データが事前学習に含まれている可能性については、この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の注意書きを参照。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。

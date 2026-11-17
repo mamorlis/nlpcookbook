@@ -1,6 +1,6 @@
 # データの収集と入出力
 
-テキストを集める、ファイルや音声から取り出す、きれいにして分割する。実験の前にやること。JSON Lines や CSV の読み書きのようなファイル操作の小技は、付録の「Colab と Python の小技」を参照。
+テキストを集める、ファイルや音声から取り出す、きれいにする、品質で選ぶ、分割する。実験の前にやること。JSON Lines や CSV の読み書きのようなファイル操作の小技は、付録の「Colab と Python の小技」を参照。
 
 ## 青空文庫から作品をダウンロードして本文を取り出す {aozora_download}
 
@@ -401,7 +401,7 @@ print("正解:", df["raw_transcription"][0])
 - 音量が 40dB ほど小さい 3 文のうち 2 文は丸ごと抜けた。ffmpeg の dynaudnorm で音量をそろえると、どの文も 9 割以上の文字が出た。
 - Silero VAD で無音のところで区切ってバッチで認識すると、CER 0.022 と逐次処理に近く、時間は短かった。区間の開始時刻を足せば字幕 (SRT) になる。句読点が要るなら日本語の形態素解析と文分割の章の「句読点のない文章に読点と句点を付ける（句読点の復元）」を参照。
 - 無音や雑音にも文字を出す（幻覚）が、VAD はどちらも発話区間 0 個と判定したので、VAD で区切れば防げる。発話のあとの無音では、この例では幻覚は出なかった。
-- 書き起こしの先は、固有表現抽出の章の「音声認識の結果から固有表現を抽出する」と、要約と平易化の章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」を参照。議事録には pyannote などの話者分離を組み合わせる（モデルの利用条件への同意と HF のトークンが要る。kotoba-whisper-v2.2 は話者分離を組み込んだパイプライン）。
+- 書き起こしの先は、固有表現抽出の章の「音声認識の結果から固有表現を抽出する」と、要約と平易化の章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」を参照。議事録には pyannote などの話者分離を組み合わせる（モデルの利用条件への同意と HF のトークンが要る。kotoba-whisper-v2.2 は話者分離を組み込んだパイプライン）。字幕を作って翻訳する例は、機械翻訳の章の「動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約）」を参照。
 
 ## テキストデータの重複と不良データを取り除く {dedup_clean}
 
@@ -446,6 +446,219 @@ df[df["reason"] == ""]["text"].tolist()
 - 何を何件捨てたかを理由ごとに記録しておく。フィルタのバグでデータの大半を捨てていた、という事故に気づける。
 - 学習データと評価データの間の重複（リーク）も必ず確認する: `set(train_keys) & set(test_keys)`。
 - ほぼ同じ内容の文書（ニアデュプリケート）は、文字列処理と正規化の章の MinHash のレシピで検出する。
+
+## 事前学習用の Web テキストを品質で選ぶ（規則によるフィルタと、LLM の採点で学習した品質分類器） {pretrain_data_filter gpu}
+
+Web から集めた日本語テキストを LLM の事前学習に使う前に、品質の低い文書を除きたい。(1) FineWeb-2 が日本語用に調整した規則（繰り返しの多さ、句読点で終わる行の割合、記号の多さなど）と、(2) FineWeb-Edu の方式の品質分類器（LLM に一部の文書の教育的な価値を採点させ、その点数を文の埋め込みからの回帰で学習して全体に当てる）で選び、それぞれで捨てられた文書、残る割合、2 つの方法の一致を確かめる。
+
+（T4 の GPU ランタイムで、モデルのダウンロードを含めて全体で 20〜25 分程度かかる。）
+
+```python
+# datatrove: Hugging Face のデータ処理ライブラリ（FineWeb の作成に使われた）。日本語の語の分割に spaCy + SudachiPy を使う。fasteners は語のリストのダウンロードに要る
+!pip install -q datatrove==0.10.1 sudachipy==0.7.0 sudachidict_core==20261015 fasteners==0.20
+```
+
+```python
+import numpy as np
+import pandas as pd
+from datasets import load_dataset
+
+# mC4 の日本語（allenai/c4 の multilingual、ODC-BY。Common Crawl の利用規約にも従う）の検証用の 1 ファイル（約 40MB）から 3,000 文書
+web = load_dataset("allenai/c4", data_files="multilingual/c4-ja-validation.tfrecord-00000-of-00008.json.gz", split="train")
+docs = web.shuffle(seed=0).select(range(3000))
+df = pd.DataFrame({"text": docs["text"], "url": docs["url"]})
+print(len(web), "文書から", len(df), "文書。文字数:", df["text"].str.len().describe().round(0).to_dict())
+
+def short(s, n=70):
+    """表示用: 改行を / にして先頭 n 文字だけにする"""
+    return s.replace("\n", " / ")[:n]
+```
+
+```python
+# (1) 規則によるフィルタ。datatrove のフィルタに、FineWeb-2 が日本語 (jpn_Jpan) 用に調整した閾値を渡す
+# （閾値は huggingface/fineweb-2 の configs/jpn_Jpan.yml と fineweb-2-pipeline.py、Apache 2.0）
+# 最初に引っかかった規則で止めずに、すべての規則を全文書に当てて理由を記録する（Colab で 5〜8 分）
+from datatrove.data import Document
+from loguru import logger
+from datatrove.pipeline.filters import C4BadWordsFilter, FineWebQualityFilter, GopherQualityFilter, GopherRepetitionFilter
+
+logger.remove()      # datatrove のログ（語のリストのダウンロードの表示など）を出さない
+filters = {
+    # C4 の不適切な語のリスト（LDNOOBW の日本語、CC BY 4.0）の語を含む文書を除く。FineWeb-2 は使っていない
+    "不適切な語": C4BadWordsFilter(default_language="ja"),
+    # Gopher の繰り返しの規則: 重複行の割合、最頻の n-gram (n=2〜4) と重複する n-gram (n=5〜10) が占める文字の割合
+    "繰り返し": GopherRepetitionFilter(
+        language="ja", dup_para_frac=0, dup_line_char_frac=0, dup_para_char_frac=0, dup_line_frac=0.328,
+        top_n_grams=((2, 0.239), (3, 0.196), (4, 0.172)),
+        dup_n_grams=((5, 0.243), (6, 0.225), (7, 0.207), (8, 0.19), (9, 0.175), (10, 0.159))),
+    # FineWeb の規則: 句読点で終わる行の割合、重複行の文字の割合、改行の多さ（FineWeb-2 は短い行の規則を外している）
+    "行の形": FineWebQualityFilter(language="ja", short_line_thr=999, char_duplicates_ratio=0.1, line_punct_thr=0.096, new_line_ratio=0.13),
+    # Gopher の品質の規則: 語数、平均の語の長さ、記号（# と …）の多さ、文字を含む語の割合、よく使われる語（の、に、を…）を 2 種類以上含むか
+    "語の統計": GopherQualityFilter(
+        language="ja", min_avg_word_length=1, max_avg_word_length=6, max_non_alpha_words_ratio=0.759, min_stop_words=2,
+        stop_words=["の", "に", "を", "は", "た", "て", "が", "と", "で", "年", "し", "・", "月", "れ", "さ"]),
+}
+
+def apply(f, i, text):
+    r = f.filter(Document(text=text, id=str(i)))
+    return "" if r is True else r[1]          # 通れば "", 落ちれば理由の名前
+
+R = pd.DataFrame({k: [apply(f, i, t) for i, t in enumerate(df["text"])] for k, f in filters.items()})
+df["rule_keep"] = (R == "").all(axis=1)
+chars = df["text"].str.len()
+print(f"規則をすべて通った文書: {df['rule_keep'].sum()} / {len(df)} ({df['rule_keep'].mean():.1%})、文字数では {chars[df['rule_keep']].sum() / chars.sum():.1%}")
+print(pd.DataFrame({"落ちた文書": (R != "").sum(), "その規則だけで落ちた文書": ((R != "").sum(axis=1).eq(1).values[:, None] & (R != "")).sum()}))
+for k in R:
+    print(k, R[k].value_counts().drop("", errors="ignore").to_dict())
+```
+
+```python
+from collections import Counter
+
+# 不適切な語の規則で、どの語に一致したか（日本語は語の境界を見ずに部分文字列で探す）
+bad_re = filters["不適切な語"]._get_badwords("ja")
+hits = Counter(w for t in df.loc[R["不適切な語"] != "", "text"] for w in set(bad_re.findall(t.lower())))
+print(f"一致した語は {len(hits)} 種類。上位の多くは成人向けの語なので、ここでは表示しない")
+print("普通の語で一致した文書の数:", {w: hits[w] for w in ["嫌い", "支配", "ラバー"]})
+
+# 理由ごとに、落ちた文書の例を見る。表示する例は、不適切な語に引っかからず、成人向けの語も含まない文書から選ぶ（表示のためだけ）
+clean_view = (R["不適切な語"] == "") & ~df["text"].str.contains("エロ|アダルト|無修正|風俗")
+for k in ["繰り返し", "行の形", "語の統計"]:
+    for reason, n in R[k].value_counts().items():
+        if reason and n >= 10:
+            print(f"--- {k}: {reason}（{n} 文書）")
+            for t in df.loc[(R[k] == reason) & clean_view, "text"].head(2):
+                print("   ", short(t))
+print("--- 規則をすべて通った文書（無作為に 6 件）")
+for t in df.loc[df["rule_keep"]].sample(6, random_state=0)["text"]:
+    print("   ", short(t))
+```
+
+```python
+# (2) 品質分類器の学習データ: 1,000 文書を LLM に 0〜5 点で採点させる（FineWeb-Edu の論文の付録 F.1 にある加点方式のプロンプトを、簡略化して日本語にしたもの）
+# LLM: Qwen3-4B-Instruct-2507（Alibaba の Qwen チーム、Apache 2.0）。T4 で 8〜12 分
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+torch.manual_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # T4 は bf16 が使えないので float16
+name = "Qwen/Qwen3-4B-Instruct-2507"
+tok = AutoTokenizer.from_pretrained(name)
+tok.padding_side = "left"
+lm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+PROMPT = """以下は Web ページから抜き出した文章です。小学校から中学校までの学習に役立つ、教育的な価値があるかを、次の加点方式で 0〜5 点で採点してください。
+
+- 教育的な話題について基本的な情報を含んでいれば 1 点を加える（広告や宣伝など無関係な内容が混じっていてもよい）。
+- 教育に関係する要素を扱っているが、学校の基準にはそろっておらず、教育的でない内容が混じっていたり、まとまりが悪かったりする場合は、さらに 1 点を加える。
+- 教育に使うのに適していて、学校の教育課程に関係する重要な概念を紹介していれば、3 点目を加える。説明が網羅的でなくても、余計な情報が含まれていてもよい。
+- 小学校から中学校の学習に非常に関係が深く役立ち、筋の通った明快な書き方をしていれば、4 点目を加える。教科書の一節やチュートリアルのような内容で、余計な内容がほとんどない。
+- 小学校から中学校の教育に非常に優れていて、詳しい説明があり、余計な内容がまったくなければ、5 点目を加える。
+
+文章:
+{text}
+
+点数を 0〜5 の整数 1 つだけで答えてください。"""
+digit_ids = [tok.convert_tokens_to_ids(str(k)) for k in range(6)]     # 「0」〜「5」はそれぞれ 1 トークン
+
+@torch.no_grad()
+def llm_score(texts, batch_size=8):
+    """次のトークンが「0」〜「5」になる確率から、点数の期待値を返す（文書は先頭 1,000 文字だけを見せる）"""
+    prompts = [tok.apply_chat_template([{"role": "user", "content": PROMPT.format(text=t[:1000])}], add_generation_prompt=True, tokenize=False)
+               for t in texts]
+    order = np.argsort([len(p) for p in prompts])      # 長さの近いものをまとめてパディングを減らす
+    scores, mass = np.zeros(len(texts)), np.zeros(len(texts))
+    for i in range(0, len(texts), batch_size):
+        idx = order[i:i + batch_size]
+        enc = tok([prompts[j] for j in idx], return_tensors="pt", padding=True).to(lm.device)
+        p = lm(**enc, logits_to_keep=1).logits[:, -1].float().softmax(-1)[:, digit_ids].cpu().numpy()
+        mass[idx] = p.sum(1)                            # 数字以外のトークンに確率が流れていないかの確認用
+        scores[idx] = (p / p.sum(1, keepdims=True)) @ np.arange(6)
+    return scores, mass
+
+ann = df.sample(1000, random_state=0).index           # 採点する文書（全体から無作為に選ぶ）
+df.loc[ann, "llm"], mass = llm_score(list(df.loc[ann, "text"]))
+print(f"数字のトークンの確率の合計: 中央値 {np.median(mass):.3f}、最小 {mass.min():.3f}")
+print("点数（四捨五入）の分布:", df.loc[ann, "llm"].round().astype(int).value_counts().sort_index().to_dict())
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+a = df.loc[ann].sort_values("llm")
+print("--- LLM の点数が高い文書")
+for _, r in a[clean_view[a.index]].tail(8)[::-1].iterrows():
+    print(f"{r.llm:4.2f}  {short(r.text)}")
+print("--- 規則をすべて通ったが、LLM の点数が 0.5 未満の文書（無作為に 6 件）")
+for _, r in a[clean_view[a.index] & a["rule_keep"] & (a["llm"] < 0.5)].sample(6, random_state=0).iterrows():
+    print(f"{r.llm:4.2f}  {short(r.text)}")
+```
+
+```python
+# LLM の点数を、文の埋め込み + リッジ回帰で学習する。5 分割の交差検証で、採点していない文書への当てはまりを確かめる
+import gc
+from scipy.stats import spearmanr
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import RidgeCV
+from sklearn.metrics import precision_recall_curve, roc_auc_score
+from sklearn.model_selection import KFold, cross_val_predict
+
+lm = None; gc.collect(); torch.cuda.empty_cache()      # LLM の GPU メモリを空ける
+st = SentenceTransformer("intfloat/multilingual-e5-small", device="cuda")   # MIT ライセンス。最大 512 トークン
+X = st.encode(["passage: " + t[:1000] for t in df["text"]], normalize_embeddings=True, batch_size=128)   # LLM に見せた範囲（先頭 1,000 文字）。e5 はさらに 512 トークンで切る
+
+# 「残す」文書: LLM の点数を四捨五入して 2 点以上（FineWeb-Edu は 3 点以上。ここで 2 にした理由は注意書き）
+y = df.loc[ann, "llm"].to_numpy()
+good = y >= 1.5
+reg = RidgeCV(alphas=np.logspace(-2, 2, 9))
+oof = cross_val_predict(reg, X[ann], y, cv=KFold(5, shuffle=True, random_state=0))
+print(f"交差検証の予測: 最大 {oof.max():.2f}、スピアマンの順位相関 {spearmanr(y, oof).statistic:.3f}、"
+      f"2 点以上（{good.sum()} 文書）の判定の ROC AUC {roc_auc_score(good, oof):.3f}")
+# 回帰の予測は平均（ほとんどが 0 点）の側に縮むので、1.5 では切れない。交差検証の予測で F1 が最大になる閾値を選ぶ
+prec, rec, ths = precision_recall_curve(good, oof)
+f1 = 2 * prec * rec / np.maximum(prec + rec, 1e-12)
+best = f1[:-1].argmax()
+THRESHOLD = ths[best]
+print(f"分類器の閾値 {THRESHOLD:.2f}: 適合率 {prec[best]:.3f}、再現率 {rec[best]:.3f}、F1 {f1[best]:.3f}")
+
+reg.fit(X[ann], y)                                     # 採点した 1,000 文書すべてで学習し直し、3,000 文書に当てる
+df["clf"] = reg.predict(X)
+df["clf_keep"] = df["clf"] >= THRESHOLD
+print(f"分類器で残る文書: {df['clf_keep'].sum()} / {len(df)} ({df['clf_keep'].mean():.1%})、"
+      f"文字数では {chars[df['clf_keep']].sum() / chars.sum():.1%}（採点した 1,000 文書で LLM が 2 点以上: {good.mean():.1%}）")
+```
+
+```python
+# 規則と分類器の一致
+from sklearn.metrics import cohen_kappa_score
+
+print(pd.crosstab(df["rule_keep"].map({True: "規則: 残す", False: "規則: 捨てる"}),
+                  df["clf_keep"].map({True: "分類器: 残す", False: "分類器: 捨てる"}), margins=True, margins_name="計"))
+print(f"一致率 {(df['rule_keep'] == df['clf_keep']).mean():.3f}、カッパ係数 {cohen_kappa_score(df['rule_keep'], df['clf_keep']):.3f}")
+rk = df.loc[ann, "rule_keep"]
+print(f"採点した 1,000 文書で、LLM が 2 点以上の割合: 規則で残す文書 {good[rk].mean():.1%}、規則で捨てる文書 {good[~rk].mean():.1%}、"
+      f"LLM の判定と規則のカッパ係数 {cohen_kappa_score(rk, good):.3f}")
+both = df["rule_keep"] & df["clf_keep"]
+print(f"両方で残す: {both.sum()} 文書 ({both.mean():.1%})、文字数では {chars[both].sum() / chars.sum():.1%}")
+
+# 規則で落ちた理由ごとの、分類器の点数の平均（採点した文書では LLM の点数も）
+# 複数の規則で落ちた文書は、最初に引っかかった規則（filters の順）に数える。10 文書以上の理由だけを表示する
+reason = R.apply(lambda row: next((f"{k}: {v}" for k, v in row.items() if v), "（規則をすべて通る）"), axis=1)
+g = df.assign(reason=reason).groupby("reason")
+print(pd.DataFrame({"文書数": g.size(), "分類器の点数": g["clf"].mean(), "LLM の点数（採点した文書）": g["llm"].mean()}).query("文書数 >= 10").round(2).sort_values("分類器の点数").to_string())
+
+print("--- 規則では捨てるが、分類器の点数が高い文書")
+for i in df[~df["rule_keep"] & clean_view].nlargest(6, "clf").index:
+    print(f"{df.clf[i]:4.2f}  [{reason[i]}]  {short(df.text[i], 60)}")
+```
+
+- この章の「テキストデータの重複と不良データを取り除く」の次の段階にあたる。そこで完全な重複や明らかな不良を除き（大量の文書のほぼ重複は、文字列処理と正規化の章の「MinHash と LSH で大量文書からほぼ重複を見つける」）、ここで文書の品質で選ぶ。規則は FineWeb-2（Penedo ら 2025）が日本語用に調整した閾値を datatrove に渡したもので、繰り返しの規則と語の統計の規則は Gopher（Rae ら 2021）、行の形の規則は FineWeb（Penedo ら 2024）にならっている。FineWeb-2 は C4（Raffel ら 2020）の規則を使っていないが、ここでは C4 の不適切な語のリストを加えた。
+- 規則をすべて通ったのは 3,000 文書のうち 904 文書（30.1%、文字数では 24.0%）だった。落とした数が多いのは、数字や記号だけの語が多すぎる（gopher_below_alpha_threshold、1,047 文書）、句読点で終わる行が 9.6% 未満（line_punct_ratio、879 文書）、5 語の連なりの重複が多い（duplicated_5_n_grams、374 文書）で、商品名や型番の羅列、メニューや見出しだけの行が並ぶページ、中国語のページが落ちた。mC4 はページの行をそのまま残している（Xue ら 2021 は C4 の句読点の規則の代わりに、200 文字以上の行が 3 行以上あることを求めた）。trafilatura で本文を取り出した FineWeb-2 のテキストに合わせた閾値なので、このデータでは多めに落ちている可能性がある（FineWeb-2 のデータでは確かめていない）。閾値は、落ちた例と残った例を見て決め直す。
+- 不適切な語の規則は 762 文書 (25.4%)を落とし、うち 368 文書はこの規則だけで落ちた。日本語は語の境界を見ずに部分文字列で探すので、「嫌い」（121 文書）、「支配」（39 文書）、「ラバー」（33 文書）のような普通の語でも落ちる。datatrove も「sm」「グロ」「女の子」は落としすぎるとして除外している。使うなら、一致した語を数えてリストを見直す。
+- 規則をすべて通った文書にも、「中郡大磯町で切手買取りの優良業者とは？」や「ホワイトニング 効果なしでできるダイエット」のような、地名や語を差し替えて量産された検索エンジン向けのページが残った。文章の形が整っていれば規則は通るので、内容は分類器で見る。
+- LLM の採点は FineWeb-Edu（Penedo ら 2024）の方式にならった。FineWeb-Edu は Llama-3-70B-Instruct に 46 万ページを 0〜5 点で採点させ（点数の理由も書かせる）、Snowflake-arctic-embed-m に回帰の出力層を付けて学習し、四捨五入して 3 点以上を残した（3 点の判定で F1 82%）。ここでは T4 に載る Qwen3-4B-Instruct-2507 に 1,000 文書を採点させ、理由を書かせずに次のトークンの確率から期待値をとった（数字のトークンの確率の合計は最小でも 0.912）。点数は 0 点に偏り（889 文書）、3 点以上は 23 文書 (2.3%)しかなかったので、2 点以上（55 文書、5.5%）を残す側にした。中学理科の「消化と吸収」や地震計の解説が 4 点前後になった一方、「総ビリルビン」の用語解説は 0 点だった。4B の LLM の採点は、人や大きな LLM の判断と比べて確かめていない。
+- 埋め込み + リッジ回帰の分類器は、5 分割の交差検証でスピアマンの順位相関 0.601、2 点以上の判定の ROC AUC 0.916 だった。ほとんどが 0 点のデータで回帰すると予測が 0 の側に縮み（交差検証の予測の最大は 1.67）、LLM と同じ 1.5 では切れないので、F1 が最大になる 0.70 を閾値にした（適合率 0.418、再現率 0.600、F1 0.493）。分類器では 3,000 文書のうち 240 文書（8.0%、文字数では 9.3%）が残った。同じ予測で閾値を選んだので F1 は甘めで、正例も 55 文書しかない。採点する文書を増やす（FineWeb-Edu の学習データは 41 万件）と改善の余地がある。
+- 規則と分類器の一致率は 0.704 だが、偶然の一致を除いたカッパ係数は 0.111 と低く、両方で残すのは 128 文書（4.3%、文字数では 3.7%）だった。方向はそろっていて、規則で落ちた文書は理由によらず分類器の点数の平均が 0.04〜0.18 と、規則を通った文書 (0.32)より低く、採点した文書で LLM が 2 点以上の割合も規則で残す文書で 9.6%、捨てる文書で 3.6% だった。規則で捨てるが分類器の点数が高い文書には、読書感想文の課題図書の紹介や Weblio の「円周率の日」があり、先頭を見た範囲では、パンくずやメニューの行が多く、句読点や繰り返しの規則で落ちていた。安い規則で明らかな不良を除いてから分類器を当てるのが普通の順序だが、規則が良い文書も捨てていることは、こうして確かめる。
+- 教育的な価値は、事前学習に役立つ品質の見方の 1 つにすぎない。言語モデルのパープレキシティで選ぶ方法は、コーパスの統計と可視化の章の「KenLM で n-gram 言語モデルを作り、パープレキシティでコーパスのノイズを見つける」を参照（同じ mC4 のファイルを使っている）。ライセンスは、mC4 が ODC-BY（Common Crawl の利用規約にも従う）、Qwen3-4B-Instruct-2507 が Apache 2.0、multilingual-e5-small が MIT、datatrove と FineWeb-2 の設定が Apache 2.0、LDNOOBW の語のリストが CC BY 4.0。GPU メモリの最大は 10.5 GB（T4 と同じ float16 で実行した値）。
 
 ## データを学習・開発・評価に正しく分割する {data_split}
 

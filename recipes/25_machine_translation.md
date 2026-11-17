@@ -1,6 +1,6 @@
 # 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、モデルを学習・微調整する、訳し方を制御する。文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、モデルを学習・微調整する、訳し方を制御する、動画の字幕を作って翻訳する。文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## 対訳コーパスを取得して中身を確認する {parallel_corpus}
 
@@ -1132,3 +1132,372 @@ print(chat(f"次の古文を現代語に訳してください。語釈を参考�
 - 小さなモデルは、古語を現代語の似た語と取り違えることがある（「あやし」を「怪しい」と訳す、など）。語釈や品詞分解の結果（日本語の形態素解析と文分割の章の古文のレシピ）をプロンプトに入れると、誤訳を減らせることがある。
 - 対訳データがあれば、この章のファインチューニングのレシピがそのまま使える。現代語の単語ベクトルを古文に適応させる、古文の単言語データで逆翻訳する、といった工夫が研究されている。
 - 参考訳は 1 つの解釈にすぎず、直訳か意訳かでも大きく変わる。自動評価の数値は目安にとどめる。
+
+## 動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約） {subtitle_translation gpu}
+
+日本語の動画の音声から日本語の字幕を作り、英語に翻訳した字幕 (SRT) も出したい。音声認識の出力を字幕に向いた長さに区切り直し、区切り方で翻訳の質がどう変わるか、1 秒あたりの文字数などの字幕の制約を守れているかも確かめたい。
+
+```python
+!pip install -q sacrebleu==2.6.0 silero-vad==6.2.3 budoux==0.10.4
+```
+
+```python
+import io
+import numpy as np
+import pandas as pd
+import soundfile as sf
+from huggingface_hub import hf_hub_download
+
+# FLEURS（Google、CC BY 4.0）の日本語の開発用データ。データの収集と入出力の章の「Whisper で日本語の音声を書き起こす（モデルの比較、長い音声、字幕）」と同じもの
+# 各文は機械翻訳の評価データ FLoRes の英文を訳したもので、同じ id の英語の音声データの書き起こしが元の英文になる。これを英訳の参照訳に使う
+path = hf_hub_download("google/fleurs", "parquet-data/ja_jp/validation-00000-of-00001.parquet", repo_type="dataset")   # 約 220MB
+df = pd.read_parquet(path).drop_duplicates("id").sort_values("id").head(60).reset_index(drop=True)
+en = pd.read_csv(hf_hub_download("google/fleurs", "data/en_us/dev.tsv", repo_type="dataset"), sep="\t", header=None, quoting=3)
+df["en"] = df["id"].map(en.drop_duplicates(0).set_index(0)[2])
+
+# 60 文の録音を 0.5 秒の間隔でつなげて、1 本の動画の音声の代わりにする（録音ごとの音量の違いは、RMS をそろえてならす）
+SR = 16000
+gap = np.zeros(SR // 2, np.float32)
+pieces, starts = [], []
+for a in df["audio"]:
+    x = sf.read(io.BytesIO(a["bytes"]), dtype="float32")[0]
+    starts.append(sum(map(len, pieces)) / SR)
+    pieces += [x / np.sqrt(np.mean(x ** 2)) * 0.05, gap]
+audio = np.concatenate(pieces)
+df["start"] = starts
+print(len(df), "文", round(len(audio) / SR / 60, 1), "分")
+print(df["raw_transcription"][2], "\n", df["en"][2])
+```
+
+```python
+import torch
+from silero_vad import get_speech_timestamps, load_silero_vad
+from transformers import pipeline
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+asr = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3-turbo", dtype=DTYPE, device_map="auto")   # MIT
+
+# Silero VAD (MIT) で無音のところで区切り、25 秒以内の区間にまとめてバッチで認識する（データの収集と入出力の章の Whisper のレシピと同じ方法）
+vad = load_silero_vad()
+speech = get_speech_timestamps(torch.from_numpy(audio), vad, sampling_rate=SR, max_speech_duration_s=25)
+segments = []
+for s in speech:
+    if segments and s["end"] - segments[-1][0] <= 25 * SR:
+        segments[-1][1] = s["end"]
+    else:
+        segments.append([s["start"], s["end"]])
+# 認識はモデルの読み込みを含めて T4 で 2 分ほど
+outs = asr([audio[s:e] for s, e in segments], batch_size=8, return_timestamps=True,
+           generate_kwargs={"language": "ja", "task": "transcribe"})
+chunks = []                                            # （開始、終了、テキスト）。時刻は動画の先頭からの秒
+for (s, e), o in zip(segments, outs):
+    for c in o["chunks"]:
+        a, b = c["timestamp"]
+        chunks.append((s / SR + a, s / SR + (b if b is not None else (e - s) / SR), c["text"].strip()))
+lens = [b - a for a, b, _ in chunks]
+print(len(chunks), "区間。長さ（秒）の中央値", round(np.median(lens), 1), "/ 最大", round(max(lens), 1), "/ 7 秒を超える区間", sum(l > 7 for l in lens))
+for c in chunks[:3]:
+    print(f"{c[0]:6.2f}-{c[1]:6.2f} {c[2]}")
+```
+
+```python
+import unicodedata
+import budoux
+
+# 文に区切り直す。Whisper の区間は文の途中で切れたり複数の文を含んだりし、句読点が抜けることもあるので、
+# 句点（。！？）と、区間の切れ目のうち近くに 0.8 秒以上の無音（VAD の発話区間の間）があるところで区切る
+# 区間の中の各文字の時刻は、文字数に比例して割り振って推定する
+pauses = [(a["end"] / SR, b["start"] / SR) for a, b in zip(speech, speech[1:]) if (b["start"] - a["end"]) / SR >= 0.8]
+def near_pause(t, margin=1.0):
+    return any(p0 - margin <= t <= p1 + margin for p0, p1 in pauses)
+
+sentences = []                                         # {"text", "t": 各文字の開始時刻, "end"}
+buf, buf_t = "", []
+def flush(end):
+    global buf, buf_t
+    if buf.strip("、 "):
+        sentences.append({"text": buf, "t": np.array(buf_t), "end": end})
+    buf, buf_t = "", []
+
+for k, (a, b, text) in enumerate(chunks):
+    for i, c in enumerate(text):
+        buf += c; buf_t.append(a + (b - a) * i / len(text))
+        if c in "。！？":
+            flush(a + (b - a) * (i + 1) / len(text))
+    if k + 1 == len(chunks) or near_pause((b + chunks[k + 1][0]) / 2):
+        flush(b)
+# どの元の文（参照訳）に当たるかを、文の中央の時刻で決める（評価用）
+for s in sentences:
+    s["ref"] = int(np.searchsorted(df["start"], (s["t"][0] + s["end"]) / 2)) - 1
+
+# 字幕の単位（キュー）に分ける。1 枚は 2 行 × 16 字（半角は 0.5 字）、7 秒まで（Netflix の日本語の聴覚障害者向け字幕のガイドラインの 1 行の字数と、全言語共通の最大の表示時間）
+# 同じガイドラインの読む速さ（聴覚障害者向けは 1 秒あたり 7 字、普通の字幕は 1 行 13 字・1 秒あたり 4 字）と最短の表示時間（5/6 秒）は、ここでは確かめるだけにする
+# 分けるところは BudouX（Google、Apache 2.0）の文節の切れ目から選び、読点の直後と、真ん中に近いところを優先する
+parser = budoux.load_default_japanese_parser()
+def width(s):
+    return sum(0.5 if unicodedata.east_asian_width(c) in "NaH" else 1 for c in s)
+
+def boundaries(text):
+    return np.cumsum([len(p) for p in parser.parse(text)])[:-1].tolist()
+
+def wrap_ja(text, max_w=16):
+    if width(text) <= max_w:
+        return text
+    p = min(boundaries(text) or [len(text) // 2], key=lambda p: max(width(text[:p]), width(text[p:])))
+    return text[:p] + "\n" + text[p:]
+
+def make_cues(text, t, end, max_w=16, max_sec=7):
+    if max(map(width, wrap_ja(text, max_w).split("\n"))) <= max_w and end - t[0] <= max_sec:   # 2 行に折り返して各行が 16 字以内
+        return [(t[0], end, text)]
+    cands = [p for p in boundaries(text) if 3 <= p <= len(text) - 3] or [len(text) // 2]
+    p = min(cands, key=lambda p: abs(p - len(text) / 2) - (5 if text[p - 1] in "、，" else 0))
+    return make_cues(text[:p], t[:p], t[p], max_w, max_sec) + make_cues(text[p:], t[p:], end, max_w, max_sec)
+
+for s in sentences:
+    s["cues"] = make_cues(s["text"], s["t"], s["end"])
+cues_ja = [c for s in sentences for c in s["cues"]]
+print(len(chunks), "区間 →", len(sentences), "文 →", len(cues_ja), "枚の字幕")
+print("1 行 16 字を超える行:", sum(width(l) > 16 for _, _, t in cues_ja for l in wrap_ja(t).split("\n")),
+      "/ 7 秒を超える字幕:", sum(e - s > 7 for s, e, _ in cues_ja), "/ 参照訳と対応しない元の文:", len(df) - len({s["ref"] for s in sentences}))
+cps_ja = np.array([width(t) / (e - s) for s, e, t in cues_ja])
+print("1 秒あたりの字数: 中央値", round(np.median(cps_ja), 1), "/ 最大", round(cps_ja.max(), 1), "/ 7 字を超える字幕:", sum(cps_ja > 7),
+      "/ 5/6 秒未満の字幕:", sum(e - s < 5 / 6 for s, e, _ in cues_ja))
+long = max(sentences, key=lambda s: len(s["cues"]))
+print("文節で区切った字幕:", " | ".join(t for _, _, t in long["cues"]))
+
+def srt_time(t):
+    ms = round(t * 1000)
+    h, ms = divmod(ms, 3_600_000); m, ms = divmod(ms, 60_000); s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+def write_srt(path, cues):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(f"{i}\n{srt_time(a)} --> {srt_time(b)}\n{t}\n" for i, (a, b, t) in enumerate(cues, 1)))
+
+write_srt("ja.srt", [(a, b, wrap_ja(t)) for a, b, t in cues_ja])
+print(open("ja.srt", encoding="utf-8").read()[:300])
+```
+
+```python
+from sacrebleu.metrics import BLEU, CHRF
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+# 翻訳モデル: NLLB（Meta、CC BY-NC 4.0 で非商用に限る）。この章の「多言語翻訳モデル NLLB で翻訳する」と同じモデル
+name = "facebook/nllb-200-distilled-600M"
+nllb_tok = AutoTokenizer.from_pretrained(name, src_lang="jpn_Jpan")
+nllb = AutoModelForSeq2SeqLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+
+@torch.no_grad()
+def nllb_translate(texts, batch_size=16):
+    out = []
+    for i in range(0, len(texts), batch_size):
+        batch = nllb_tok(texts[i:i + batch_size], return_tensors="pt", padding=True).to(nllb.device)
+        gen = nllb.generate(**batch, forced_bos_token_id=nllb_tok.convert_tokens_to_ids("eng_Latn"), num_beams=4)
+        out += nllb_tok.batch_decode(gen, skip_special_tokens=True)
+    return out
+
+def per_cue(translate, key):
+    """字幕 1 枚ずつ訳し、文ごとにつなげる"""
+    flat = translate([t for s in sentences for _, _, t in s[key]])
+    it = iter(flat)
+    return [" ".join(next(it) for _ in s[key]) for s in sentences]
+
+# 評価: 書き起こしの文を元の文（参照訳）ごとにまとめ、コーパス単位の BLEU と chrF を測る（この章の「機械翻訳を BLEU で評価する (sacreBLEU)」）
+def by_ref(hyps):
+    out = [""] * len(df)
+    for s, h in zip(sentences, hyps):
+        out[s["ref"]] = (out[s["ref"]] + " " + h).strip()
+    return out
+
+results = {}
+# 3 通りで T4 なら 1〜2 分
+results["NLLB: 文節で区切った字幕ごと"] = by_ref(per_cue(nllb_translate, "cues"))
+results["NLLB: 文ごと"] = by_ref(nllb_translate([s["text"] for s in sentences]))
+results["NLLB: 文ごと（正しい書き起こし）"] = nllb_translate(df["raw_transcription"].tolist())   # 音声認識の誤りがなかった場合の上限の目安
+refs = df["en"].tolist()
+for k, h in results.items():
+    print(f"{k:24s} BLEU {BLEU().corpus_score(h, [refs]).score:5.1f}  chrF {CHRF().corpus_score(h, [refs]).score:5.1f}")
+```
+
+```python
+import re
+from transformers import AutoModelForCausalLM
+
+# 手元の LLM: Qwen3-4B-Instruct-2507（Alibaba の Qwen チーム、Apache 2.0）。T4 の float16 で約 8GB
+name = "Qwen/Qwen3-4B-Instruct-2507"
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+
+JA = re.compile(r"[ぁ-んァ-ヶ一-龥]")
+n_fail = 0
+def clean(text):
+    """「英語に訳すと次のようになります」のような前置きを除き、日本語を含まない最初の行を訳文とする"""
+    global n_fail
+    lines = [l.strip().strip('"「」') for l in text.split("\n") if l.strip()]
+    ok = [l for l in lines if not JA.search(l)]
+    n_fail += not ok
+    return ok[0] if ok else (lines[0] if lines else "")
+
+@torch.no_grad()
+def chat(prompts, example=None, batch_size=16, max_new_tokens=160):
+    """example=(入力, 出力) を 1 往復の会話として前に置く (1-shot)"""
+    shot = [{"role": "user", "content": example[0]}, {"role": "assistant", "content": example[1]}] if example else []
+    out = []
+    for i in range(0, len(prompts), batch_size):
+        texts = [tokenizer.apply_chat_template(shot + [{"role": "user", "content": p}], add_generation_prompt=True, tokenize=False)
+                 for p in prompts[i:i + batch_size]]
+        batch = tokenizer(texts, add_special_tokens=False, return_tensors="pt", padding=True).to(llm.device)
+        gen = llm.generate(**batch, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        out += [clean(t) for t in tokenizer.batch_decode(gen[:, batch["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return out
+
+PROMPT = "次の日本語を英語に翻訳してください。訳文だけを出力してください。\n\n{}"
+def llm_translate(texts):
+    return chat([PROMPT.format(t) for t in texts], example=(PROMPT.format("駅前に新しい書店ができたので、帰りに寄ってみた。"),
+                                                           "A new bookstore opened near the station, so I stopped by on my way home."))
+
+def llm_translate_with_context(key):
+    """前後の字幕を見せて、その字幕の部分だけを訳させる"""
+    flat = [t for s in sentences for _, _, t in s[key]]
+    def prompt(prev, cur, nxt):
+        return ("次は動画の日本語の字幕の一部です。前後の字幕を参考にして、「この字幕」の部分だけを英語に翻訳してください。"
+                f"訳文だけを出力してください。\n\n前の字幕: {prev}\nこの字幕: {cur}\n次の字幕: {nxt}")
+    prompts = [prompt(flat[i - 1] if i > 0 else "（なし）", flat[i], flat[i + 1] if i + 1 < len(flat) else "（なし）") for i in range(len(flat))]
+    it = iter(chat(prompts, example=(prompt("駅前に新しい書店ができたので、", "帰りに寄ってみたら", "品ぞろえがとても良かった。"),
+                                     "when I stopped by on my way home,")))
+    return [" ".join(next(it) for _ in s[key]) for s in sentences]
+
+# 3 通りで T4 なら 3〜5 分
+results["LLM: 文節で区切った字幕ごと"] = by_ref(per_cue(llm_translate, "cues"))
+results["LLM: 文節で区切った字幕ごと + 前後の字幕"] = by_ref(llm_translate_with_context("cues"))
+llm_sent = llm_translate([s["text"] for s in sentences])
+results["LLM: 文ごと"] = by_ref(llm_sent)
+print("日本語の説明しか返らなかった出力:", n_fail, "/ GPU メモリの最大:", round(torch.cuda.max_memory_allocated() / 1e9, 1), "GB")
+```
+
+```python
+# 文を単位に 300 回再標本化するブートストラップで、「文ごと」との chrF の差の 95% 信頼区間を求める
+rng = np.random.default_rng(0)
+idx = rng.integers(0, len(refs), (300, len(refs)))
+def chrf(h, ix):
+    return CHRF().corpus_score([h[i] for i in ix], [[refs[i] for i in ix]]).score
+
+rows = []
+for k, h in results.items():                           # Colab の CPU で 1 分ほど
+    base = results["NLLB: 文ごと" if k.startswith("NLLB") else "LLM: 文ごと"]
+    d = [chrf(h, ix) - chrf(base, ix) for ix in idx] if h is not base else [0.0]
+    rows.append({"方法": k, "BLEU": BLEU().corpus_score(h, [refs]).score, "chrF": CHRF().corpus_score(h, [refs]).score,
+                 "文ごととの差": np.mean(d), "95% CI 下": np.percentile(d, 2.5), "95% CI 上": np.percentile(d, 97.5)})
+print(pd.DataFrame(rows).round(1).to_string(index=False))
+
+i = max(range(len(sentences)), key=lambda i: len(sentences[i]["cues"]))
+r = sentences[i]["ref"]
+print("\n原文:", sentences[i]["text"], "\n参照訳:", refs[r])
+for k in ["NLLB: 文節で区切った字幕ごと", "NLLB: 文ごと", "LLM: 文節で区切った字幕ごと + 前後の字幕", "LLM: 文ごと"]:
+    print(f"{k}: {results[k][r]}")
+```
+
+```python
+# 文ごとの訳を、日本語の字幕と同じ枚数に分けて同じ時刻に表示する。分ける位置は、日本語の各字幕の文字数の割合に近く、
+# 句読点の後ろや接続詞・前置詞の前を優先する（英語の字幕の改行の一般的な目安）
+BREAK_BEFORE = {"and", "but", "or", "so", "because", "which", "who", "that", "when", "while", "where", "if", "as",
+                "to", "in", "on", "at", "of", "for", "with", "from", "by", "after", "before"}
+def split_en(text, ja_cues):
+    words = text.split()
+    k = min(len(ja_cues), len(words))
+    if k <= 1:
+        return [(ja_cues[0][0], ja_cues[-1][1], text)]
+    share = np.cumsum([len(t) for _, _, t in ja_cues]) / sum(len(t) for _, _, t in ja_cues)
+    pos = np.cumsum([len(w) + 1 for w in words])
+    cuts, prev = [], 0
+    for j in range(1, k):
+        cands = range(prev + 1, len(words) - (k - j) + 1)
+        cut = min(cands, key=lambda c: abs(pos[c - 1] - share[j - 1] * pos[-1])
+                  - 8 * (words[c - 1][-1] in ",;:" or words[c].lower() in BREAK_BEFORE))
+        cuts.append(cut); prev = cut
+    b = [0] + cuts + [len(words)]
+    times = ja_cues[:k - 1] + [(ja_cues[k - 1][0], ja_cues[-1][1], "")]
+    pieces = [(times[i][0], times[i][1], " ".join(words[b[i]:b[i + 1]])) for i in range(k)]
+    short = [i for i, (s, e, _) in enumerate(pieces) if e - s < 5 / 6]
+    while short and len(pieces) > 1:                   # 5/6 秒に満たない字幕は、隣の字幕とまとめる
+        i = short[0]; a = i - 1 if i == len(pieces) - 1 else i
+        pieces[a:a + 2] = [(pieces[a][0], pieces[a + 1][1], pieces[a][2] + " " + pieces[a + 1][2])]
+        short = [i for i, (s, e, _) in enumerate(pieces) if e - s < 5 / 6]
+    return pieces
+
+def wrap_en(text, max_len=42):
+    if len(text) <= max_len:
+        return text
+    words = text.split()
+    c = min(range(1, len(words)), key=lambda c: (max(len(" ".join(words[:c])), len(" ".join(words[c:]))), len(" ".join(words[:c]))))
+    return " ".join(words[:c]) + "\n" + " ".join(words[c:])
+
+# 英語の字幕の制約（Netflix の英語の字幕のガイドライン）: 1 行 42 字、2 行まで、大人向けは 1 秒あたり 20 字まで、表示は 5/6 秒以上 7 秒以下
+def check(cues):
+    rows = []
+    for s, e, t in cues:
+        lines = wrap_en(t).split("\n")
+        rows.append({"行の字数オーバー": len(lines) > 2 or max(map(len, lines)) > 42, "1 秒あたり 20 字超": len(t) / (e - s) > 20,
+                     "5/6 秒未満": e - s < 5 / 6, "7 秒超": e - s > 7})
+    return pd.DataFrame(rows)
+
+def extend(cues, end_of_video):
+    """読む時間が足りない字幕は、次の字幕の 0.1 秒前（7 秒まで）まで表示を延ばす"""
+    out = []
+    for i, (s, e, t) in enumerate(cues):
+        limit = min(cues[i + 1][0] - 0.1 if i + 1 < len(cues) else end_of_video, s + 7)
+        out.append((s, max(e, min(s + max(5 / 6, len(t) / 20), limit)), t))
+    return out
+
+best = llm_sent
+per_sent = [split_en(h, s["cues"]) for h, s in zip(best, sentences)]
+cues_en = [c for cs in per_sent for c in cs]
+v0 = check(cues_en)
+cues_ext = extend(cues_en, len(audio) / SR)
+v1 = check(cues_ext)
+print(pd.DataFrame({"そのまま": v0.sum(), "表示を延ばしたあと": v1.sum()}).T.to_string(), f"（全 {len(cues_en)} 枚）")
+cps = np.array([len(t) / (e - s) for s, e, t in cues_ext])
+print("1 秒あたりの字数: 中央値", round(np.median(cps), 1), "/ 最大", round(cps.max(), 1))
+```
+
+```python
+# 表示を延ばしても制約を守れない文は、LLM に字数の上限を示して短く言い換えさせ、分け直す。字幕の翻訳では、読み切れる長さに縮めるのが普通
+pos = np.cumsum([0] + [len(cs) for cs in per_sent])
+ext_by_sent = [cues_ext[pos[i]:pos[i + 1]] for i in range(len(per_sent))]
+bad = [i for i, cs in enumerate(ext_by_sent) if check(cs).any(axis=None)]
+budget = {i: int(20 * sum(e - s for s, e, _ in ext_by_sent[i])) for i in bad}
+def shorten_prompt(text, n):
+    return f"次の英文を、意味をできるだけ保ったまま {n} 文字以内の英語に短く言い換えてください。言い換えた英文だけを出力してください。\n\n{text}"
+short = chat([shorten_prompt(best[i], budget[i]) for i in bad],
+             example=(shorten_prompt("A new bookstore opened near the station, so I stopped by on my way home.", 45),
+                      "I visited the new bookstore by the station."))
+final = list(best)
+for i, t in zip(bad, short):
+    if len(t) < len(best[i]):
+        final[i] = t
+print(len(bad), "文を短くした。上限以内に収まった文:", sum(len(final[i]) <= budget[i] for i in bad),
+      "/ 上限に対する長さの比の中央値:", round(float(np.median([len(final[i]) / budget[i] for i in bad])), 2))
+for i in bad[:3]:
+    print(f"\n[{len(best[i])} 字 → 上限 {budget[i]} 字] {best[i]}\n[{len(final[i])} 字] {final[i]}")
+
+cues_final = extend([c for h, s in zip(final, sentences) for c in split_en(h, s["cues"])], len(audio) / SR)
+v2 = check(cues_final)
+print("\n短くしたあとの違反:", v2.sum().to_dict())
+for j in np.flatnonzero(v2.any(axis=1)):
+    s, e, t = cues_final[j]
+    print(f"  {e - s:.2f} 秒（次の字幕まで {cues_final[j + 1][0] - e if j + 1 < len(cues_final) else 0:.2f} 秒）: {t}")
+for k, h in [("短くする前", best), ("短くしたあと", final)]:
+    print(f"{k}: chrF {CHRF().corpus_score(by_ref(h), [refs]).score:.1f}  英語の文字数の合計 {sum(map(len, h))}")
+
+write_srt("en.srt", [(a, b, wrap_en(t)) for a, b, t in cues_final])
+print(open("en.srt", encoding="utf-8").read()[:400])
+```
+
+- 字幕は、音声認識の区間をそのまま使わずに作り直す。この例では Whisper の 78 区間のうち 30 区間が 7 秒を超えた（最長 15.7 秒）。句点と長い無音で 65 文に区切り直し、BudouX の文節の切れ目で 156 枚に分けると、どれも 2 行 × 16 字・7 秒に収まった。ただし読む速さは確かめただけで直していない。話す速さのままの字幕は 1 秒あたり中央値 6.6 字（最大 9.0 字）で、聴覚障害者向けのガイドラインの 7 字を 54 枚が超え、5/6 秒に満たない字幕も 2 枚あった。守るには表示を延ばすか、字幕の文を縮める必要がある。区間の中の時刻は文字数に比例させた推定なので、実際の動画では映像に重ねて確かめる。
+- 区切り方で訳の質は大きく変わる。NLLB で文節で区切った字幕 1 枚ずつ訳すと chrF 44.0、文ごとに訳すと 51.3 で、差の 95% 信頼区間は 0 を含まない（60 文、BLEU は 10.7 と 21.3）。文の断片を訳すと「It's a big street, it's a big glass building.」のように、主語や述語を補った別々の文になる。訳は文ごとに作り、それを字幕の枚数に分けるのがよい。
+- 前後の字幕を LLM (Qwen3-4B-Instruct-2507) に見せると、文ごとの訳との chrF の差は −2.3 から −1.3 になった（後者の信頼区間は 0 を含む）。ただし 2 つの差の違い (1.0) はばらつきの範囲に収まる程度で、この例では前後の字幕を見せる効果ははっきりしない。また、前後の字幕の中身まで訳して同じ内容が二重に出ることがあり、文ごとに訳すほうが扱いやすい。FLEURS の文は別々の記事から取られているので、前の文の訳を渡して代名詞や用語をそろえる効果は、この例では確かめていない。
+- 文ごとの訳では、LLM (chrF 51.0) と NLLB (51.3) はほぼ同じだった。NLLB は CC BY-NC 4.0 で非商用に限られる。音声認識の誤り（「被っている国々」→「こむっているクリグリ」、「基金」→「危機」）はそのまま誤訳になり、正しい書き起こしを訳すと chrF は 2.8 高い（信頼区間 0.8〜4.9）。書き起こしの誤りはデータの収集と入出力の章の「Whisper で日本語の音声を書き起こす（モデルの比較、長い音声、字幕）」を参照。
+- 英語の字幕の制約は Netflix のガイドライン（1 行 42 字、2 行まで、大人向けは 1 秒あたり 20 字まで、表示は 5/6 秒以上 7 秒以下）に合わせた。154 枚のうち 23 枚が 1 秒あたり 20 字を超え、4 枚が 2 行 × 42 字に収まらなかった。表示を次の字幕の直前まで延ばしても 17 枚と 4 枚が残った。違反の残った 14 文を LLM に字数の上限を示して短くさせると、違反は 0 になったが、上限の 6 割ほどまで縮めすぎる傾向があり、参照訳に対する chrF は 51.0 から 46.7 に下がった。
+- 字幕の訳は読み切れる長さに縮めるのが普通なので、参照訳との一致を見る BLEU や chrF は、縮めた分だけ低く出る。この章の「COMET で翻訳の品質を評価する」のような意味を見る指標や、映像に重ねて読んで確かめることを併用する。
+- GPU メモリの最大は 11.8GB（Whisper、NLLB、LLM を同時に読み込んだ状態、float16）。LLM は会話の例を 1 往復前に置いても、訳させた 377 件（字幕ごと 156 件 × 2 通りと 65 文）のうち 1 件で日本語の説明しか返さなかった。出力が英語になっているかは必ず確かめる。
