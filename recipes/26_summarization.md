@@ -1,6 +1,6 @@
 # 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化、文体の変換と、その評価。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換と、その評価。
 
 ## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
 
@@ -1295,6 +1295,89 @@ for src, out in zip(texts, simplified):
 - やさしい日本語には、1 文を短く、漢語より和語、敬語や受け身を避ける、といった具体的な指針がある。それを条件として列挙し、書き換えの例を 1 つ見せると従いやすい。
 - 短く書き換える過程で、期限や持ち物のような大事な情報が落ちやすい。行政や防災の文章では、落ちていないかの確認が欠かせない。
 - 参照となる平易文がある場合は SARI（追加・削除・保持の適否を測る指標）がよく使われる。日本語のデータには SNOW T15/T23（やさしい日本語対訳コーパス）、JADES などがある。
+
+## 難しい単語を見つけてやさしい単語に言い換える（語彙平易化） {lexical_simplification}
+
+文章の中の難しい単語を見つけ、文脈に合うやさしい単語に置き換えたい。
+
+```python
+!pip install -q fugashi unidic-lite wordfreq
+```
+
+```python
+import torch
+from fugashi import Tagger
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+from wordfreq import zipf_frequency
+
+tagger = Tagger()
+name = "tohoku-nlp/bert-base-japanese-v3"
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForMaskedLM.from_pretrained(name).eval()
+
+def complex_words(sentence, threshold=4.0):
+    """1. 難しい語の特定: 内容語のうち、頻度 (Zipf 尺度) がしきい値より低いものを難しい語とする"""
+    out = []
+    for w in tagger(sentence):
+        if w.feature.pos1 in ("名詞", "動詞", "形容詞", "形状詞", "副詞") and w.feature.pos2 not in ("固有名詞", "数詞", "非自立可能"):
+            z = zipf_frequency(w.feature.lemma or w.surface, "ja")
+            if z < threshold:
+                out.append((w.surface, round(z, 2)))
+    return out
+
+sentence = "政府は景気の低迷を打開するため、新たな施策を講じると表明した。"
+print(complex_words(sentence))
+```
+
+```python
+@torch.no_grad()
+def candidates(sentence, target, k=30):
+    """2. 言い換え候補の生成: 「元の文 [SEP] 対象語をマスクした文」を与え、マスクに入る語を予測させる (元の文を見せると、意味の近い語が出やすい)"""
+    masked = sentence.replace(target, tokenizer.mask_token, 1)
+    enc = tokenizer(sentence, masked, return_tensors="pt")
+    pos = (enc["input_ids"][0] == tokenizer.mask_token_id).nonzero()[0, 0]
+    probs = model(**enc).logits[0, pos].softmax(-1)
+    top = probs.topk(k)
+    return [(tokenizer.convert_ids_to_tokens(int(i)), float(p)) for p, i in zip(top.values, top.indices)]
+
+def simplify_word(sentence, target, k=30, min_prob=0.02):
+    """3. 候補の選別と順位付け: 元の語と同じ品詞で、元の語より頻度が高く (やさしく)、文脈に合う確率が一定以上の語だけを残す"""
+    target_word = next(w for w in tagger(target))
+    target_pos, target_zipf = target_word.feature.pos1, zipf_frequency(target_word.feature.lemma or target, "ja")
+    ranked = []
+    for cand, p in candidates(sentence, target, k):
+        if cand.startswith("##") or cand == target or cand in target or target in cand:
+            continue
+        w = next(iter(tagger(cand)), None)
+        z = zipf_frequency(cand, "ja")
+        if w is not None and len(tagger(cand)) == 1 and w.feature.pos1 == target_pos and z > target_zipf and p >= min_prob:
+            ranked.append((cand, round(z, 2), round(p, 3)))
+    return sorted(ranked, key=lambda x: -x[2])[:5]                 # 文脈に合う確率の高い順
+
+for target, z in complex_words(sentence):
+    print(f"{target} (頻度 {z}) →", simplify_word(sentence, target))
+```
+
+```python
+def simplify(sentence, threshold=4.0):
+    out = sentence
+    for target, _ in complex_words(sentence, threshold):
+        cands = simplify_word(out, target)
+        if cands:
+            out = out.replace(target, cands[0][0], 1)
+    return out
+
+for s in [sentence, "医師は患者に対し、速やかに治療を開始するよう勧告した。", "当該施設の利用に際しては、事前に申請を行う必要がある。",
+          "彼は困難な状況に直面しても、決して諦めなかった。"]:
+    print(f"{s}\n   → {simplify(s)}")
+```
+
+- 語彙平易化は 3 段階に分けて考える: 難しい語の特定 (complex word identification)、言い換え候補の生成、候補の選別と順位付け。
+- 単語の難しさは、頻度でかなり近似できる。日本語教育では、語彙の級（旧日本語能力試験の級など）や学習者コーパスでの頻度も使われる。誰にとって難しいか（子ども、学習者、専門外の人）で基準は変わる。
+- マスク言語モデルは文脈に合う語を出すが、意味が同じとは限らない（反対語や、単に文脈に合うだけの別の語が出る）。確率の低い候補を捨て、良い候補がなければ言い換えない、という慎重な設定にする。それでも意味のずれは残るので、結果は人が確認する。
+- 活用語は、候補の語を元の語と同じ活用形にそろえる必要がある。ここでは形の合う候補だけを残す簡易な方法をとっている。
+- LLM に「この語をやさしく言い換えて」と頼む方法が、現在は最も精度が高い。その場合も、候補が本当にやさしいか（頻度）と、意味が保たれているかの確認は別に行う。
+- 単語単位の言い換えでは、文の構造の難しさは解消しない。文全体の平易化は、この章の「文章をやさしい日本語に書き換える（テキスト平易化）」を参照。
 
 ## 文体を変換する（です・ます調、だ・である調、敬語） {style_transfer_ja gpu}
 

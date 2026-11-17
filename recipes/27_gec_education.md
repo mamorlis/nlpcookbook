@@ -249,6 +249,53 @@ print(tokenizer.batch_decode(out, skip_special_tokens=True))
 - 系列変換型は書き換えすぎる（正しい文まで変える）ことがある。編集タグを予測する方式 (GECToR) は高速で、過剰訂正が少ない。
 - 現在は LLM による訂正が流暢性の面で強いが、必要以上に書き換える傾向がある。「最小限の訂正」を求める評価（CoNLL-2014、BEA-2019）では専用モデルが有利なことも多い。
 
+## 規則で誤りを注入して GEC の擬似学習データを作る {synthetic_errors}
+
+文法誤り訂正の学習データが足りない。正しい文に人工的な誤りを入れて、（誤り文, 正しい文）のペアを大量に作りたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import random
+from fugashi import Tagger
+
+tagger = Tagger()
+PARTICLES = ["が", "を", "に", "で", "は", "と", "へ", "の"]
+
+def corrupt(sentence, rng, p=0.15):
+    """学習者に多い誤りを模して、助詞の置換・脱落・余剰と、活用語尾の誤りを確率的に入れる"""
+    out = []
+    for w in tagger(sentence):
+        surface, pos1, pos2 = w.surface, w.feature.pos1, w.feature.pos2
+        if pos1 == "助詞" and pos2 in ("格助詞", "係助詞") and surface in PARTICLES and rng.random() < p:
+            r = rng.random()
+            if r < 0.6:
+                out.append(rng.choice([x for x in PARTICLES if x != surface]))   # 置換
+            elif r < 0.8:
+                pass                                                              # 脱落
+            else:
+                out += [surface, rng.choice(PARTICLES)]                           # 余剰
+        elif pos1 == "動詞" and w.feature.cForm and w.feature.cForm.startswith("連用形") and rng.random() < p:
+            out.append(w.feature.orthBase or surface)                             # 活用させずに辞書形のままにする
+        else:
+            out.append(surface)
+    return "".join(out)
+
+rng = random.Random(0)
+clean = ["私は昨日友達と映画を見に行きました。", "図書館で日本語の本を読みます。", "母が作った料理はとてもおいしいです。", "来週の月曜日に東京へ出張します。"]
+for s in clean:
+    for _ in range(2):
+        noisy = corrupt(s, rng, p=0.3)
+        if noisy != s:
+            print(f"{noisy}  →  {s}")
+```
+
+- 擬似データで事前学習してから実データでファインチューニングするのが、GEC の定番の手順。
+- 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
+- 逆翻訳（正しい文 → 誤り文を生成するモデル）や、LLM に誤りを書かせる方法もある。
+
 ## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
 
 日本語学習者の書いた文の誤りを訂正したい。LLM（GPU を使う）に訂正させ、参照訂正と比べて評価する。
@@ -570,6 +617,81 @@ for threshold in [0.001, 0.01, 0.05]:
 - 珍しい固有名詞や専門用語も確率が低くなるので、誤りと区別できない。しきい値を下げると見逃しが増え、上げると誤検出が増える。
 - 誤りの位置を正確に指すとは限らない（誤った助詞ではなく、その後ろの動詞の確率が下がることがある）。「このあたりが怪しい」という手がかりとして使う。
 - 高い精度が必要なら、誤りの注釈付きデータで系列ラベリング（各トークンが正しいか誤りか）を学習する。固有表現抽出の章の BERT のファインチューニングと同じ方法が使える。
+
+## 訂正にフィードバックコメントを付ける {feedback_comment gpu}
+
+学習者に、誤りを直した結果だけでなく、「なぜ誤りなのか」「どう直せばよいか」の説明を返したい。
+
+```python
+import difflib
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+@torch.no_grad()
+def chat(prompt, max_new_tokens=160):
+    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+def diff(source, corrected):
+    """訂正箇所を「元 → 訂正後」の組として取り出す"""
+    ops = difflib.SequenceMatcher(None, source, corrected, autojunk=False).get_opcodes()
+    return [(source[i1:i2] or "(なし)", corrected[j1:j2] or "(削除)") for op, i1, i2, j1, j2 in ops if op != "equal"]
+
+pairs = [("私は毎日学校を行きます。", "私は毎日学校に行きます。"), ("この料理はとてもおいしいでした。", "この料理はとてもおいしかったです。"),
+         ("日本に来たばかりので、日本語がまだ下手です。", "日本に来たばかりなので、日本語がまだ下手です。"), ("彼は私にプレゼントをもらいました。", "彼は私にプレゼントをくれました。")]
+for s, c in pairs:
+    print(s, "→", c, diff(s, c))
+```
+
+```python
+PROMPT = """あなたは日本語教師です。日本語学習者の文と、その訂正を示します。
+訂正箇所について、学習者向けのフィードバックを書いてください。
+- なぜ元の表現が誤りなのかを、文法の規則として 1〜2 文で説明する
+- 専門用語はできるだけ使わず、やさしい日本語で書く
+- 同じ規則を使った正しい例文を 1 つ挙げる
+- あいさつや前置きは書かず、全体で 150 字以内にする
+
+学習者の文: {source}
+訂正後の文: {corrected}
+訂正箇所: {edits}"""
+
+for s, c in pairs:
+    edits = "、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))
+    print(f"■ {s} → {c}\n{chat(PROMPT.format(source=s, corrected=c, edits=edits))}\n")
+```
+
+```python
+# 訂正と説明を別々に行う理由: LLM に一度に任せると、説明が訂正と食い違うことがある。説明に訂正後の表現が含まれているかを機械的に確かめる
+def check(source, corrected, comment):
+    return {"訂正後の表現に触れている": all(b in comment for a, b in diff(source, corrected) if b != "(削除)"),
+            "長すぎない": len(comment) <= 300}
+
+s, c = pairs[0]
+comment = chat(PROMPT.format(source=s, corrected=c, edits="、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))))
+print(check(s, c, comment))
+```
+
+- フィードバックコメント生成は、訂正（何を直すか）とは別のタスクとして研究されている。学習効果のためには、答えを示すだけでなく、規則に気付かせる説明が重要とされる。
+- 訂正箇所を差分で明示してから説明させると、どの誤りについての説明かがぶれにくい。誤りが複数あるときは、1 か所ずつ説明させる。
+- 長さの指示は守られにくい。この実験でも、3 つ目の説明は「150 字以内」の指示を大きく超えて 400 字近くになり、「recentness」のような英語まで混ざった。1 つ目も 150 字をわずかに超えている（下の点検は上限を 300 字にしているので通る）。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
+- 説明が訂正と食い違うこともある。2 つ目の説明は、訂正後の文（「おいしかったです」）に反して「「ました」を使うのが正解」と書いている。
+- 小さな LLM は、もっともらしいが誤った文法説明を書くことがある（存在しない規則を作る、助詞の働きを取り違える）。学習者にそのまま見せる前に、教師による確認か、誤りの種類ごとに用意した説明文（テンプレート）との併用を検討する。
+- 誤りの種類が分かっていれば（助詞の選択、時制、活用など）、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
+- 学習者のレベルに合わせて説明の言葉を変える（初級者には母語で、など）ことも、LLM への指示で行える。
 
 ## 日本語の文章の校正すべき箇所を指摘する（表記ゆれ・冗長な表現・ら抜き言葉） {proofreading_ja gpu}
 
@@ -1075,128 +1197,6 @@ for sys_name, f in systems.items():
 - 小文字にしてから扱うので、大文字・小文字の情報は失われる。辞書にない語は、編集距離 2 以内に候補があれば必ずどれかに書き換えるので、固有名詞や専門用語は `sym.create_dictionary_entry("tokenizer", 1000)` のように辞書に足しておく。学習者のつづりの誤りは打ち間違いと傾向が違う（発音に引きずられる、母語の影響を受ける）ので、学習者の作文で確かめる。日本語では、スペル誤りにあたるのは誤変換や脱字である。日本語入力の章と、この章の「マスク言語モデルで誤りのありそうな箇所を見つける（文法誤り検出）」を参照。
 - 仕組みを自分で実装して確かめる版（編集距離 1・2 の候補を作り、頻度で選ぶ Norvig 方式）は、付録「仕組みを理解するための実装」の「編集距離と単語の頻度で英語のスペル誤りを訂正する（Norvig 方式を自分で実装）」にある。
 
-## 規則で誤りを注入して GEC の擬似学習データを作る {synthetic_errors}
-
-文法誤り訂正の学習データが足りない。正しい文に人工的な誤りを入れて、（誤り文, 正しい文）のペアを大量に作りたい。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-import random
-from fugashi import Tagger
-
-tagger = Tagger()
-PARTICLES = ["が", "を", "に", "で", "は", "と", "へ", "の"]
-
-def corrupt(sentence, rng, p=0.15):
-    """学習者に多い誤りを模して、助詞の置換・脱落・余剰と、活用語尾の誤りを確率的に入れる"""
-    out = []
-    for w in tagger(sentence):
-        surface, pos1, pos2 = w.surface, w.feature.pos1, w.feature.pos2
-        if pos1 == "助詞" and pos2 in ("格助詞", "係助詞") and surface in PARTICLES and rng.random() < p:
-            r = rng.random()
-            if r < 0.6:
-                out.append(rng.choice([x for x in PARTICLES if x != surface]))   # 置換
-            elif r < 0.8:
-                pass                                                              # 脱落
-            else:
-                out += [surface, rng.choice(PARTICLES)]                           # 余剰
-        elif pos1 == "動詞" and w.feature.cForm and w.feature.cForm.startswith("連用形") and rng.random() < p:
-            out.append(w.feature.orthBase or surface)                             # 活用させずに辞書形のままにする
-        else:
-            out.append(surface)
-    return "".join(out)
-
-rng = random.Random(0)
-clean = ["私は昨日友達と映画を見に行きました。", "図書館で日本語の本を読みます。", "母が作った料理はとてもおいしいです。", "来週の月曜日に東京へ出張します。"]
-for s in clean:
-    for _ in range(2):
-        noisy = corrupt(s, rng, p=0.3)
-        if noisy != s:
-            print(f"{noisy}  →  {s}")
-```
-
-- 擬似データで事前学習してから実データでファインチューニングするのが、GEC の定番の手順。
-- 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
-- 逆翻訳（正しい文 → 誤り文を生成するモデル）や、LLM に誤りを書かせる方法もある。
-
-## 訂正にフィードバックコメントを付ける {feedback_comment gpu}
-
-学習者に、誤りを直した結果だけでなく、「なぜ誤りなのか」「どう直せばよいか」の説明を返したい。
-
-```python
-import difflib
-import sentencepiece as spm
-import torch
-from huggingface_hub import hf_hub_download
-from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
-
-@torch.no_grad()
-def chat(prompt, max_new_tokens=160):
-    ids = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
-    out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
-    return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-def diff(source, corrected):
-    """訂正箇所を「元 → 訂正後」の組として取り出す"""
-    ops = difflib.SequenceMatcher(None, source, corrected, autojunk=False).get_opcodes()
-    return [(source[i1:i2] or "(なし)", corrected[j1:j2] or "(削除)") for op, i1, i2, j1, j2 in ops if op != "equal"]
-
-pairs = [("私は毎日学校を行きます。", "私は毎日学校に行きます。"), ("この料理はとてもおいしいでした。", "この料理はとてもおいしかったです。"),
-         ("日本に来たばかりので、日本語がまだ下手です。", "日本に来たばかりなので、日本語がまだ下手です。"), ("彼は私にプレゼントをもらいました。", "彼は私にプレゼントをくれました。")]
-for s, c in pairs:
-    print(s, "→", c, diff(s, c))
-```
-
-```python
-PROMPT = """あなたは日本語教師です。日本語学習者の文と、その訂正を示します。
-訂正箇所について、学習者向けのフィードバックを書いてください。
-- なぜ元の表現が誤りなのかを、文法の規則として 1〜2 文で説明する
-- 専門用語はできるだけ使わず、やさしい日本語で書く
-- 同じ規則を使った正しい例文を 1 つ挙げる
-- あいさつや前置きは書かず、全体で 150 字以内にする
-
-学習者の文: {source}
-訂正後の文: {corrected}
-訂正箇所: {edits}"""
-
-for s, c in pairs:
-    edits = "、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))
-    print(f"■ {s} → {c}\n{chat(PROMPT.format(source=s, corrected=c, edits=edits))}\n")
-```
-
-```python
-# 訂正と説明を別々に行う理由: LLM に一度に任せると、説明が訂正と食い違うことがある。説明に訂正後の表現が含まれているかを機械的に確かめる
-def check(source, corrected, comment):
-    return {"訂正後の表現に触れている": all(b in comment for a, b in diff(source, corrected) if b != "(削除)"),
-            "長すぎない": len(comment) <= 300}
-
-s, c = pairs[0]
-comment = chat(PROMPT.format(source=s, corrected=c, edits="、".join(f"「{a}」→「{b}」" for a, b in diff(s, c))))
-print(check(s, c, comment))
-```
-
-- フィードバックコメント生成は、訂正（何を直すか）とは別のタスクとして研究されている。学習効果のためには、答えを示すだけでなく、規則に気付かせる説明が重要とされる。
-- 訂正箇所を差分で明示してから説明させると、どの誤りについての説明かがぶれにくい。誤りが複数あるときは、1 か所ずつ説明させる。
-- 長さの指示は守られにくい。この実験でも、3 つ目の説明は「150 字以内」の指示を大きく超えて 400 字近くになり、「recentness」のような英語まで混ざった。1 つ目も 150 字をわずかに超えている（下の点検は上限を 300 字にしているので通る）。生成後に長さを点検し、超えたら要約させ直す、といった後処理を用意する。
-- 説明が訂正と食い違うこともある。2 つ目の説明は、訂正後の文（「おいしかったです」）に反して「「ました」を使うのが正解」と書いている。
-- 小さな LLM は、もっともらしいが誤った文法説明を書くことがある（存在しない規則を作る、助詞の働きを取り違える）。学習者にそのまま見せる前に、教師による確認か、誤りの種類ごとに用意した説明文（テンプレート）との併用を検討する。
-- 誤りの種類が分かっていれば（助詞の選択、時制、活用など）、種類ごとに人が書いた説明を引いてくる方法が最も安全。誤りタイプの判定には、この章の ERRANT のレシピの考え方が使える。
-- 学習者のレベルに合わせて説明の言葉を変える（初級者には母語で、など）ことも、LLM への指示で行える。
-
 ## 英文の読みやすさ（リーダビリティ）を測る {readability_en}
 
 英文の難易度を、学年レベルなどの指標で数値化したい（教材の選定、平易化の評価）。
@@ -1307,89 +1307,6 @@ for text in ["猫が庭で寝ている。", "当該事案の瑕疵について�
 - wordfreq は Wikipedia、字幕、Web、SNS など複数の資源を統合した頻度表で、40 以上の言語に対応している（データは 2021 年までで更新終了）。
 - 頻度は難しさの近似にすぎない。高頻度でも多義で難しい語（「かける」「とる」）や、学習者の母語によって易しい語（漢字圏の学習者にとっての漢語）がある。
 - 日本語の教育語彙としては、日本語教育語彙表や旧日本語能力試験の出題基準などが使われる。
-
-## 難しい単語を見つけてやさしい単語に言い換える（語彙平易化） {lexical_simplification}
-
-文章の中の難しい単語を見つけ、文脈に合うやさしい単語に置き換えたい。
-
-```python
-!pip install -q fugashi unidic-lite wordfreq
-```
-
-```python
-import torch
-from fugashi import Tagger
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-from wordfreq import zipf_frequency
-
-tagger = Tagger()
-name = "tohoku-nlp/bert-base-japanese-v3"
-tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForMaskedLM.from_pretrained(name).eval()
-
-def complex_words(sentence, threshold=4.0):
-    """1. 難しい語の特定: 内容語のうち、頻度 (Zipf 尺度) がしきい値より低いものを難しい語とする"""
-    out = []
-    for w in tagger(sentence):
-        if w.feature.pos1 in ("名詞", "動詞", "形容詞", "形状詞", "副詞") and w.feature.pos2 not in ("固有名詞", "数詞", "非自立可能"):
-            z = zipf_frequency(w.feature.lemma or w.surface, "ja")
-            if z < threshold:
-                out.append((w.surface, round(z, 2)))
-    return out
-
-sentence = "政府は景気の低迷を打開するため、新たな施策を講じると表明した。"
-print(complex_words(sentence))
-```
-
-```python
-@torch.no_grad()
-def candidates(sentence, target, k=30):
-    """2. 言い換え候補の生成: 「元の文 [SEP] 対象語をマスクした文」を与え、マスクに入る語を予測させる (元の文を見せると、意味の近い語が出やすい)"""
-    masked = sentence.replace(target, tokenizer.mask_token, 1)
-    enc = tokenizer(sentence, masked, return_tensors="pt")
-    pos = (enc["input_ids"][0] == tokenizer.mask_token_id).nonzero()[0, 0]
-    probs = model(**enc).logits[0, pos].softmax(-1)
-    top = probs.topk(k)
-    return [(tokenizer.convert_ids_to_tokens(int(i)), float(p)) for p, i in zip(top.values, top.indices)]
-
-def simplify_word(sentence, target, k=30, min_prob=0.02):
-    """3. 候補の選別と順位付け: 元の語と同じ品詞で、元の語より頻度が高く (やさしく)、文脈に合う確率が一定以上の語だけを残す"""
-    target_word = next(w for w in tagger(target))
-    target_pos, target_zipf = target_word.feature.pos1, zipf_frequency(target_word.feature.lemma or target, "ja")
-    ranked = []
-    for cand, p in candidates(sentence, target, k):
-        if cand.startswith("##") or cand == target or cand in target or target in cand:
-            continue
-        w = next(iter(tagger(cand)), None)
-        z = zipf_frequency(cand, "ja")
-        if w is not None and len(tagger(cand)) == 1 and w.feature.pos1 == target_pos and z > target_zipf and p >= min_prob:
-            ranked.append((cand, round(z, 2), round(p, 3)))
-    return sorted(ranked, key=lambda x: -x[2])[:5]                 # 文脈に合う確率の高い順
-
-for target, z in complex_words(sentence):
-    print(f"{target} (頻度 {z}) →", simplify_word(sentence, target))
-```
-
-```python
-def simplify(sentence, threshold=4.0):
-    out = sentence
-    for target, _ in complex_words(sentence, threshold):
-        cands = simplify_word(out, target)
-        if cands:
-            out = out.replace(target, cands[0][0], 1)
-    return out
-
-for s in [sentence, "医師は患者に対し、速やかに治療を開始するよう勧告した。", "当該施設の利用に際しては、事前に申請を行う必要がある。",
-          "彼は困難な状況に直面しても、決して諦めなかった。"]:
-    print(f"{s}\n   → {simplify(s)}")
-```
-
-- 語彙平易化は 3 段階に分けて考える: 難しい語の特定 (complex word identification)、言い換え候補の生成、候補の選別と順位付け。
-- 単語の難しさは、頻度でかなり近似できる。日本語教育では、語彙の級（旧日本語能力試験の級など）や学習者コーパスでの頻度も使われる。誰にとって難しいか（子ども、学習者、専門外の人）で基準は変わる。
-- マスク言語モデルは文脈に合う語を出すが、意味が同じとは限らない（反対語や、単に文脈に合うだけの別の語が出る）。確率の低い候補を捨て、良い候補がなければ言い換えない、という慎重な設定にする。それでも意味のずれは残るので、結果は人が確認する。
-- 活用語は、候補の語を元の語と同じ活用形にそろえる必要がある。ここでは形の合う候補だけを残す簡易な方法をとっている。
-- LLM に「この語をやさしく言い換えて」と頼む方法が、現在は最も精度が高い。その場合も、候補が本当にやさしいか（頻度）と、意味が保たれているかの確認は別に行う。
-- 単語単位の言い換えでは、文の構造の難しさは解消しない。文全体の平易化は、要約と平易化の章を参照。
 
 ## 穴埋め問題（クローズテスト）を自動で作る {cloze_generation}
 

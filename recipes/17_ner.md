@@ -211,129 +211,6 @@ for match_id, start, end in m(doc):
 - 使える属性は `ORTH` `LOWER` `LEMMA` `POS` `TAG` `DEP` `ENT_TYPE` `IS_DIGIT` など。`OP` は `?` `*` `+` `!`。
 - 単語列の辞書（数万語）を高速に引くなら `PhraseMatcher`、係り受けパターンなら `DependencyMatcher`。
 
-## 個人情報をマスクする（仮名化） {pii_mask}
-
-テキスト中の人名・地名・電話番号・メールアドレスなどを伏せ字にして、データを共有できる形にしたい。
-
-```python
-!pip install -q ginza ja_ginza
-```
-
-```python
-import re
-import spacy
-
-nlp = spacy.load("ja_ginza")
-
-REGEX = {
-    "EMAIL": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
-    "PHONE": r"0\d{1,4}-\d{1,4}-\d{4}",
-    "POSTAL": r"〒?\d{3}-\d{4}",
-}
-NER_LABELS = {"Person": "PERSON", "City": "LOCATION", "Province": "LOCATION", "Company": "ORG", "School": "ORG"}
-
-def mask(text):
-    spans = []
-    for label, pat in REGEX.items():
-        spans += [(m.start(), m.end(), label) for m in re.finditer(pat, text)]
-    for ent in nlp(text).ents:
-        if ent.label_ in NER_LABELS:
-            spans.append((ent.start_char, ent.end_char, NER_LABELS[ent.label_]))
-    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
-    out, pos = [], 0
-    for start, end, label in spans:
-        if start < pos:      # 重なりは先に始まる (長い) ほうを優先
-            continue
-        out += [text[pos:start], f"<{label}>"]
-        pos = end
-    return "".join(out) + text[pos:]
-
-text = "山田太郎(yamada@example.com、090-1234-5678)は横浜市在住で、ソニーに勤務している。佐藤花子は東京大学の学生です。"
-print(mask(text))
-```
-
-- NER の再現率は 100% ではない。公開前には人手の確認が必要。再現率を優先するなら複数のモデルの和集合をとる。
-- 単にマスクすると文脈が失われる。「山田太郎 → 人物A」のように同じ実体に同じ仮名を割り当てると、後段の分析に使いやすい。
-- 英語を含む多言語なら Microsoft Presidio (`presidio-analyzer`) が定番。
-
-## 音声認識の結果から固有表現を抽出する {asr_ner}
-
-会議の録音やコールセンターの通話のような音声から、人名・地名・組織名を取り出したい。音声認識の誤りが固有表現抽出にどう影響するかも確かめる。
-
-```python
-!pip install -q gTTS ginza ja-ginza jiwer
-!apt-get install -y -q ffmpeg > /dev/null 2>&1
-```
-
-```python
-from gtts import gTTS
-
-# 手元に音声がないので、ここでは合成音声で試す (実際には録音した音声ファイルを使う)
-texts = [
-    "山田太郎さんは来週の月曜日に大阪の本社で開かれる会議に出席します。",
-    "京都大学の研究チームは、理化学研究所と共同で新しい実験を行いました。",
-    "ソニーとホンダは、電気自動車を開発する新会社を東京に設立すると発表した。",
-    "総理大臣は明日、ワシントンでアメリカの大統領と会談する予定です。",
-    "鈴木花子選手は、パリで行われた大会で金メダルを獲得しました。",
-    "北海道の函館市では、昨日から大雪が続いており、JR 北海道は一部の列車を運休しています。",
-]
-for i, t in enumerate(texts):
-    gTTS(t, lang="ja").save(f"audio{i}.mp3")
-!ls -la audio*.mp3 | head -n 3
-```
-
-```python
-import torch
-from transformers import pipeline
-
-asr = pipeline("automatic-speech-recognition", model="openai/whisper-small", generate_kwargs={"language": "japanese", "task": "transcribe"})
-transcripts = [asr(f"audio{i}.mp3")["text"].strip() for i in range(len(texts))]
-for ref, hyp in zip(texts, transcripts):
-    print(f"正解: {ref}\n認識: {hyp}")
-```
-
-```python
-import jiwer
-import spacy
-
-nlp = spacy.load("ja_ginza")
-normalize = lambda s: s.replace(" ", "").replace("、", "").replace("。", "")
-print("文字誤り率 (CER):", round(jiwer.cer([normalize(t) for t in texts], [normalize(t) for t in transcripts]), 3))
-
-def entities(text):
-    return {(e.text, e.label_) for e in nlp(text).ents}
-
-tp = fp = fn = 0
-for ref, hyp in zip(texts, transcripts):
-    gold, pred = entities(ref), entities(hyp)          # 正解の書き起こしから取り出した固有表現を「正解」と見なす
-    tp += len(gold & pred); fp += len(pred - gold); fn += len(gold - pred)
-    if gold != pred:
-        print(f"書き起こしから: {sorted(gold - pred)}\n認識結果から  : {sorted(pred - gold)}")
-p, r = tp / (tp + fp), tp / (tp + fn)
-print(f"固有表現の一致: 適合率 {p:.2f} / 再現率 {r:.2f} / F1 {2 * p * r / (p + r):.2f}")
-```
-
-```python
-# 表記のゆれを吸収して比べる: 読み (カタカナ) が同じなら一致と見なす
-def readings(text):
-    doc = nlp(text)
-    return {("".join(t.morph.get("Reading")[0] if t.morph.get("Reading") else t.text for t in e), e.label_) for e in doc.ents}
-
-tp = fp = fn = 0
-for ref, hyp in zip(texts, transcripts):
-    gold, pred = readings(ref), readings(hyp)
-    tp += len(gold & pred); fp += len(pred - gold); fn += len(gold - pred)
-p, r = tp / (tp + fp), tp / (tp + fn)
-print(f"読みで比べた場合: 適合率 {p:.2f} / 再現率 {r:.2f} / F1 {2 * p * r / (p + r):.2f}")
-```
-
-- 音声認識の結果には、句読点がない（またはモデルが推定したもの）、同音異義語の誤り（人名の漢字が違う）、数字や英字の表記のゆれ、といった書き言葉との違いがある。書き言葉で学習した固有表現抽出器は、その分だけ精度が落ちる。
-- 固有名詞は音声認識が最も間違えやすい部分。特に人名は、音が合っていても漢字が違うことが多い。読みで照合する、候補の辞書と突き合わせる、といった後処理が有効。
-- 読みで照合しても、この例では結果が変わらなかった。「ホンダ」が「本田」になると、表記だけでなく種類の判定まで（会社 → 人名）変わってしまうため。音声認識の誤りは、固有表現の範囲と種類の両方に波及する。
-- 全体の文字誤り率が低くても、固有表現に限ると誤りが多いことがある。目的が固有表現なら、固有表現だけの誤り率を測る。
-- ここで使ったのは合成音声で、実際の会話音声（雑音、言いよどみ、複数話者）よりはるかに認識しやすい。実データでの性能は、必ず実データで測る。
-- 音声認識と固有表現抽出を別々に行う方法（ここでの方法）のほかに、音声から直接固有表現を出すモデルや、認識結果の誤りを LLM で訂正してから抽出する方法がある。
-
 ## 文字位置のアノテーションを BIO タグ列に変換する {spans_to_bio}
 
 「何文字目から何文字目が人名」という形式（doccano や brat の出力）のアノテーションを、トークンごとの BIO タグに変換したい。
@@ -610,6 +487,129 @@ for e in ner(text):
 - ここではサブワードすべてにラベルを付けている（先頭だけに付けて残りを -100 にする流儀もある）。評価は本来、単語や文字の単位に戻して行うのが厳密。
 - XLM-R のトークナイザは、文頭や空白の後に単独の `▁` トークンを置き、その文字位置を次の文字と同じ `(0, 1)` のように返す。そのまま位置で判定すると `▁` と次のトークンの両方が `B-` になり、推論時に「ソ」と「ソニーグループ」のように同じ固有表現が二重に出る。
 - 日本語特化の BERT (`tohoku-nlp/bert-base-japanese-v3`) のほうが精度は高いが、トークナイザが文字位置を返さないので、位置合わせを自分で実装する必要がある。
+
+## 個人情報をマスクする（仮名化） {pii_mask}
+
+テキスト中の人名・地名・電話番号・メールアドレスなどを伏せ字にして、データを共有できる形にしたい。
+
+```python
+!pip install -q ginza ja_ginza
+```
+
+```python
+import re
+import spacy
+
+nlp = spacy.load("ja_ginza")
+
+REGEX = {
+    "EMAIL": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
+    "PHONE": r"0\d{1,4}-\d{1,4}-\d{4}",
+    "POSTAL": r"〒?\d{3}-\d{4}",
+}
+NER_LABELS = {"Person": "PERSON", "City": "LOCATION", "Province": "LOCATION", "Company": "ORG", "School": "ORG"}
+
+def mask(text):
+    spans = []
+    for label, pat in REGEX.items():
+        spans += [(m.start(), m.end(), label) for m in re.finditer(pat, text)]
+    for ent in nlp(text).ents:
+        if ent.label_ in NER_LABELS:
+            spans.append((ent.start_char, ent.end_char, NER_LABELS[ent.label_]))
+    spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+    out, pos = [], 0
+    for start, end, label in spans:
+        if start < pos:      # 重なりは先に始まる (長い) ほうを優先
+            continue
+        out += [text[pos:start], f"<{label}>"]
+        pos = end
+    return "".join(out) + text[pos:]
+
+text = "山田太郎(yamada@example.com、090-1234-5678)は横浜市在住で、ソニーに勤務している。佐藤花子は東京大学の学生です。"
+print(mask(text))
+```
+
+- NER の再現率は 100% ではない。公開前には人手の確認が必要。再現率を優先するなら複数のモデルの和集合をとる。
+- 単にマスクすると文脈が失われる。「山田太郎 → 人物A」のように同じ実体に同じ仮名を割り当てると、後段の分析に使いやすい。
+- 英語を含む多言語なら Microsoft Presidio (`presidio-analyzer`) が定番。
+
+## 音声認識の結果から固有表現を抽出する {asr_ner}
+
+会議の録音やコールセンターの通話のような音声から、人名・地名・組織名を取り出したい。音声認識の誤りが固有表現抽出にどう影響するかも確かめる。
+
+```python
+!pip install -q gTTS ginza ja-ginza jiwer
+!apt-get install -y -q ffmpeg > /dev/null 2>&1
+```
+
+```python
+from gtts import gTTS
+
+# 手元に音声がないので、ここでは合成音声で試す (実際には録音した音声ファイルを使う)
+texts = [
+    "山田太郎さんは来週の月曜日に大阪の本社で開かれる会議に出席します。",
+    "京都大学の研究チームは、理化学研究所と共同で新しい実験を行いました。",
+    "ソニーとホンダは、電気自動車を開発する新会社を東京に設立すると発表した。",
+    "総理大臣は明日、ワシントンでアメリカの大統領と会談する予定です。",
+    "鈴木花子選手は、パリで行われた大会で金メダルを獲得しました。",
+    "北海道の函館市では、昨日から大雪が続いており、JR 北海道は一部の列車を運休しています。",
+]
+for i, t in enumerate(texts):
+    gTTS(t, lang="ja").save(f"audio{i}.mp3")
+!ls -la audio*.mp3 | head -n 3
+```
+
+```python
+import torch
+from transformers import pipeline
+
+asr = pipeline("automatic-speech-recognition", model="openai/whisper-small", generate_kwargs={"language": "japanese", "task": "transcribe"})
+transcripts = [asr(f"audio{i}.mp3")["text"].strip() for i in range(len(texts))]
+for ref, hyp in zip(texts, transcripts):
+    print(f"正解: {ref}\n認識: {hyp}")
+```
+
+```python
+import jiwer
+import spacy
+
+nlp = spacy.load("ja_ginza")
+normalize = lambda s: s.replace(" ", "").replace("、", "").replace("。", "")
+print("文字誤り率 (CER):", round(jiwer.cer([normalize(t) for t in texts], [normalize(t) for t in transcripts]), 3))
+
+def entities(text):
+    return {(e.text, e.label_) for e in nlp(text).ents}
+
+tp = fp = fn = 0
+for ref, hyp in zip(texts, transcripts):
+    gold, pred = entities(ref), entities(hyp)          # 正解の書き起こしから取り出した固有表現を「正解」と見なす
+    tp += len(gold & pred); fp += len(pred - gold); fn += len(gold - pred)
+    if gold != pred:
+        print(f"書き起こしから: {sorted(gold - pred)}\n認識結果から  : {sorted(pred - gold)}")
+p, r = tp / (tp + fp), tp / (tp + fn)
+print(f"固有表現の一致: 適合率 {p:.2f} / 再現率 {r:.2f} / F1 {2 * p * r / (p + r):.2f}")
+```
+
+```python
+# 表記のゆれを吸収して比べる: 読み (カタカナ) が同じなら一致と見なす
+def readings(text):
+    doc = nlp(text)
+    return {("".join(t.morph.get("Reading")[0] if t.morph.get("Reading") else t.text for t in e), e.label_) for e in doc.ents}
+
+tp = fp = fn = 0
+for ref, hyp in zip(texts, transcripts):
+    gold, pred = readings(ref), readings(hyp)
+    tp += len(gold & pred); fp += len(pred - gold); fn += len(gold - pred)
+p, r = tp / (tp + fp), tp / (tp + fn)
+print(f"読みで比べた場合: 適合率 {p:.2f} / 再現率 {r:.2f} / F1 {2 * p * r / (p + r):.2f}")
+```
+
+- 音声認識の結果には、句読点がない（またはモデルが推定したもの）、同音異義語の誤り（人名の漢字が違う）、数字や英字の表記のゆれ、といった書き言葉との違いがある。書き言葉で学習した固有表現抽出器は、その分だけ精度が落ちる。
+- 固有名詞は音声認識が最も間違えやすい部分。特に人名は、音が合っていても漢字が違うことが多い。読みで照合する、候補の辞書と突き合わせる、といった後処理が有効。
+- 読みで照合しても、この例では結果が変わらなかった。「ホンダ」が「本田」になると、表記だけでなく種類の判定まで（会社 → 人名）変わってしまうため。音声認識の誤りは、固有表現の範囲と種類の両方に波及する。
+- 全体の文字誤り率が低くても、固有表現に限ると誤りが多いことがある。目的が固有表現なら、固有表現だけの誤り率を測る。
+- ここで使ったのは合成音声で、実際の会話音声（雑音、言いよどみ、複数話者）よりはるかに認識しやすい。実データでの性能は、必ず実データで測る。
+- 音声認識と固有表現抽出を別々に行う方法（ここでの方法）のほかに、音声から直接固有表現を出すモデルや、認識結果の誤りを LLM で訂正してから抽出する方法がある。
 
 ## EC の商品名からブランド・色・サイズ・素材・容量を取り出す（辞書と正規表現、BERT、LLM） {product_attribute_extraction gpu}
 

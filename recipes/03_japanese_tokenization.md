@@ -504,65 +504,6 @@ for q in ["東京大学", "コロナ", "新型コロナウイルス感染症"]:
 - インストーラーは元の IPA 辞書の tar.gz を自分でダウンロードし（SHA-1 で照合）、パッチを当ててビルドする。最初のダウンロード先 osdn.net は検証時（2026 年 11 月）名前解決できず、SourceForge から取得された。`-n` は GitHub の最新版に更新してからインストール、`-y` はテスト結果の確認を省略、`-u` はインストール先が自分のディレクトリでなくても sudo を使わずに `make install` する（付けないと Colab では `sudo make install` を通る）。インストール先は `mecab-config --dicdir` の下（Colab では `/usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd`）で、`-p ディレクトリ` で変えられる。
 - README の目安では、標準のインストールに空きメモリが最低 2GB（推奨 6GB）必要。手元の検証では、ビルド中の最大のプロセスのメモリ使用量（最大常駐サイズ）は約 1.6GB、できた `sys.dic` は `ls -lh` で 866M（README では約 910MB）だった。`--ignore_adverb` などの `--ignore_*` で一部の辞書を外すと小さくなり（README によれば全部指定して約 300MB 減る）、`-a` では標準では入らない低頻度の日時・数量表現などもすべて入る。Colab のランタイムを作り直すとインストールはやり直しになる。
 
-## 古文を形態素解析する（中古和文 UniDic） {classical_japanese}
-
-源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
-
-```python
-!pip install -q fugashi unidic-lite
-!wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
-!find chuko -name "dicrc" | head -n 1
-```
-
-```python
-import glob, os
-from fugashi import GenericTagger, Tagger
-
-dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
-classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
-modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
-
-text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
-print("中古和文 UniDic:", " | ".join(w.surface for w in classical(text)))
-print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
-```
-
-```python
-# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
-for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
-    f = w.feature
-    print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
-```
-
-```python
-# 助動詞を取り出して、意味を調べる手がかりにする
-def auxiliaries(text):
-    return [(w.surface, w.feature[7], w.feature[5]) for w in classical(text) if w.feature[0] == "助動詞"]
-
-for s in ["竹取の翁といふ者ありけり。", "花の色は移りにけりないたづらに", "男もすなる日記といふものを、女もしてみむとてするなり。", "行く河の流れは絶えずして、しかももとの水にあらず。"]:
-    print(s, "→", auxiliaries(s))
-```
-
-```python
-# 現代語の辞書で解析すると、どこが違ってくるか
-import difflib
-
-s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに"
-a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
-print("中古和文:", a); print("現代語  :", b)
-print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
-# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
-s2 = "男もすなる日記といふものを"
-print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
-print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])
-```
-
-- 古文は、語彙も活用も仮名遣いも現代語と違う。現代語用の辞書では、助動詞（けり、なり、む）や歴史的仮名遣い（いふ、やうやう）を正しく扱えない。
-- 国立国語研究所が、時代・文体別の UniDic を公開している。平安時代の仮名文学には「中古和文」、明治の文語文には「近代文語」、ほかに上代語、中世の説話や狂言、近世の洒落本向けなどがある。対象のテキストに合うものを選ぶ。
-- 辞書の形式は現代語の UniDic と共通なので、MeCab (fugashi) の辞書を差し替えるだけで使える。語彙素（辞書の見出し）でまとめれば、表記のゆれをそろえて数えられる。
-- 活用形や助動詞の語彙素が分かるので、古文の学習支援（品詞分解）、文体の計量的な分析、時代による語の変化の調査に使える。
-- 辞書と違う時代・文体のテキスト（漢文訓読体、和漢混交文、近世の口語）では精度が落ちる。解析結果を抜き取って確かめる。
-
 ## Sudachi で分割の粒度 (A/B/C) を切り替える {sudachi_split}
 
 「国立国会図書館」を 1 語にするか「国立/国会/図書/館」にするか、用途に応じて粒度を変えたい。
@@ -672,41 +613,6 @@ print(list(t.tokenize(text, wakati=True)))
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
 - 辞書を作らずに済ませるなら、この章の「連続する名詞をつなげて複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
-## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
-
-MeCab（UniDic / IPA 辞書）、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
-
-```python
-!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
-```
-
-```python
-from fugashi import Tagger, GenericTagger
-import ipadic
-from sudachipy import Dictionary, SplitMode
-from janome.tokenizer import Tokenizer
-
-unidic = Tagger()
-ipa = GenericTagger(ipadic.MECAB_ARGS)
-sudachi = Dictionary().create()
-janome = Tokenizer()
-
-tokenizers = {
-    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
-    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
-    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
-    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
-    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
-}
-
-for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
-    print(s)
-    for name, f in tokenizers.items():
-        print(f"  {name:13}", " | ".join(f(s)))
-```
-
-- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
-
 ## Juman++ で形態素解析する（代表表記・カテゴリ付き） {jumanpp}
 
 単語の区切りと品詞に加えて、「りんご/林檎/リンゴ」をまとめる代表表記や、「人」「場所」のような意味カテゴリも欲しい。京都大学の研究室が開発した、RNN 言語モデルで単語列のもっともらしさを評価する形態素解析器 Juman++ を使う。
@@ -783,6 +689,176 @@ for s in ["外国人参政権について話し合った。", "東京都立大�
 - 生の出力の `@` で始まる行は、読みも品詞も同じで代表表記だけが違う候補（同形異義語）。「スマホ」のような自動獲得語は代表表記がなく（`canon` が None）、意味情報に「Wikipediaリダイレクト:スマートフォン」が入った。
 - Juman++ (v2.0.0-rc4) は、最初の入力行が空行だと異常終了（セグメンテーション違反）することがある（毎回ではない）。rhoknp (1.8.2) の `Jumanpp()` は起動時の確認で空の文を送るので、異常終了した回は「failed to start Juman++」という警告が出る（解析は再起動したプロセスで行われる）。`skip_sanity_check=True` で確認を省いたときは、最初に空文字列を渡さない。subprocess で直接渡すときも先頭に空行を置かない。
 - 配布物（約 300MB）に学習済みのモデルが含まれるので、GitHub のソースではなくリリースの tar.xz を使う。ライセンスは Apache 2.0。最新版は 2023 年の v2.0.0-rc4。
+
+## KyTea で単語分割と読みの推定をする {kytea}
+
+辞書の照合ではなく、文字の並びから「ここで単語が切れるか」を判定する解析器で、単語分割と品詞・読みを得たい。辞書にない語の読みも推定できる KyTea（京都テキスト解析ツールキット）を使う。
+
+```python
+!pip install -q kytea fugashi unidic-lite
+# 学習済みの日本語モデル (gzip で約 38MB、展開後 約 120MB) はソースのリポジトリに同梱されている。pip のパッケージには含まれない
+!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz && ls -lh model.bin
+```
+
+```python
+import Mykytea
+
+kytea = Mykytea.Mykytea("-model model.bin")   # オプションはコマンド版の kytea と同じ書き方で渡す
+s = "太郎は図書館で借りた本を花子に渡した。"
+print(" ".join(kytea.getWS(s)))      # 単語分割だけ
+print(kytea.getTagsToString(s))      # 単語/品詞/読み
+
+# getTags は単語ごとに [品詞の候補, 読みの候補] を返す (各候補は (タグ, スコア))
+for w in kytea.getTags(s):
+    (pos, pos_score), = w.tag[0]
+    (yomi, yomi_score), = w.tag[1]
+    print(w.surface, pos, yomi, round(pos_score, 2), round(yomi_score, 2), sep="\t")
+```
+
+```python
+# getAllTags は 2 位以下の候補とスコアも返す (-tagmax で候補数を変えられる。既定は 3)。読みは文脈で変わる
+for s in ["日本語の本を今日読んだ。", "今日は日本語の本を読んだ。"]:
+    for w in kytea.getAllTags(s):
+        if w.surface == "日本":
+            print(s, "日本 の読みの候補:", [(t, round(sc, 2)) for t, sc in w.tag[1]])
+
+# -notags は分割だけ、-notag 1 は 1 番目のタグ (品詞) を推定せず読みだけを付ける
+print(Mykytea.Mykytea("-model model.bin -notags").getTagsToString("日本語の本を今日読んだ。"))
+print(Mykytea.Mykytea("-model model.bin -notag 1").getTagsToString("日本語の本を今日読んだ。"))
+```
+
+```python
+# MeCab + UniDic (fugashi) と分割の単位を比べる
+from fugashi import Tagger
+
+tagger = Tagger()
+for s in ["食べさせられたくなかった。", "大規模言語モデルを用いた検索拡張生成の論文を読んだ。", "ググってもわからんかった。"]:
+    print("KyTea  :", " | ".join(kytea.getWS(s)))
+    print("UniDic :", " | ".join(w.surface for w in tagger(s)))
+```
+
+```python
+# UniDic (unidic-lite) で未知語になったり細かく分かれたりする語を含む文 (最後の文は「辞書にない未知語を見つける」と同じ)。
+# UniDic は未知語に読みを付けられないが、KyTea は自分の辞書にない語 (「鬼滅」「ジーピーティー」) も文字の並びから区切りと読みを推定する
+for s in ["鬼滅の刃の竈門炭治郎が好きだ。", "チャットジーピーティーに聞いた。", "彼はスマホをポチポチいじっていた。", "推し活でエモい写真をインスタにあげた。"]:
+    print("KyTea  :", kytea.getTagsToString(s))
+    print("UniDic :", " ".join(f"{w.surface}/{'(未知語)' if w.is_unk else w.feature.kana or w.surface}" for w in tagger(s)))
+```
+
+```python
+# 速度の比較 (10,000 文)
+import time
+
+texts = ["国境の長いトンネルを抜けると雪国であった。", "自然言語処理の小ネタを集めたクックブックを作りたい。"] * 5000
+for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -notags").getWS),
+                ("KyTea (品詞・読み)", kytea.getTags),
+                ("MeCab + UniDic", tagger)]:
+    t = time.perf_counter()
+    for x in texts:
+        f(x)
+    print(f"{name:16} {time.perf_counter() - t:5.2f} 秒")
+```
+
+- KyTea は Graham Neubig らが開発した解析器。文字と文字の間ごとに単語境界かどうかを、周りの文字 n-gram・文字種・辞書との一致を素性とする線形分類器（線形 SVM やロジスティック回帰。学習は LIBLINEAR）で 1 か所ずつ独立に判定し、単語の品詞と読みも個別に推定する（点予測）。付録「仕組みを理解するための実装」の「単語分割を文字単位の系列ラベリングとして解く」の CRF はラベル列全体をまとめて決めるが、KyTea は隣の判定結果を使わないので、一部の境界や読みだけを付けた「部分的アノテーション」のデータでも学習できる。
+- 同梱のモデルは現代日本語書き言葉均衡コーパス (BCCWJ) や UniDic などで学習されたもので、活用語尾を語幹と別の単語にする（「渡 し た」「読 ん だ」「た く な かっ た」）。MeCab + UniDic の短単位（「読ん」「たく」「なかっ」）より細かい。構文解析の章の「Ckylark で日本語の句構造解析をする」の日本語モデルは、この分割を前提にしている。
+- 読みはひらがなで、単語の表記に対応する部分だけが付く（「渡」→「わた」）。送り仮名が別の単語になるので、この章の「漢字の読みを取得してふりがな（ルビ）を付ける」（送り仮名ごとルビが付く）と違い、漢字の部分だけにルビを付けやすい。辞書で読みの候補が 1 つしかない語はスコアが 100 になり、「日本」のように候補が複数ある語は文脈で結果が変わる（「にほん」と「にっぽん」）。
+- 辞書にない語の推定は誤ることもある（「推し活」は「推（お）/ し活」に分割された）。Python のバインディングからは未知語かどうかは分からない。コマンド版の `kytea -unktag '[UNK]'` で同じ文を試すと、「鬼滅」「ジーピーティー」「し活」「エモ」「ポチポチ」に印が付き、「スマホ」「インスタ」は KyTea の辞書にある語だった。
+- 検証環境で 10,000 文にかかった時間は、品詞・読みありが 0.8〜0.9 秒、分割だけ (`-notags`) が約 0.15 秒、MeCab + UniDic が 0.1 秒ほど。モデルの読み込みに約 2 秒かかるので、`Mykytea` は 1 回だけ作って使い回す。
+- pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea`（`-part` で部分的アノテーション、`-dict` で辞書を与える）が要るなら、構文解析の章の「Ckylark で日本語の句構造解析をする」のようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7（2014 年）、リポジトリの最後の更新は 2020 年。
+
+## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
+
+MeCab（UniDic / IPA 辞書）、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
+
+```python
+!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
+```
+
+```python
+from fugashi import Tagger, GenericTagger
+import ipadic
+from sudachipy import Dictionary, SplitMode
+from janome.tokenizer import Tokenizer
+
+unidic = Tagger()
+ipa = GenericTagger(ipadic.MECAB_ARGS)
+sudachi = Dictionary().create()
+janome = Tokenizer()
+
+tokenizers = {
+    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
+    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
+    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
+    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
+    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
+}
+
+for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
+    print(s)
+    for name, f in tokenizers.items():
+        print(f"  {name:13}", " | ".join(f(s)))
+```
+
+- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
+
+## 古文を形態素解析する（中古和文 UniDic） {classical_japanese}
+
+源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
+
+```python
+!pip install -q fugashi unidic-lite
+!wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
+!find chuko -name "dicrc" | head -n 1
+```
+
+```python
+import glob, os
+from fugashi import GenericTagger, Tagger
+
+dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
+classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
+modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
+
+text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
+print("中古和文 UniDic:", " | ".join(w.surface for w in classical(text)))
+print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
+```
+
+```python
+# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
+for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
+    f = w.feature
+    print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
+```
+
+```python
+# 助動詞を取り出して、意味を調べる手がかりにする
+def auxiliaries(text):
+    return [(w.surface, w.feature[7], w.feature[5]) for w in classical(text) if w.feature[0] == "助動詞"]
+
+for s in ["竹取の翁といふ者ありけり。", "花の色は移りにけりないたづらに", "男もすなる日記といふものを、女もしてみむとてするなり。", "行く河の流れは絶えずして、しかももとの水にあらず。"]:
+    print(s, "→", auxiliaries(s))
+```
+
+```python
+# 現代語の辞書で解析すると、どこが違ってくるか
+import difflib
+
+s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに"
+a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
+print("中古和文:", a); print("現代語  :", b)
+print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
+# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
+s2 = "男もすなる日記といふものを"
+print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
+print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])
+```
+
+- 古文は、語彙も活用も仮名遣いも現代語と違う。現代語用の辞書では、助動詞（けり、なり、む）や歴史的仮名遣い（いふ、やうやう）を正しく扱えない。
+- 国立国語研究所が、時代・文体別の UniDic を公開している。平安時代の仮名文学には「中古和文」、明治の文語文には「近代文語」、ほかに上代語、中世の説話や狂言、近世の洒落本向けなどがある。対象のテキストに合うものを選ぶ。
+- 辞書の形式は現代語の UniDic と共通なので、MeCab (fugashi) の辞書を差し替えるだけで使える。語彙素（辞書の見出し）でまとめれば、表記のゆれをそろえて数えられる。
+- 活用形や助動詞の語彙素が分かるので、古文の学習支援（品詞分解）、文体の計量的な分析、時代による語の変化の調査に使える。
+- 辞書と違う時代・文体のテキスト（漢文訓読体、和漢混交文、近世の口語）では精度が落ちる。解析結果を抜き取って確かめる。
 
 ## 日本語の文を句点で分割する（括弧内は分割しない） {sentence_split_ja}
 
@@ -1106,79 +1182,3 @@ for k in (1, 2):
 - LLM（sarashina2.2-3b-instruct、1-shot）は、同じ 100 件で読点 F1 0.663、句点 F1 0.808 と BERT（0.782、0.955）より低く、F1 の差のブートストラップ 95% 信頼区間（100 件のもとの 27 記事を単位に復元抽出。読点 [0.086, 0.157]、句点 [0.107, 0.187]）も 0 を含まなかった。句読点以外の文字を変えなかった出力は 100 件中 1 件だけで、文の途中で切れた断片の続きを書き足したり、記号を足したりした。そのため出力を difflib で元の文字列に対応づけてから評価している。より大きな LLM や API のモデルでの結果は確かめていない。
 - GPU メモリの最大使用量は、BERT の学習と 3B の LLM の推論を合わせて 9.0 GB で、T4 (16GB) に収まる。
 - データとモデルの出典とライセンス: 日本語 Wikipedia（wikimedia/wikipedia、CC BY-SA 3.0 / GFDL）、tohoku-nlp/bert-base-japanese-char-v3（東北大学、Apache 2.0）、sbintuitions/sarashina2.2-3b-instruct-v0.1（SB Intuitions、MIT）。sarashina のトークナイザーを直すコードについては、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
-
-## KyTea で単語分割と読みの推定をする {kytea}
-
-辞書の照合ではなく、文字の並びから「ここで単語が切れるか」を判定する解析器で、単語分割と品詞・読みを得たい。辞書にない語の読みも推定できる KyTea（京都テキスト解析ツールキット）を使う。
-
-```python
-!pip install -q kytea fugashi unidic-lite
-# 学習済みの日本語モデル (gzip で約 38MB、展開後 約 120MB) はソースのリポジトリに同梱されている。pip のパッケージには含まれない
-!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz && ls -lh model.bin
-```
-
-```python
-import Mykytea
-
-kytea = Mykytea.Mykytea("-model model.bin")   # オプションはコマンド版の kytea と同じ書き方で渡す
-s = "太郎は図書館で借りた本を花子に渡した。"
-print(" ".join(kytea.getWS(s)))      # 単語分割だけ
-print(kytea.getTagsToString(s))      # 単語/品詞/読み
-
-# getTags は単語ごとに [品詞の候補, 読みの候補] を返す (各候補は (タグ, スコア))
-for w in kytea.getTags(s):
-    (pos, pos_score), = w.tag[0]
-    (yomi, yomi_score), = w.tag[1]
-    print(w.surface, pos, yomi, round(pos_score, 2), round(yomi_score, 2), sep="\t")
-```
-
-```python
-# getAllTags は 2 位以下の候補とスコアも返す (-tagmax で候補数を変えられる。既定は 3)。読みは文脈で変わる
-for s in ["日本語の本を今日読んだ。", "今日は日本語の本を読んだ。"]:
-    for w in kytea.getAllTags(s):
-        if w.surface == "日本":
-            print(s, "日本 の読みの候補:", [(t, round(sc, 2)) for t, sc in w.tag[1]])
-
-# -notags は分割だけ、-notag 1 は 1 番目のタグ (品詞) を推定せず読みだけを付ける
-print(Mykytea.Mykytea("-model model.bin -notags").getTagsToString("日本語の本を今日読んだ。"))
-print(Mykytea.Mykytea("-model model.bin -notag 1").getTagsToString("日本語の本を今日読んだ。"))
-```
-
-```python
-# MeCab + UniDic (fugashi) と分割の単位を比べる
-from fugashi import Tagger
-
-tagger = Tagger()
-for s in ["食べさせられたくなかった。", "大規模言語モデルを用いた検索拡張生成の論文を読んだ。", "ググってもわからんかった。"]:
-    print("KyTea  :", " | ".join(kytea.getWS(s)))
-    print("UniDic :", " | ".join(w.surface for w in tagger(s)))
-```
-
-```python
-# UniDic (unidic-lite) で未知語になったり細かく分かれたりする語を含む文 (最後の文は「辞書にない未知語を見つける」と同じ)。
-# UniDic は未知語に読みを付けられないが、KyTea は自分の辞書にない語 (「鬼滅」「ジーピーティー」) も文字の並びから区切りと読みを推定する
-for s in ["鬼滅の刃の竈門炭治郎が好きだ。", "チャットジーピーティーに聞いた。", "彼はスマホをポチポチいじっていた。", "推し活でエモい写真をインスタにあげた。"]:
-    print("KyTea  :", kytea.getTagsToString(s))
-    print("UniDic :", " ".join(f"{w.surface}/{'(未知語)' if w.is_unk else w.feature.kana or w.surface}" for w in tagger(s)))
-```
-
-```python
-# 速度の比較 (10,000 文)
-import time
-
-texts = ["国境の長いトンネルを抜けると雪国であった。", "自然言語処理の小ネタを集めたクックブックを作りたい。"] * 5000
-for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -notags").getWS),
-                ("KyTea (品詞・読み)", kytea.getTags),
-                ("MeCab + UniDic", tagger)]:
-    t = time.perf_counter()
-    for x in texts:
-        f(x)
-    print(f"{name:16} {time.perf_counter() - t:5.2f} 秒")
-```
-
-- KyTea は Graham Neubig らが開発した解析器。文字と文字の間ごとに単語境界かどうかを、周りの文字 n-gram・文字種・辞書との一致を素性とする線形分類器（線形 SVM やロジスティック回帰。学習は LIBLINEAR）で 1 か所ずつ独立に判定し、単語の品詞と読みも個別に推定する（点予測）。前のレシピの CRF はラベル列全体をまとめて決めるが、KyTea は隣の判定結果を使わないので、一部の境界や読みだけを付けた「部分的アノテーション」のデータでも学習できる。
-- 同梱のモデルは現代日本語書き言葉均衡コーパス (BCCWJ) や UniDic などで学習されたもので、活用語尾を語幹と別の単語にする（「渡 し た」「読 ん だ」「た く な かっ た」）。MeCab + UniDic の短単位（「読ん」「たく」「なかっ」）より細かい。構文解析の章の「Ckylark で日本語の句構造解析をする」の日本語モデルは、この分割を前提にしている。
-- 読みはひらがなで、単語の表記に対応する部分だけが付く（「渡」→「わた」）。送り仮名が別の単語になるので、この章の「漢字の読みを取得してふりがな（ルビ）を付ける」（送り仮名ごとルビが付く）と違い、漢字の部分だけにルビを付けやすい。辞書で読みの候補が 1 つしかない語はスコアが 100 になり、「日本」のように候補が複数ある語は文脈で結果が変わる（「にほん」と「にっぽん」）。
-- 辞書にない語の推定は誤ることもある（「推し活」は「推（お）/ し活」に分割された）。Python のバインディングからは未知語かどうかは分からない。コマンド版の `kytea -unktag '[UNK]'` で同じ文を試すと、「鬼滅」「ジーピーティー」「し活」「エモ」「ポチポチ」に印が付き、「スマホ」「インスタ」は KyTea の辞書にある語だった。
-- 検証環境で 10,000 文にかかった時間は、品詞・読みありが 0.8〜0.9 秒、分割だけ (`-notags`) が約 0.15 秒、MeCab + UniDic が 0.1 秒ほど。モデルの読み込みに約 2 秒かかるので、`Mykytea` は 1 回だけ作って使い回す。
-- pip の `kytea` (Mykytea-python) は KyTea のライブラリを含むのでビルドは不要だが、モデルは含まない。モデルは研究・商用での利用は許可されているが無断の再配布は禁じられているので、各自が作者のリポジトリから取得する。コマンド版や学習用の `train-kytea`（`-part` で部分的アノテーション、`-dict` で辞書を与える）が要るなら、構文解析の章の「Ckylark で日本語の句構造解析をする」のようにソースからビルドする。ソースは Apache License 2.0 で、最後のリリースは 0.4.7（2014 年）、リポジトリの最後の更新は 2020 年。
