@@ -69,7 +69,7 @@ print(search("機械翻訳 ニューラル"))
 ```
 
 - 数件〜数百件ならこの方法で。連続して呼ぶときは間隔を空ける (`time.sleep(1)`)。短時間に大量に呼ぶと 429 (Too Many Requests) で拒否される。
-- 全記事が必要なら API を叩かずに、ダンプか Hugging Face の `wikimedia/wikipedia` データセットを使う (Transformers の基本操作の章のストリーミングのレシピを参照)。
+- 全記事が必要なら API を叩かずに、ダンプか Hugging Face の `wikimedia/wikipedia` データセットを使う（Transformers の基本操作の章のストリーミングのレシピを参照）。
 - 本文のライセンスは CC BY-SA。再配布するときは出典の表示と同一ライセンスでの公開が必要。
 
 ## Web ページから本文だけを抽出する (trafilatura) {web_extract}
@@ -100,7 +100,7 @@ print({k: result.get(k) for k in ["title", "author", "date", "hostname"]})
 
 - 本文らしさをテキスト密度やタグの構造から推定している。BeautifulSoup でサイトごとにセレクタを書くより、多様なサイトに強い。
 - JavaScript で描画されるページは `fetch_url` では取得できない。Playwright などで HTML を取得してから `extract` に渡す。
-- スクレイピングの前に、サイトの利用規約と robots.txt を確認する。アクセス間隔を空け、著作権 (特に再配布) に注意する。
+- スクレイピングの前に、サイトの利用規約と robots.txt を確認する。アクセス間隔を空け、著作権（特に再配布）に注意する。
 
 ## PDF からテキストを抽出する (PyMuPDF) {pdf_extract}
 
@@ -141,8 +141,8 @@ print(full[1500:1900])
 ```
 
 - PDF は「文字と座標の集まり」で、段落や読み順の情報を持たない。2 段組み、表、数式、脚注は崩れやすい。
-- スキャンされた PDF (画像) からは抽出できない。OCR が必要 (`page.get_textpage_ocr()` や、専用の OCR / 文書解析モデル)。
-- 論文の構造 (章、参考文献) まで欲しいなら GROBID、レイアウトを保った Markdown が欲しいなら `pymupdf4llm` や Docling などがある。
+- スキャンされた PDF（画像）からは抽出できない。OCR が必要（`page.get_textpage_ocr()` や、専用の OCR / 文書解析モデル）。
+- 論文の構造（章、参考文献）まで欲しいなら GROBID、レイアウトを保った Markdown が欲しいなら `pymupdf4llm` や Docling などがある。
 
 ## Word ファイルからテキストと表を取り出す {docx_extract}
 
@@ -180,7 +180,7 @@ for t in doc.tables:
     print(pd.DataFrame(rows[1:], columns=rows[0]))
 ```
 
-- 見出しはスタイル名 (`Heading 1`、日本語版 Word で作ると `見出し 1`) で判別できる。
+- 見出しはスタイル名（`Heading 1`、日本語版 Word で作ると `見出し 1`）で判別できる。
 - 古い `.doc` 形式は読めない。LibreOffice で変換する (`!soffice --headless --convert-to docx file.doc`)。
 - PowerPoint は `python-pptx`、Excel は `pandas.read_excel` (openpyxl) で同様に読める。
 
@@ -225,8 +225,8 @@ df[df["reason"] == ""]["text"].tolist()
 ```
 
 - 何を何件捨てたかを理由ごとに記録しておく。フィルタのバグでデータの大半を捨てていた、という事故に気づける。
-- 学習データと評価データの間の重複 (リーク) も必ず確認する: `set(train_keys) & set(test_keys)`。
-- ほぼ同じ内容の文書 (ニアデュプリケート) は、文字列処理と正規化の章の MinHash のレシピで検出する。
+- 学習データと評価データの間の重複（リーク）も必ず確認する: `set(train_keys) & set(test_keys)`。
+- ほぼ同じ内容の文書（ニアデュプリケート）は、文字列処理と正規化の章の MinHash のレシピで検出する。
 
 ## データを学習・開発・評価に正しく分割する {data_split}
 
@@ -272,5 +272,5 @@ df[["text", "split"]].head(3)
 ```
 
 - 同じ文書から切り出した文、同じ人が書いた文、同じ原文の翻訳や言い換えは、必ず同じ側に入れる。両側にまたがると評価が不当に高くなる。
-- 時系列のあるデータ (ニュース、SNS) は、ランダムではなく時間で分割する (過去で学習、未来で評価)。
+- 時系列のあるデータ（ニュース、SNS）は、ランダムではなく時間で分割する（過去で学習、未来で評価）。
 - test は最後に 1 回だけ使う。ハイパーパラメータの調整やモデル選択は dev で行う。
