@@ -291,38 +291,6 @@ for t in nlp("Time flies like an arrow; fruit flies like a banana."):
 
 - `pos_` は Universal Dependencies の粗い品詞、`tag_` は Penn Treebank の細かい品詞。
 
-## WordNet で同義語・上位語・類似度を調べる（日本語も） {wordnet}
-
-単語の同義語や上位概念を辞書から引きたい。日本語 WordNet も使いたい。
-
-```python
-import nltk
-nltk.download("wordnet", quiet=True)
-nltk.download("omw-1.4", quiet=True)  # 多言語 WordNet (NLTK のバージョンによって 1.4 か 2.0 を使う)
-nltk.download("omw-2.0", quiet=True)
-from nltk.corpus import wordnet as wn
-
-for syn in wn.synsets("bank")[:4]:
-    print(syn.name(), syn.lemma_names(), "-", syn.definition())
-```
-
-```python
-dog, cat, car = wn.synset("dog.n.01"), wn.synset("cat.n.01"), wn.synset("car.n.01")
-print("上位語:", [s.name() for s in dog.hypernyms()])
-print("下位語:", [s.name() for s in dog.hyponyms()][:5])
-print("上位語をたどる:", " > ".join(s.lemma_names()[0] for s in dog.hypernym_paths()[0]))
-print("類似度 dog-cat:", round(dog.wup_similarity(cat), 3), " dog-car:", round(dog.wup_similarity(car), 3))
-```
-
-```python
-# 日本語 WordNet (Open Multilingual Wordnet 経由)
-for syn in wn.synsets("犬", lang="jpn"):
-    print(syn.name(), syn.lemma_names("jpn"), "|", syn.lemma_names()[:3])
-print(sorted({l for s in wn.synsets("美しい", lang="jpn") for l in s.lemma_names("jpn")})[:15])
-```
-
-- 同義語によるデータ拡張 (EDA) や、語義曖昧性解消のベースライン (Lesk) に使える。
-
 ## 英単語の単数形・複数形・冠詞を変換する (inflect) {inflect}
 
 テンプレートから英文を生成するとき、数に応じて複数形にしたり `a/an` を正しく付けたりしたい。

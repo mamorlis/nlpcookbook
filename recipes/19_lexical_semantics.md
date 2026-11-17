@@ -1,6 +1,38 @@
 # 語の意味と意味の変化
 
-文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。
+文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。WordNet で同義語・上位語を引く方法、上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。
+
+## WordNet で同義語・上位語・類似度を調べる（日本語も） {wordnet}
+
+単語の同義語や上位概念を辞書から引きたい。日本語 WordNet も使いたい。
+
+```python
+import nltk
+nltk.download("wordnet", quiet=True)
+nltk.download("omw-1.4", quiet=True)  # 多言語 WordNet (NLTK のバージョンによって 1.4 か 2.0 を使う)
+nltk.download("omw-2.0", quiet=True)
+from nltk.corpus import wordnet as wn
+
+for syn in wn.synsets("bank")[:4]:
+    print(syn.name(), syn.lemma_names(), "-", syn.definition())
+```
+
+```python
+dog, cat, car = wn.synset("dog.n.01"), wn.synset("cat.n.01"), wn.synset("car.n.01")
+print("上位語:", [s.name() for s in dog.hypernyms()])
+print("下位語:", [s.name() for s in dog.hyponyms()][:5])
+print("上位語をたどる:", " > ".join(s.lemma_names()[0] for s in dog.hypernym_paths()[0]))
+print("類似度 dog-cat:", round(dog.wup_similarity(cat), 3), " dog-car:", round(dog.wup_similarity(car), 3))
+```
+
+```python
+# 日本語 WordNet (Open Multilingual Wordnet 経由)
+for syn in wn.synsets("犬", lang="jpn"):
+    print(syn.name(), syn.lemma_names("jpn"), "|", syn.lemma_names()[:3])
+print(sorted({l for s in wn.synsets("美しい", lang="jpn") for l in s.lemma_names("jpn")})[:15])
+```
+
+- 同義語によるデータ拡張 (EDA) や、語義曖昧性解消のベースライン (Lesk) に使える。
 
 ## 「A などの B」のパターンで上位語と下位語の組を集める {hypernym_patterns}
 
