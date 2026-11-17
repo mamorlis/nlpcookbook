@@ -299,6 +299,64 @@ for text in articles:
 - 3 行要約は、1 行目に最も重要な事実、2 行目以降に補足、という構成が読みやすい。順序も指示できる。
 - 文字数の上限は守られないことが多い。厳密に必要なら、行ごとに検査して長い行だけ言い換えさせる。
 
+## 要約が原文と食い違っていないか検査する {summary_faithfulness}
+
+生成した要約に、原文にないことや、原文と矛盾することが書かれていないかを自動で確かめたい。
+
+```python
+import re
+import unicodedata
+import pandas as pd
+import torch
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
+
+source = ("市は 14 日、来年 4 月から市内の全小中学校で給食費を無償化すると発表した。対象は約 1 万 2 千人で、年間の費用は約 6 億円を見込む。"
+          "財源には、ふるさと納税の寄付金と、公共施設の統廃合で生じる削減分を充てる。"
+          "市長は記者会見で「子育て世帯の負担を減らし、若い世代に選ばれるまちにしたい」と述べた。"
+          "一方、市議会の一部からは「恒久的な財源の裏付けが弱い」との指摘が出ている。")
+summaries = {
+    "忠実": "市は来年 4 月から小中学校の給食費を無償化する。費用は年間約 6 億円を見込む。市議会の一部からは財源を不安視する声がある。",
+    "矛盾あり": "市は来年 4 月から小中学校の給食費を無償化する。市議会は全会一致でこれを歓迎している。",
+    "付け足しあり": "市は来年 4 月から小中学校の給食費を無償化する。隣の市でも同様の制度が始まっている。",
+    "数値の誤り": "市は来年 4 月から小中学校の給食費を無償化する。費用は年間約 60 億円で、対象は約 1 万 2 千人である。",
+}
+
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
+
+def nli_probs(premise, hypotheses):
+    with torch.no_grad():
+        return nli(**tok([premise] * len(hypotheses), hypotheses, return_tensors="pt", padding=True, truncation=True)).logits.softmax(-1)
+
+rows = []
+for label, summary in summaries.items():
+    sents = [s for s in re.split(r"(?<=。)", summary) if s.strip()]
+    for sent, p in zip(sents, nli_probs(source, sents)):
+        verdict = "含意" if p[0] > 0.5 else "矛盾" if p[2] > 0.5 else "中立 (原文にない)"
+        rows.append({"要約": label, "文": sent, "含意": round(p[0].item(), 2), "矛盾": round(p[2].item(), 2), "判定": verdict})
+pd.set_option("display.max_colwidth", 60)
+pd.DataFrame(rows)
+```
+
+```python
+# 数値と固有名詞は NLI が見逃しやすいので、原文に同じ表記があるかを別に確かめる
+def numbers(text):
+    text = unicodedata.normalize("NFKC", text)
+    return set(re.findall(r"\d+(?:\.\d+)?\s*(?:万|億|千)?\s*(?:円|人|日|月|年|例目|%)?", text.replace(" ", "")))
+
+src_nums = numbers(source)
+for label, summary in summaries.items():
+    missing = [n for n in numbers(summary) if n not in src_nums]
+    print(f"{label}: 原文にない数値表現 = {missing}")
+```
+
+- 要約の各文を仮説、原文を前提として含意関係を判定する。含意なら裏付けあり、矛盾なら誤り、中立なら原文にない付け足し。
+- NLI は桁違いの数値（6 億と 60 億）のような誤りを見逃すことがある。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
+- 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
+- 忠実であることと、良い要約であることは別。重要な内容を落としていないか（網羅性）は、参照要約との比較や人手で確かめる。
+
 ## 長い文書を分割して要約する {long_document_summary gpu}
 
 モデルに一度に入らない（あるいは入れると後半を読み飛ばす）長い文書を要約したい。分割して要約し、それをまとめ直す。
@@ -370,328 +428,6 @@ print(final)
 - 3B クラスのモデルでは、部分要約に話の取り違えや人名の誤りが混ざることがある（上の出力でも、短刀を持って王城に入り捕らえられたメロスが「王に短刀を差し出した」ことになり、最終要約では「短刀を差し出して抵抗する」に変わっている。妹の結婚式を翌日に繰り上げる場面は、部分要約の段階で「延期」と取り違え、最終要約にもそのまま残った）。誤りは最終要約にそのまま引き継がれるので、重要な用途ではより大きなモデルを使うか、次項の検査と組み合わせる。
 - 前の部分の要約を次の部分の入力に加えていく方法（逐次的な洗練）だと、話のつながりは保ちやすいが、並列化はできず、誤りが後ろに伝わる。
 - 長い入力をそのまま読めるモデルでも、文書が長くなるほど中ほどの内容を見落としやすい。分割は今でも有効な方法。
-
-## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
-
-長い文章や会議の書き起こしを、話題が変わるところで区切りたい。単語の重なりで見る TextTiling と、文埋め込みの類似度の谷で見る方法を、正解の切れ目があるデータで Pk と WindowDiff を使って比べる。
-
-```python
-!pip install -q fugashi==1.5.2 unidic-lite==1.0.8
-```
-
-```python
-import io, re, tarfile, urllib.request
-import numpy as np
-import pandas as pd
-
-def load_livedoor():
-    """livedoor ニュースコーパス（株式会社ロンウイット配布）。記事は CC BY-ND 2.1 JP（表示・改変禁止）"""
-    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
-    with urllib.request.urlopen(url) as r:
-        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
-    rows = []
-    for m in tar.getmembers():
-        parts = m.name.split("/")
-        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
-            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
-            rows.append({"label": parts[1], "title": lines[2].strip(), "text": "\n".join(lines[3:]).strip()})
-    return pd.DataFrame(rows)
-
-def split_sentences(text):
-    sents = [s.strip() for s in re.split(r"(?<=[。！？])|\n+", text) if s and len(s.strip()) > 5]
-    return [s for s in sents if "http" not in s and not s.startswith(("■", "【関連"))]   # リンクや関連記事の行を除く
-
-df = load_livedoor()
-df["sents"] = df["text"].map(split_sentences)
-df = df[df["sents"].map(len).between(5, 15)].reset_index(drop=True)   # 5〜15 文の記事だけを使う
-
-def make_docs(df, n_docs, n_articles=4, same_label=False, seed=0):
-    """記事を n_articles 本つなげて 1 文書にし、記事の境界を正解の切れ目にする。
-    same_label=False なら隣り合う記事のカテゴリが必ず違い、True なら 1 つのカテゴリの記事だけを使う。
-    正解は文ごとの "0"/"1" の列で、"1" はその文の後ろで話題が変わることを表す"""
-    rng = np.random.default_rng(seed)
-    cats = df["label"].unique()
-    docs = []
-    for _ in range(n_docs):
-        if same_label:
-            labels = [rng.choice(cats)] * n_articles
-        else:
-            labels = [rng.choice(cats)]
-            while len(labels) < n_articles:
-                labels.append(rng.choice([c for c in cats if c != labels[-1]]))
-        idx = []
-        for c in labels:   # カテゴリごとに、まだ使っていない記事を 1 本選ぶ
-            idx.append(rng.choice(df.index[(df["label"] == c) & ~df.index.isin(idx)]))
-        arts = df.loc[idx]
-        sents, ref = [], ""
-        for s in arts["sents"]:
-            sents += s
-            ref += "0" * (len(s) - 1) + "1"
-        docs.append({"sents": sents, "ref": ref[:-1] + "0", "labels": list(arts["label"])})
-    return docs
-
-# 調整用 (dev) と評価用 (test) で記事が重ならないように分ける
-rng = np.random.default_rng(0)
-is_dev = rng.random(len(df)) < 0.3
-dev = make_docs(df[is_dev], 10, seed=1) + make_docs(df[is_dev], 10, same_label=True, seed=4)   # 両方の種類を 10 文書ずつ
-test_mixed = make_docs(df[~is_dev], 30, seed=2)                    # 隣り合う記事のカテゴリが違う（切れ目が見つけやすい）
-test_same = make_docs(df[~is_dev], 30, same_label=True, seed=3)    # 同じカテゴリの記事だけをつなげる（難しい）
-print(len(df), "記事 / 1 文書の平均", round(np.mean([len(d["sents"]) for d in test_mixed]), 1), "文 / 埋め込む文の数",
-      sum(len(d["sents"]) for d in dev + test_mixed + test_same))
-print(test_mixed[0]["labels"])
-```
-
-```python
-from fugashi import Tagger
-from nltk.tokenize.texttiling import TextTilingTokenizer
-
-tagger = Tagger()
-vocab = {}
-
-def to_ascii(sent):
-    """内容語の原形を、英小文字だけの記号 (a, b, ..., aa, ab, ...) に置き換える。
-    NLTK の TextTiling は a-z 以外の文字を消してから単語を数えるので、日本語のままでは単語が 1 つも残らない"""
-    out = []
-    for w in tagger(sent):
-        f = w.feature
-        if f.pos1 in ("名詞", "動詞", "形容詞") and f.pos2 not in ("非自立可能", "数詞"):
-            i = vocab.setdefault(f.lemma or w.surface, len(vocab))
-            code = ""
-            while True:
-                code = chr(97 + i % 26) + code
-                i = i // 26 - 1
-                if i < 0:
-                    break
-            out.append(code)
-    return " ".join(out)
-
-def pick_boundaries(depth, threshold=None, n_boundaries=None, min_gap=3):
-    """depth[i] は i 番目の文の後ろの谷の深さ。深い順に、threshold 以上のものを全部、または n_boundaries 個だけ選ぶ。
-    すでに選んだ切れ目から min_gap 文以内のものは選ばない"""
-    chosen = []
-    for i in np.argsort(-depth):
-        if (n_boundaries is None and depth[i] < threshold) or (n_boundaries is not None and len(chosen) >= n_boundaries):
-            break
-        if all(abs(i - j) >= min_gap for j in chosen):
-            chosen.append(i)
-    return "".join("1" if i in chosen else "0" for i in range(len(depth) + 1))
-
-def texttiling(sents, w=20, k=4, n_boundaries=None):
-    """TextTiling で切れ目を求め、文ごとの "0"/"1" の列で返す。n_boundaries を与えると、谷の深い順にその数だけ選ぶ"""
-    codes = [to_ascii(s) for s in sents]
-    ends = np.cumsum([len(c.split()) for c in codes])     # 各文の終わりが何語目か
-    # stopwords を渡さないと英語のストップワードを読みに行く（内容語だけにしたので不要）。
-    # demo_mode=True で、w 語ずつの擬似文の間（ギャップ）ごとの谷の深さと、切れ目かどうかの判定を受け取る
-    tt = TextTilingTokenizer(w=w, k=k, stopwords=[], demo_mode=True)
-    try:
-        _, _, depth_gap, is_boundary = tt.tokenize("\n\n".join(codes))
-    except (ValueError, ZeroDivisionError):      # 文書が短すぎるとき
-        return "0" * len(sents)
-    # ギャップ g は (g + 1) * w 語目の後ろ。いちばん近い文の終わりに対応づける
-    depth, auto = np.zeros(len(sents) - 1), np.zeros(len(sents) - 1)
-    for g, (dep, b) in enumerate(zip(depth_gap, is_boundary)):
-        j = int(np.argmin(np.abs(ends - (g + 1) * w)))
-        if j < len(sents) - 1:
-            depth[j], auto[j] = max(depth[j], dep), max(auto[j], b)
-    if n_boundaries is None:
-        return "".join("1" if x else "0" for x in auto) + "0"
-    return pick_boundaries(depth, n_boundaries=n_boundaries)
-
-print(test_mixed[0]["ref"])
-print(texttiling(test_mixed[0]["sents"]))
-```
-
-```python
-from sentence_transformers import SentenceTransformer
-
-# 日本語の文埋め込みモデル Ruri v3 の最小のもの (Apache 2.0)。"トピック: " は話題を捉えるためのプレフィックス（モデルカードによる）
-model = SentenceTransformer("cl-nagoya/ruri-v3-30m")
-
-def embed(docs):
-    for d in docs:
-        d["emb"] = model.encode(["トピック: " + s for s in d["sents"]], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
-
-def gap_similarity(emb, window=3):
-    """各文の後ろの切れ目について、前の window 文と後ろの window 文の平均ベクトルのコサイン類似度"""
-    sims = []
-    for i in range(len(emb) - 1):
-        a, b = emb[max(0, i - window + 1):i + 1].mean(0), emb[i + 1:i + 1 + window].mean(0)
-        sims.append(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
-    return np.array(sims)
-
-def depth_scores(sims):
-    """谷の深さ: 左右それぞれ、類似度が上がり続ける間たどった山の高さと、谷の底との差の和（TextTiling と同じ考え方）"""
-    depth = []
-    for i, s in enumerate(sims):
-        l = i
-        while l > 0 and sims[l - 1] >= sims[l]:
-            l -= 1
-        r = i
-        while r < len(sims) - 1 and sims[r + 1] >= sims[r]:
-            r += 1
-        depth.append(sims[l] + sims[r] - 2 * s)
-    return np.array(depth)
-
-def embedding_seg(emb, window=3, threshold=0.1, n_boundaries=None, min_gap=3):
-    return pick_boundaries(depth_scores(gap_similarity(emb, window)), threshold, n_boundaries, min_gap)
-
-# Colab の CPU で 2 分ほど
-for docs in (dev, test_mixed, test_same):
-    embed(docs)
-print(test_mixed[0]["ref"])
-print(embedding_seg(test_mixed[0]["emb"]))
-```
-
-```python
-from nltk.metrics.segmentation import pk, windowdiff
-
-def evaluate(docs, segment):
-    """Pk と WindowDiff の平均（小さいほどよい）と、Pk の標準誤差。窓の幅 k は、正解の区間の平均の長さの半分"""
-    rows = []
-    for d in docs:
-        ref, hyp = d["ref"], segment(d)
-        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
-        rows.append({"Pk": pk(ref, hyp, k), "WindowDiff": windowdiff(ref, hyp, k), "切れ目の数": hyp.count("1")})
-    rows = pd.DataFrame(rows)
-    return pd.Series({"Pk": rows["Pk"].mean(), "Pk の標準誤差": rows["Pk"].sem(), "WindowDiff": rows["WindowDiff"].mean(), "切れ目の数": rows["切れ目の数"].mean()})
-
-# 窓の大きさとしきい値は、調整用の文書 (dev) で WindowDiff が最小になるものを選ぶ
-def tune(segment, grid):
-    return min(grid, key=lambda p: evaluate(dev, lambda d: segment(d, *p))["WindowDiff"])
-
-n_ref = lambda d: d["ref"].count("1")
-best_tt = tune(lambda d, w, k: texttiling(d["sents"], w, k), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
-best_tt_n = tune(lambda d, w, k: texttiling(d["sents"], w, k, n_ref(d)), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
-best_emb = tune(lambda d, win, th: embedding_seg(d["emb"], win, th), [(win, th) for win in (1, 2, 3, 5, 7, 10) for th in (0.05, 0.1, 0.15, 0.2, 0.3)])
-best_emb_n = tune(lambda d, win: embedding_seg(d["emb"], win, n_boundaries=n_ref(d)), [(win,) for win in (1, 2, 3, 5, 7, 10)])
-print("TextTiling (w, k):", best_tt, "/ 数を与えるとき", best_tt_n)
-print("文埋め込み (window, threshold):", best_emb, "/ 数を与えるとき window", best_emb_n)
-```
-
-```python
-def fixed_length(n, every=10):
-    return "".join("1" if (i + 1) % every == 0 and i < n - 1 else "0" for i in range(n))
-
-def random_seg(n, n_boundaries, rng):
-    chosen = set(rng.choice(n - 1, n_boundaries, replace=False))
-    return "".join("1" if i in chosen else "0" for i in range(n))
-
-rng = np.random.default_rng(0)   # ランダムな区切りの乱数（種を固定）
-methods = {
-    "切れ目なし": lambda d: "0" * len(d["ref"]),
-    "10 文ごとに機械的に区切る": lambda d: fixed_length(len(d["ref"])),
-    "ランダム（正解と同じ数）": lambda d: random_seg(len(d["ref"]), n_ref(d), rng),
-    "TextTiling": lambda d: texttiling(d["sents"], *best_tt),
-    "TextTiling（切れ目の数を与える）": lambda d: texttiling(d["sents"], *best_tt_n, n_boundaries=n_ref(d)),
-    "文埋め込みの谷": lambda d: embedding_seg(d["emb"], *best_emb),
-    "文埋め込みの谷（切れ目の数を与える）": lambda d: embedding_seg(d["emb"], *best_emb_n, n_boundaries=n_ref(d)),
-}
-res = pd.DataFrame({(cond, name): evaluate(docs, f) for name, f in methods.items()
-                    for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]}).T
-print("正解の切れ目の数: 1 文書に 3")
-
-# 2 つの方法を同じ文書で比べる: 文書ごとの Pk の差（TextTiling − 文埋め込み）の平均と標準誤差（どちらも切れ目の数を与える）
-for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]:
-    diff = []
-    for d in docs:
-        ref = d["ref"]
-        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
-        diff.append(pk(ref, methods["TextTiling（切れ目の数を与える）"](d), k) - pk(ref, methods["文埋め込みの谷（切れ目の数を与える）"](d), k))
-    print(f"{cond}: Pk の差 {np.mean(diff):.3f} ± {pd.Series(diff).sem():.3f}（標準誤差）、文埋め込みのほうがよい文書 {sum(x > 0 for x in diff)} / 同じ {sum(x == 0 for x in diff)} / 悪い {sum(x < 0 for x in diff)}")
-res.unstack(0).reindex(methods).round(3)
-```
-
-```python
-# 会議の書き起こしに使う例（架空の短い会議）。発言を 1 単位にし、話題の数が分かっているとして切れ目の数を与える
-meeting = [
-    ("田中", "では定例会議を始めます。まず来月の展示会の準備状況からお願いします。"),
-    ("高橋", "ブースの場所は決まりました。入口に近い角の区画です。"),
-    ("鈴木", "展示用のパネルは来週中に印刷会社へ入稿します。"),
-    ("田中", "当日の説明員は何人必要ですか。"),
-    ("高橋", "午前と午後で 2 人ずつ、合計 4 人いれば回せます。"),
-    ("田中", "次に、新しい勤怠システムへの移行について。"),
-    ("佐藤", "来月 1 日から新システムに切り替えます。古いシステムの打刻データは今月末で締めます。"),
-    ("伊藤", "有給休暇の残日数は自動で引き継がれますか。"),
-    ("佐藤", "はい、残日数は移行されます。申請中の休暇だけは出し直してもらいます。"),
-    ("田中", "最後に、オフィスの引っ越しの件です。"),
-    ("鈴木", "新しいオフィスの内装工事が少し遅れていて、入居は 2 週間後ろにずれそうです。"),
-    ("伊藤", "それなら段ボールの配布も遅らせたほうがいいですね。"),
-    ("鈴木", "荷造りは入居日の 1 週間前から始めてもらう予定です。"),
-]
-emb = model.encode(["トピック: " + u for _, u in meeting], normalize_embeddings=True)
-hyp = embedding_seg(emb, window=2, n_boundaries=2, min_gap=2)
-for (who, u), b in zip(meeting, hyp):
-    print(f"{who}: {u}")
-    if b == "1":
-        print("―――― 話題の切れ目 ――――")
-```
-
-- 評価データは、livedoor ニュースコーパスの 5〜15 文の記事を 4 本ずつつなげ、記事の境界を正解の切れ目にして作った（隣り合う記事のカテゴリが違う 30 文書と、同じカテゴリの記事だけの 30 文書。1 文書は 4 区間で切れ目は 3 つ。前者は平均 47.1 文）。調整用の文書も両方の種類を 10 文書ずつにし、評価用とは記事が重ならないようにした。手軽に作れるが、記事の境界は話題の変わり目として分かりやすく、実際の文書や会議では切れ目がもっとあいまいなことがある。記事は CC BY-ND 2.1 JP（表示・改変禁止）なので、つなげた評価データは配布せず、手元で作り直す。
-- Pk は、k 文離れた 2 つの文が同じ区間に入るかどうかの判定を誤る割合、WindowDiff は、幅 k の窓の中の切れ目の数が正解と食い違う割合で、どちらも 0 が最良（Pk は Beeferman ら 1999、WindowDiff は Pevzner と Hearst 2002 の提案）。上の表では切れ目を 1 つも置かなくても Pk が 0.415〜0.419 になり、10 文ごとに機械的に区切ると、かえって悪くなる (0.464〜0.516)。必ずこうしたベースラインと並べる。
-- NLTK の `TextTilingTokenizer`（Hearst 1997 の TextTiling の実装）は、a-z 以外の文字を消してから単語を数えるので、日本語をそのまま渡すと単語が 1 つも残らない。ここでは形態素解析で内容語の原形を取り出し、英小文字だけの記号に置き換えて渡した。また、切れ目を段落の位置に戻す処理では、最初のギャップ以外の切れ目が w 語分前にずれる（nltk 3.9.1 のソースで確認）ので、`demo_mode=True` で各ギャップの判定と谷の深さを受け取り、文の位置への対応づけは自分で行った。
-- 結果: 切れ目の数を自動で決める設定では、文埋め込みの谷（Pk 0.102 / 0.193、隣り合うカテゴリが違う / 同じカテゴリ）が TextTiling (0.300 / 0.303) より大幅によかった。切れ目の数を与えると TextTiling は 0.213 / 0.217 まで改善するが、文埋め込み (0.106 / 0.146) との差は残り、同じ文書どうしで比べた Pk の差は 0.107 ± 0.029 / 0.071 ± 0.026（平均 ± 標準誤差）で、30 文書中 23 / 19 文書で文埋め込みのほうがよかった。文埋め込みは同じカテゴリの文書で悪くなるが、TextTiling はどちらでもほとんど変わらない。
-- 文埋め込みの方法は、前後の window 文の平均ベクトルの類似度が落ち込む「谷」を切れ目にする。単語が重ならない言い換えでも話題の近さを捉えられる。窓の大きさとしきい値は文書の種類で変わるので調整用の文書で選んだ（window は自動の設定で 7、数を与える設定で 5。TextTiling の (w, k) は (30, 4) と (10, 10) で、どちらも調べた範囲の端なので、範囲を広げるとよくなる余地がある）。自動の設定では切れ目がやや多め（平均 4.1 / 3.7 個。正解は 3 個）になった。話題の数（議題の数など）が分かっているなら、深い谷から順にその数だけ選べばしきい値は要らない。
-- 最後の架空の会議では、発言を 1 単位にし、切れ目の数 (2) を与えると、議題が変わる 2 か所で区切れた。ただし 1 例だけの確認である。発言は短く、窓に入る情報が少ないので、実際の書き起こしでは切れ目が前後にずれることがある前提で、区切った結果を人が確かめる。
-- LangChain の `langchain-experimental` の `SemanticChunker` も、隣り合う文（前後 `buffer_size` 文を含めたもの）の埋め込みの距離が大きいところで切る同じ考え方の実装である。既定の文の区切りは英語の句読点 (`(?<=[.?!])\s+`) なので、日本語では `sentence_split_regex` を変える。`number_of_chunks` でチャンクの数の目安を与えることもできるが、距離のパーセンタイルに換算してしきい値にするので、ちょうどその数になるとは限らない（0.4.2 のソースで確認）。
-- 議事録を作るときは、話題ごとに分けてから要約すると、長い書き起こしをそのまま渡すより論点が混ざりにくい（この章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」「長い文書を分割して要約する」を参照）。RAG のチャンク分割でも、文字数で切る代わりに話題の切れ目で切れば、1 つのチャンクに別の話題が混ざりにくくなる（RAG の章の「長い文書をチャンクに分割する」を参照）。
-
-## 要約が原文と食い違っていないか検査する {summary_faithfulness}
-
-生成した要約に、原文にないことや、原文と矛盾することが書かれていないかを自動で確かめたい。
-
-```python
-import re
-import unicodedata
-import pandas as pd
-import torch
-from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
-
-source = ("市は 14 日、来年 4 月から市内の全小中学校で給食費を無償化すると発表した。対象は約 1 万 2 千人で、年間の費用は約 6 億円を見込む。"
-          "財源には、ふるさと納税の寄付金と、公共施設の統廃合で生じる削減分を充てる。"
-          "市長は記者会見で「子育て世帯の負担を減らし、若い世代に選ばれるまちにしたい」と述べた。"
-          "一方、市議会の一部からは「恒久的な財源の裏付けが弱い」との指摘が出ている。")
-summaries = {
-    "忠実": "市は来年 4 月から小中学校の給食費を無償化する。費用は年間約 6 億円を見込む。市議会の一部からは財源を不安視する声がある。",
-    "矛盾あり": "市は来年 4 月から小中学校の給食費を無償化する。市議会は全会一致でこれを歓迎している。",
-    "付け足しあり": "市は来年 4 月から小中学校の給食費を無償化する。隣の市でも同様の制度が始まっている。",
-    "数値の誤り": "市は来年 4 月から小中学校の給食費を無償化する。費用は年間約 60 億円で、対象は約 1 万 2 千人である。",
-}
-
-nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
-# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
-tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
-nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
-
-def nli_probs(premise, hypotheses):
-    with torch.no_grad():
-        return nli(**tok([premise] * len(hypotheses), hypotheses, return_tensors="pt", padding=True, truncation=True)).logits.softmax(-1)
-
-rows = []
-for label, summary in summaries.items():
-    sents = [s for s in re.split(r"(?<=。)", summary) if s.strip()]
-    for sent, p in zip(sents, nli_probs(source, sents)):
-        verdict = "含意" if p[0] > 0.5 else "矛盾" if p[2] > 0.5 else "中立 (原文にない)"
-        rows.append({"要約": label, "文": sent, "含意": round(p[0].item(), 2), "矛盾": round(p[2].item(), 2), "判定": verdict})
-pd.set_option("display.max_colwidth", 60)
-pd.DataFrame(rows)
-```
-
-```python
-# 数値と固有名詞は NLI が見逃しやすいので、原文に同じ表記があるかを別に確かめる
-def numbers(text):
-    text = unicodedata.normalize("NFKC", text)
-    return set(re.findall(r"\d+(?:\.\d+)?\s*(?:万|億|千)?\s*(?:円|人|日|月|年|例目|%)?", text.replace(" ", "")))
-
-src_nums = numbers(source)
-for label, summary in summaries.items():
-    missing = [n for n in numbers(summary) if n not in src_nums]
-    print(f"{label}: 原文にない数値表現 = {missing}")
-```
-
-- 要約の各文を仮説、原文を前提として含意関係を判定する。含意なら裏付けあり、矛盾なら誤り、中立なら原文にない付け足し。
-- NLI は桁違いの数値（6 億と 60 億）のような誤りを見逃すことがある。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
-- 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
-- 忠実であることと、良い要約であることは別。重要な内容を落としていないか（網羅性）は、参照要約との比較や人手で確かめる。
 
 ## 大量の口コミから観点ごとの賛否をまとめる（意見の要約） {opinion_summarization gpu}
 
@@ -1004,6 +740,270 @@ with torch.no_grad():
 - 要約の検査は、割合の表現と評価の語を正規表現で読み取る簡単なもので、「約 40% の口コミでは部屋が狭く」のような書き方は読み取れない（表の NaN）。この章の「要約が原文と食い違っていないか検査する」の NLI は、4 組のうち 3 組（「賛否が分かれる」は含意、「不満が多い」は矛盾、「改善の余地があると感じる宿泊客もいる」は中立）は妥当に判定したが、「ほぼ半々」から「肯定的な意見が多い」を含意 0.98 と判定し、この例では割合の言い違いを見分けられなかった。割合の主張は、数えた結果と突き合わせて確かめる。
 - 段階的な方法は、この章の「長い文書を分割して要約する」の map-reduce と同じ形だが、まとめる段階を LLM ではなくコードの集計にしている。部分要約を LLM にまとめさせると件数の情報が失われるので、割合を伝える要約では、数える部分をコードに任せる。
 - 正解の割合がわかるように、口コミはこのレシピのために作った（テキスト分類の章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」の chABSA は有価証券報告書の文なので使っていない）。実際の口コミでは、楽天トラベルのレビューや、その約 7 万文に 7 項目の観点と極性を付けたコーパスがあるが、国立情報学研究所の IDR を通じて、国内の大学と公的研究機関の研究者に学術研究の目的に限って提供されている。Amazon の多言語レビューコーパス (MARC) は配布が終了し、ライセンスも非商用の学術研究に限られていた。モデルは sarashina2.2-3b-instruct（SB Intuitions、MIT ライセンス）と mDeBERTa-v3-base-mnli-xnli（MIT ライセンス）。数値は A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 8.9 GB だった。トークナイザーの修正については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
+
+長い文章や会議の書き起こしを、話題が変わるところで区切りたい。単語の重なりで見る TextTiling と、文埋め込みの類似度の谷で見る方法を、正解の切れ目があるデータで Pk と WindowDiff を使って比べる。
+
+```python
+!pip install -q fugashi==1.5.2 unidic-lite==1.0.8
+```
+
+```python
+import io, re, tarfile, urllib.request
+import numpy as np
+import pandas as pd
+
+def load_livedoor():
+    """livedoor ニュースコーパス（株式会社ロンウイット配布）。記事は CC BY-ND 2.1 JP（表示・改変禁止）"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2].strip(), "text": "\n".join(lines[3:]).strip()})
+    return pd.DataFrame(rows)
+
+def split_sentences(text):
+    sents = [s.strip() for s in re.split(r"(?<=[。！？])|\n+", text) if s and len(s.strip()) > 5]
+    return [s for s in sents if "http" not in s and not s.startswith(("■", "【関連"))]   # リンクや関連記事の行を除く
+
+df = load_livedoor()
+df["sents"] = df["text"].map(split_sentences)
+df = df[df["sents"].map(len).between(5, 15)].reset_index(drop=True)   # 5〜15 文の記事だけを使う
+
+def make_docs(df, n_docs, n_articles=4, same_label=False, seed=0):
+    """記事を n_articles 本つなげて 1 文書にし、記事の境界を正解の切れ目にする。
+    same_label=False なら隣り合う記事のカテゴリが必ず違い、True なら 1 つのカテゴリの記事だけを使う。
+    正解は文ごとの "0"/"1" の列で、"1" はその文の後ろで話題が変わることを表す"""
+    rng = np.random.default_rng(seed)
+    cats = df["label"].unique()
+    docs = []
+    for _ in range(n_docs):
+        if same_label:
+            labels = [rng.choice(cats)] * n_articles
+        else:
+            labels = [rng.choice(cats)]
+            while len(labels) < n_articles:
+                labels.append(rng.choice([c for c in cats if c != labels[-1]]))
+        idx = []
+        for c in labels:   # カテゴリごとに、まだ使っていない記事を 1 本選ぶ
+            idx.append(rng.choice(df.index[(df["label"] == c) & ~df.index.isin(idx)]))
+        arts = df.loc[idx]
+        sents, ref = [], ""
+        for s in arts["sents"]:
+            sents += s
+            ref += "0" * (len(s) - 1) + "1"
+        docs.append({"sents": sents, "ref": ref[:-1] + "0", "labels": list(arts["label"])})
+    return docs
+
+# 調整用 (dev) と評価用 (test) で記事が重ならないように分ける
+rng = np.random.default_rng(0)
+is_dev = rng.random(len(df)) < 0.3
+dev = make_docs(df[is_dev], 10, seed=1) + make_docs(df[is_dev], 10, same_label=True, seed=4)   # 両方の種類を 10 文書ずつ
+test_mixed = make_docs(df[~is_dev], 30, seed=2)                    # 隣り合う記事のカテゴリが違う（切れ目が見つけやすい）
+test_same = make_docs(df[~is_dev], 30, same_label=True, seed=3)    # 同じカテゴリの記事だけをつなげる（難しい）
+print(len(df), "記事 / 1 文書の平均", round(np.mean([len(d["sents"]) for d in test_mixed]), 1), "文 / 埋め込む文の数",
+      sum(len(d["sents"]) for d in dev + test_mixed + test_same))
+print(test_mixed[0]["labels"])
+```
+
+```python
+from fugashi import Tagger
+from nltk.tokenize.texttiling import TextTilingTokenizer
+
+tagger = Tagger()
+vocab = {}
+
+def to_ascii(sent):
+    """内容語の原形を、英小文字だけの記号 (a, b, ..., aa, ab, ...) に置き換える。
+    NLTK の TextTiling は a-z 以外の文字を消してから単語を数えるので、日本語のままでは単語が 1 つも残らない"""
+    out = []
+    for w in tagger(sent):
+        f = w.feature
+        if f.pos1 in ("名詞", "動詞", "形容詞") and f.pos2 not in ("非自立可能", "数詞"):
+            i = vocab.setdefault(f.lemma or w.surface, len(vocab))
+            code = ""
+            while True:
+                code = chr(97 + i % 26) + code
+                i = i // 26 - 1
+                if i < 0:
+                    break
+            out.append(code)
+    return " ".join(out)
+
+def pick_boundaries(depth, threshold=None, n_boundaries=None, min_gap=3):
+    """depth[i] は i 番目の文の後ろの谷の深さ。深い順に、threshold 以上のものを全部、または n_boundaries 個だけ選ぶ。
+    すでに選んだ切れ目から min_gap 文以内のものは選ばない"""
+    chosen = []
+    for i in np.argsort(-depth):
+        if (n_boundaries is None and depth[i] < threshold) or (n_boundaries is not None and len(chosen) >= n_boundaries):
+            break
+        if all(abs(i - j) >= min_gap for j in chosen):
+            chosen.append(i)
+    return "".join("1" if i in chosen else "0" for i in range(len(depth) + 1))
+
+def texttiling(sents, w=20, k=4, n_boundaries=None):
+    """TextTiling で切れ目を求め、文ごとの "0"/"1" の列で返す。n_boundaries を与えると、谷の深い順にその数だけ選ぶ"""
+    codes = [to_ascii(s) for s in sents]
+    ends = np.cumsum([len(c.split()) for c in codes])     # 各文の終わりが何語目か
+    # stopwords を渡さないと英語のストップワードを読みに行く（内容語だけにしたので不要）。
+    # demo_mode=True で、w 語ずつの擬似文の間（ギャップ）ごとの谷の深さと、切れ目かどうかの判定を受け取る
+    tt = TextTilingTokenizer(w=w, k=k, stopwords=[], demo_mode=True)
+    try:
+        _, _, depth_gap, is_boundary = tt.tokenize("\n\n".join(codes))
+    except (ValueError, ZeroDivisionError):      # 文書が短すぎるとき
+        return "0" * len(sents)
+    # ギャップ g は (g + 1) * w 語目の後ろ。いちばん近い文の終わりに対応づける
+    depth, auto = np.zeros(len(sents) - 1), np.zeros(len(sents) - 1)
+    for g, (dep, b) in enumerate(zip(depth_gap, is_boundary)):
+        j = int(np.argmin(np.abs(ends - (g + 1) * w)))
+        if j < len(sents) - 1:
+            depth[j], auto[j] = max(depth[j], dep), max(auto[j], b)
+    if n_boundaries is None:
+        return "".join("1" if x else "0" for x in auto) + "0"
+    return pick_boundaries(depth, n_boundaries=n_boundaries)
+
+print(test_mixed[0]["ref"])
+print(texttiling(test_mixed[0]["sents"]))
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+# 日本語の文埋め込みモデル Ruri v3 の最小のもの (Apache 2.0)。"トピック: " は話題を捉えるためのプレフィックス（モデルカードによる）
+model = SentenceTransformer("cl-nagoya/ruri-v3-30m")
+
+def embed(docs):
+    for d in docs:
+        d["emb"] = model.encode(["トピック: " + s for s in d["sents"]], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
+
+def gap_similarity(emb, window=3):
+    """各文の後ろの切れ目について、前の window 文と後ろの window 文の平均ベクトルのコサイン類似度"""
+    sims = []
+    for i in range(len(emb) - 1):
+        a, b = emb[max(0, i - window + 1):i + 1].mean(0), emb[i + 1:i + 1 + window].mean(0)
+        sims.append(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
+    return np.array(sims)
+
+def depth_scores(sims):
+    """谷の深さ: 左右それぞれ、類似度が上がり続ける間たどった山の高さと、谷の底との差の和（TextTiling と同じ考え方）"""
+    depth = []
+    for i, s in enumerate(sims):
+        l = i
+        while l > 0 and sims[l - 1] >= sims[l]:
+            l -= 1
+        r = i
+        while r < len(sims) - 1 and sims[r + 1] >= sims[r]:
+            r += 1
+        depth.append(sims[l] + sims[r] - 2 * s)
+    return np.array(depth)
+
+def embedding_seg(emb, window=3, threshold=0.1, n_boundaries=None, min_gap=3):
+    return pick_boundaries(depth_scores(gap_similarity(emb, window)), threshold, n_boundaries, min_gap)
+
+# Colab の CPU で 2 分ほど
+for docs in (dev, test_mixed, test_same):
+    embed(docs)
+print(test_mixed[0]["ref"])
+print(embedding_seg(test_mixed[0]["emb"]))
+```
+
+```python
+from nltk.metrics.segmentation import pk, windowdiff
+
+def evaluate(docs, segment):
+    """Pk と WindowDiff の平均（小さいほどよい）と、Pk の標準誤差。窓の幅 k は、正解の区間の平均の長さの半分"""
+    rows = []
+    for d in docs:
+        ref, hyp = d["ref"], segment(d)
+        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
+        rows.append({"Pk": pk(ref, hyp, k), "WindowDiff": windowdiff(ref, hyp, k), "切れ目の数": hyp.count("1")})
+    rows = pd.DataFrame(rows)
+    return pd.Series({"Pk": rows["Pk"].mean(), "Pk の標準誤差": rows["Pk"].sem(), "WindowDiff": rows["WindowDiff"].mean(), "切れ目の数": rows["切れ目の数"].mean()})
+
+# 窓の大きさとしきい値は、調整用の文書 (dev) で WindowDiff が最小になるものを選ぶ
+def tune(segment, grid):
+    return min(grid, key=lambda p: evaluate(dev, lambda d: segment(d, *p))["WindowDiff"])
+
+n_ref = lambda d: d["ref"].count("1")
+best_tt = tune(lambda d, w, k: texttiling(d["sents"], w, k), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
+best_tt_n = tune(lambda d, w, k: texttiling(d["sents"], w, k, n_ref(d)), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
+best_emb = tune(lambda d, win, th: embedding_seg(d["emb"], win, th), [(win, th) for win in (1, 2, 3, 5, 7, 10) for th in (0.05, 0.1, 0.15, 0.2, 0.3)])
+best_emb_n = tune(lambda d, win: embedding_seg(d["emb"], win, n_boundaries=n_ref(d)), [(win,) for win in (1, 2, 3, 5, 7, 10)])
+print("TextTiling (w, k):", best_tt, "/ 数を与えるとき", best_tt_n)
+print("文埋め込み (window, threshold):", best_emb, "/ 数を与えるとき window", best_emb_n)
+```
+
+```python
+def fixed_length(n, every=10):
+    return "".join("1" if (i + 1) % every == 0 and i < n - 1 else "0" for i in range(n))
+
+def random_seg(n, n_boundaries, rng):
+    chosen = set(rng.choice(n - 1, n_boundaries, replace=False))
+    return "".join("1" if i in chosen else "0" for i in range(n))
+
+rng = np.random.default_rng(0)   # ランダムな区切りの乱数（種を固定）
+methods = {
+    "切れ目なし": lambda d: "0" * len(d["ref"]),
+    "10 文ごとに機械的に区切る": lambda d: fixed_length(len(d["ref"])),
+    "ランダム（正解と同じ数）": lambda d: random_seg(len(d["ref"]), n_ref(d), rng),
+    "TextTiling": lambda d: texttiling(d["sents"], *best_tt),
+    "TextTiling（切れ目の数を与える）": lambda d: texttiling(d["sents"], *best_tt_n, n_boundaries=n_ref(d)),
+    "文埋め込みの谷": lambda d: embedding_seg(d["emb"], *best_emb),
+    "文埋め込みの谷（切れ目の数を与える）": lambda d: embedding_seg(d["emb"], *best_emb_n, n_boundaries=n_ref(d)),
+}
+res = pd.DataFrame({(cond, name): evaluate(docs, f) for name, f in methods.items()
+                    for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]}).T
+print("正解の切れ目の数: 1 文書に 3")
+
+# 2 つの方法を同じ文書で比べる: 文書ごとの Pk の差（TextTiling − 文埋め込み）の平均と標準誤差（どちらも切れ目の数を与える）
+for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]:
+    diff = []
+    for d in docs:
+        ref = d["ref"]
+        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
+        diff.append(pk(ref, methods["TextTiling（切れ目の数を与える）"](d), k) - pk(ref, methods["文埋め込みの谷（切れ目の数を与える）"](d), k))
+    print(f"{cond}: Pk の差 {np.mean(diff):.3f} ± {pd.Series(diff).sem():.3f}（標準誤差）、文埋め込みのほうがよい文書 {sum(x > 0 for x in diff)} / 同じ {sum(x == 0 for x in diff)} / 悪い {sum(x < 0 for x in diff)}")
+res.unstack(0).reindex(methods).round(3)
+```
+
+```python
+# 会議の書き起こしに使う例（架空の短い会議）。発言を 1 単位にし、話題の数が分かっているとして切れ目の数を与える
+meeting = [
+    ("田中", "では定例会議を始めます。まず来月の展示会の準備状況からお願いします。"),
+    ("高橋", "ブースの場所は決まりました。入口に近い角の区画です。"),
+    ("鈴木", "展示用のパネルは来週中に印刷会社へ入稿します。"),
+    ("田中", "当日の説明員は何人必要ですか。"),
+    ("高橋", "午前と午後で 2 人ずつ、合計 4 人いれば回せます。"),
+    ("田中", "次に、新しい勤怠システムへの移行について。"),
+    ("佐藤", "来月 1 日から新システムに切り替えます。古いシステムの打刻データは今月末で締めます。"),
+    ("伊藤", "有給休暇の残日数は自動で引き継がれますか。"),
+    ("佐藤", "はい、残日数は移行されます。申請中の休暇だけは出し直してもらいます。"),
+    ("田中", "最後に、オフィスの引っ越しの件です。"),
+    ("鈴木", "新しいオフィスの内装工事が少し遅れていて、入居は 2 週間後ろにずれそうです。"),
+    ("伊藤", "それなら段ボールの配布も遅らせたほうがいいですね。"),
+    ("鈴木", "荷造りは入居日の 1 週間前から始めてもらう予定です。"),
+]
+emb = model.encode(["トピック: " + u for _, u in meeting], normalize_embeddings=True)
+hyp = embedding_seg(emb, window=2, n_boundaries=2, min_gap=2)
+for (who, u), b in zip(meeting, hyp):
+    print(f"{who}: {u}")
+    if b == "1":
+        print("―――― 話題の切れ目 ――――")
+```
+
+- 評価データは、livedoor ニュースコーパスの 5〜15 文の記事を 4 本ずつつなげ、記事の境界を正解の切れ目にして作った（隣り合う記事のカテゴリが違う 30 文書と、同じカテゴリの記事だけの 30 文書。1 文書は 4 区間で切れ目は 3 つ。前者は平均 47.1 文）。調整用の文書も両方の種類を 10 文書ずつにし、評価用とは記事が重ならないようにした。手軽に作れるが、記事の境界は話題の変わり目として分かりやすく、実際の文書や会議では切れ目がもっとあいまいなことがある。記事は CC BY-ND 2.1 JP（表示・改変禁止）なので、つなげた評価データは配布せず、手元で作り直す。
+- Pk は、k 文離れた 2 つの文が同じ区間に入るかどうかの判定を誤る割合、WindowDiff は、幅 k の窓の中の切れ目の数が正解と食い違う割合で、どちらも 0 が最良（Pk は Beeferman ら 1999、WindowDiff は Pevzner と Hearst 2002 の提案）。上の表では切れ目を 1 つも置かなくても Pk が 0.415〜0.419 になり、10 文ごとに機械的に区切ると、かえって悪くなる (0.464〜0.516)。必ずこうしたベースラインと並べる。
+- NLTK の `TextTilingTokenizer`（Hearst 1997 の TextTiling の実装）は、a-z 以外の文字を消してから単語を数えるので、日本語をそのまま渡すと単語が 1 つも残らない。ここでは形態素解析で内容語の原形を取り出し、英小文字だけの記号に置き換えて渡した。また、切れ目を段落の位置に戻す処理では、最初のギャップ以外の切れ目が w 語分前にずれる（nltk 3.9.1 のソースで確認）ので、`demo_mode=True` で各ギャップの判定と谷の深さを受け取り、文の位置への対応づけは自分で行った。
+- 結果: 切れ目の数を自動で決める設定では、文埋め込みの谷（Pk 0.102 / 0.193、隣り合うカテゴリが違う / 同じカテゴリ）が TextTiling (0.300 / 0.303) より大幅によかった。切れ目の数を与えると TextTiling は 0.213 / 0.217 まで改善するが、文埋め込み (0.106 / 0.146) との差は残り、同じ文書どうしで比べた Pk の差は 0.107 ± 0.029 / 0.071 ± 0.026（平均 ± 標準誤差）で、30 文書中 23 / 19 文書で文埋め込みのほうがよかった。文埋め込みは同じカテゴリの文書で悪くなるが、TextTiling はどちらでもほとんど変わらない。
+- 文埋め込みの方法は、前後の window 文の平均ベクトルの類似度が落ち込む「谷」を切れ目にする。単語が重ならない言い換えでも話題の近さを捉えられる。窓の大きさとしきい値は文書の種類で変わるので調整用の文書で選んだ（window は自動の設定で 7、数を与える設定で 5。TextTiling の (w, k) は (30, 4) と (10, 10) で、どちらも調べた範囲の端なので、範囲を広げるとよくなる余地がある）。自動の設定では切れ目がやや多め（平均 4.1 / 3.7 個。正解は 3 個）になった。話題の数（議題の数など）が分かっているなら、深い谷から順にその数だけ選べばしきい値は要らない。
+- 最後の架空の会議では、発言を 1 単位にし、切れ目の数 (2) を与えると、議題が変わる 2 か所で区切れた。ただし 1 例だけの確認である。発言は短く、窓に入る情報が少ないので、実際の書き起こしでは切れ目が前後にずれることがある前提で、区切った結果を人が確かめる。
+- LangChain の `langchain-experimental` の `SemanticChunker` も、隣り合う文（前後 `buffer_size` 文を含めたもの）の埋め込みの距離が大きいところで切る同じ考え方の実装である。既定の文の区切りは英語の句読点 (`(?<=[.?!])\s+`) なので、日本語では `sentence_split_regex` を変える。`number_of_chunks` でチャンクの数の目安を与えることもできるが、距離のパーセンタイルに換算してしきい値にするので、ちょうどその数になるとは限らない（0.4.2 のソースで確認）。
+- 議事録を作るときは、話題ごとに分けてから要約すると、長い書き起こしをそのまま渡すより論点が混ざりにくい（この章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」「長い文書を分割して要約する」を参照）。RAG のチャンク分割でも、文字数で切る代わりに話題の切れ目で切れば、1 つのチャンクに別の話題が混ざりにくくなる（RAG の章の「長い文書をチャンクに分割する」を参照）。
 
 ## 会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す） {meeting_minutes gpu}
 

@@ -1,6 +1,6 @@
 # Transformers の基本操作
 
-Hugging Face Transformers と Datasets で、事前学習済みモデルを動かすときの定番の操作。fill-mask と NLI、文脈に応じた単語ベクトル、バッチ推論とモデルの保存、データセットの読み込み、次のトークンの予測と生成のデコード方法、BERT の追加の事前学習と小さな GPT の事前学習。言語モデルの確率や内部の表現を調べる方法は「言語モデルの確率と内部を調べる」の章を参照。
+Hugging Face Transformers と Datasets で、事前学習済みモデルを動かすときの定番の操作。fill-mask と NLI、文脈に応じた単語ベクトル、次のトークンの予測と生成のデコード方法、バッチ推論とモデルの保存、データセットの読み込み、BERT の追加の事前学習と小さな GPT の事前学習。言語モデルの確率や内部の表現を調べる方法は「言語モデルの確率と内部を調べる」の章を参照。
 
 ## マスクされた単語を BERT に予測させる (fill-mask) {fill_mask}
 
@@ -97,6 +97,99 @@ for claim in ["売上高は増加した。", "営業利益は増加した。", "
 - 語彙の重なりが大きいと含意と判定しやすい、といった表面的な手がかりへの依存（アーティファクト）が知られている。過信は禁物。
 - 日本語のデータセットには JNLI (JGLUE)、JSICK、JaNLI などがある。
 - mDeBERTa のトークナイザーの不具合: transformers 5 系では、`AutoTokenizer` が返す `DebertaV2Tokenizer` が、全角の括弧や英数字（「（」「ＡＢＣ」など）を [UNK] にしてしまう（transformers の issue #49622。5.0〜5.23 で確認、4.57 では正しい）。エラーは出ないまま入力の一部が失われる。リポジトリにある tokenizer.json を `PreTrainedTokenizerFast.from_pretrained` で直接読めば、正しく分割される。`pipeline` で使うときは、こうして読んだトークナイザーを `tokenizer=` に渡す。上流で直れば不要になる。
+
+## 次に来るトークンの確率分布を見る {next_token_probs}
+
+言語モデルが「次に何が来る」と予測しているのか、上位候補と確率を直接見たい。
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+model = AutoModelForCausalLM.from_pretrained(name).eval()
+
+def next_tokens(prefix, k=6):
+    ids = tokenizer(tokenizer.bos_token + prefix, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    with torch.no_grad():
+        logits = model(ids).logits[0, -1]            # 最後の位置の出力 = 次のトークンの予測
+    probs = torch.softmax(logits, dim=-1)
+    top = torch.topk(probs, k)
+    entropy = -(probs * torch.log2(probs + 1e-12)).sum().item()
+    print(f"{prefix} … (エントロピー {entropy:.2f} bit)")
+    print("   ", "  ".join(f"{tokenizer.decode(i)!r}:{p:.2f}" for p, i in zip(top.values.tolist(), top.indices.tolist())))
+
+for prefix in ["日本の首都は", "むかしむかし、あるところに", "今日の天気は", "1 + 1 ="]:
+    next_tokens(prefix)
+```
+
+```python
+# 特定の候補同士の確率を比べる (選択式問題を解かせる、など)
+def compare(prefix, candidates):
+    ids = tokenizer(tokenizer.bos_token + prefix, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    with torch.no_grad():
+        logp = torch.log_softmax(model(ids).logits[0, -1], dim=-1)
+    return {c: round(logp[tokenizer(c, add_special_tokens=False)["input_ids"][0]].item(), 2) for c in candidates}
+
+print(compare("富士山があるのは", ["日本", "中国", "アメリカ"]))
+```
+
+- 言語モデルの出力は、語彙全体にわたる確率分布。生成とは、この分布から 1 つ選んで追加することの繰り返し。
+- エントロピーが低い = 次の語がほぼ決まっている。高い = 候補が多くて迷っている。
+- `compare` は各候補の最初の 1 トークンだけを比べている点に注意。複数トークンの候補は、全トークンの対数確率を合計する。
+
+## テキスト生成のデコード方法（貪欲法・ビームサーチ・サンプリング）を比べる {generation_decoding}
+
+言語モデルに文章の続きを生成させたい。`temperature` や `top_p` などの設定で出力がどう変わるかを確かめたい。
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B パラメータの小さな日本語 LLM (CPU でも動く)
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+model = AutoModelForCausalLM.from_pretrained(name).eval()
+
+messages = [{"role": "user", "content": "猫を主人公にした物語の書き出しを、一文だけ書いてください。"}]
+inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+
+def generate(**kwargs):
+    torch.manual_seed(0)
+    out = model.generate(**inputs, max_new_tokens=60, pad_token_id=tokenizer.eos_token_id, **kwargs)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+print("貪欲法          :", generate(do_sample=False))
+print("ビームサーチ (4):", generate(do_sample=False, num_beams=4, no_repeat_ngram_size=3))
+# サンプリング: 3 つのパラメータを毎回すべて明示する (top_p=1.0, top_k=0 が「制限なし」)
+print("temperature=0.3 :", generate(do_sample=True, temperature=0.3, top_p=1.0, top_k=0))
+print("temperature=1.0 :", generate(do_sample=True, temperature=1.0, top_p=1.0, top_k=0))
+print("temperature=1.5 :", generate(do_sample=True, temperature=1.5, top_p=1.0, top_k=0))
+print("top_p=0.9       :", generate(do_sample=True, temperature=1.0, top_p=0.9, top_k=0))
+print("top_k=20        :", generate(do_sample=True, temperature=1.0, top_p=1.0, top_k=20))
+```
+
+- 貪欲法・ビームサーチは決定的で無難。サンプリングは多様だが、temperature を上げすぎると破綻する。
+- `top_p`（nucleus サンプリング）は確率の累積が p になるまでの上位トークンだけから選ぶ。`top_k` は上位 k 個から選ぶ。
+- 翻訳や要約など正解が定まるタスクはビームサーチ、創作や対話はサンプリング（temperature 0.7 前後 + top_p 0.9 前後）が定番。
+- `max_new_tokens` は生成する長さの上限。指定しないと短い既定値で打ち切られる。
+- モデルに付属の `generation_config.json` に既定値（temperature や top_p など）が入っていることがある。指定しなかったパラメータにはそれが使われるので、`print(model.generation_config)` で確認する。
 
 ## バッチ処理と GPU で推論を高速化する {batch_inference gpu}
 
@@ -318,99 +411,6 @@ for a in sample:
 - `streaming=True` だと `IterableDataset` になり、`ds[0]` のような添字アクセスや `len()` は使えない。
 - `shuffle` はバッファサイズ分しか混ざらない。完全なランダムサンプルが必要なら、ダウンロードして通常のデータセットとして扱う。
 - 取り出したものを保存するなら `Dataset.from_list(list(wiki.take(10000)))`。
-
-## 次に来るトークンの確率分布を見る {next_token_probs}
-
-言語モデルが「次に何が来る」と予測しているのか、上位候補と確率を直接見たい。
-
-```python
-import sentencepiece as spm
-import torch
-from huggingface_hub import hf_hub_download
-from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
-tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-model = AutoModelForCausalLM.from_pretrained(name).eval()
-
-def next_tokens(prefix, k=6):
-    ids = tokenizer(tokenizer.bos_token + prefix, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    with torch.no_grad():
-        logits = model(ids).logits[0, -1]            # 最後の位置の出力 = 次のトークンの予測
-    probs = torch.softmax(logits, dim=-1)
-    top = torch.topk(probs, k)
-    entropy = -(probs * torch.log2(probs + 1e-12)).sum().item()
-    print(f"{prefix} … (エントロピー {entropy:.2f} bit)")
-    print("   ", "  ".join(f"{tokenizer.decode(i)!r}:{p:.2f}" for p, i in zip(top.values.tolist(), top.indices.tolist())))
-
-for prefix in ["日本の首都は", "むかしむかし、あるところに", "今日の天気は", "1 + 1 ="]:
-    next_tokens(prefix)
-```
-
-```python
-# 特定の候補同士の確率を比べる (選択式問題を解かせる、など)
-def compare(prefix, candidates):
-    ids = tokenizer(tokenizer.bos_token + prefix, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    with torch.no_grad():
-        logp = torch.log_softmax(model(ids).logits[0, -1], dim=-1)
-    return {c: round(logp[tokenizer(c, add_special_tokens=False)["input_ids"][0]].item(), 2) for c in candidates}
-
-print(compare("富士山があるのは", ["日本", "中国", "アメリカ"]))
-```
-
-- 言語モデルの出力は、語彙全体にわたる確率分布。生成とは、この分布から 1 つ選んで追加することの繰り返し。
-- エントロピーが低い = 次の語がほぼ決まっている。高い = 候補が多くて迷っている。
-- `compare` は各候補の最初の 1 トークンだけを比べている点に注意。複数トークンの候補は、全トークンの対数確率を合計する。
-
-## テキスト生成のデコード方法（貪欲法・ビームサーチ・サンプリング）を比べる {generation_decoding}
-
-言語モデルに文章の続きを生成させたい。`temperature` や `top_p` などの設定で出力がどう変わるかを確かめたい。
-
-```python
-import sentencepiece as spm
-import torch
-from huggingface_hub import hf_hub_download
-from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B パラメータの小さな日本語 LLM (CPU でも動く)
-tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-model = AutoModelForCausalLM.from_pretrained(name).eval()
-
-messages = [{"role": "user", "content": "猫を主人公にした物語の書き出しを、一文だけ書いてください。"}]
-inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
-
-def generate(**kwargs):
-    torch.manual_seed(0)
-    out = model.generate(**inputs, max_new_tokens=60, pad_token_id=tokenizer.eos_token_id, **kwargs)
-    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-
-print("貪欲法          :", generate(do_sample=False))
-print("ビームサーチ (4):", generate(do_sample=False, num_beams=4, no_repeat_ngram_size=3))
-# サンプリング: 3 つのパラメータを毎回すべて明示する (top_p=1.0, top_k=0 が「制限なし」)
-print("temperature=0.3 :", generate(do_sample=True, temperature=0.3, top_p=1.0, top_k=0))
-print("temperature=1.0 :", generate(do_sample=True, temperature=1.0, top_p=1.0, top_k=0))
-print("temperature=1.5 :", generate(do_sample=True, temperature=1.5, top_p=1.0, top_k=0))
-print("top_p=0.9       :", generate(do_sample=True, temperature=1.0, top_p=0.9, top_k=0))
-print("top_k=20        :", generate(do_sample=True, temperature=1.0, top_p=1.0, top_k=20))
-```
-
-- 貪欲法・ビームサーチは決定的で無難。サンプリングは多様だが、temperature を上げすぎると破綻する。
-- `top_p`（nucleus サンプリング）は確率の累積が p になるまでの上位トークンだけから選ぶ。`top_k` は上位 k 個から選ぶ。
-- 翻訳や要約など正解が定まるタスクはビームサーチ、創作や対話はサンプリング（temperature 0.7 前後 + top_p 0.9 前後）が定番。
-- `max_new_tokens` は生成する長さの上限。指定しないと短い既定値で打ち切られる。
-- モデルに付属の `generation_config.json` に既定値（temperature や top_p など）が入っていることがある。指定しなかったパラメータにはそれが使われるので、`print(model.generation_config)` で確認する。
 
 ## BERT を自分の分野のテキストで追加で事前学習する（ドメイン適応） {mlm_domain_adaptation gpu}
 

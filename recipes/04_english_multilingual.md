@@ -198,6 +198,35 @@ print(wnl.lemmatize("better"), wnl.lemmatize("better", pos="a"), wnl.lemmatize("
 
 - 大量に処理するときは `nlp.pipe(texts, batch_size=256)` を使い、不要な要素は `spacy.load(..., disable=["parser", "ner"])` で止めると速い。
 
+## 英語の品詞タグ付けをする {pos_tag_en}
+
+英文の各単語に品詞（名詞・動詞・形容詞…）を付けたい。
+
+```python
+import nltk
+nltk.download("punkt_tab", quiet=True)
+nltk.download("averaged_perceptron_tagger_eng", quiet=True)
+nltk.download("universal_tagset", quiet=True)
+
+tokens = nltk.word_tokenize("Time flies like an arrow; fruit flies like a banana.")
+print(nltk.pos_tag(tokens))                       # Penn Treebank タグ
+print(nltk.pos_tag(tokens, tagset="universal"))   # 粗い共通タグ
+```
+
+```python
+!python -m spacy download en_core_web_sm -q
+```
+
+```python
+import spacy
+
+nlp = spacy.load("en_core_web_sm")
+for t in nlp("Time flies like an arrow; fruit flies like a banana."):
+    print(f"{t.text:8}{t.pos_:7}{t.tag_:5}{spacy.explain(t.tag_)}")
+```
+
+- `pos_` は Universal Dependencies の粗い品詞、`tag_` は Penn Treebank の細かい品詞。
+
 ## 英語のストップワードを除去する {stopwords_en}
 
 `the` `is` `of` のような機能語を取り除いて、内容語だけにしたい。
@@ -261,35 +290,6 @@ print(clean(raw, lower=False, remove_punct=False))
 
 - 記号を「削除」ではなく「空白に置換」するのがコツ（`e-mail` が `email` ではなく `e mail` になるが、`word,word` がくっつく事故を防げる）。
 - 事前学習済みモデルを使う場合は、こうした前処理はせずに生のテキストを渡す。
-
-## 英語の品詞タグ付けをする {pos_tag_en}
-
-英文の各単語に品詞（名詞・動詞・形容詞…）を付けたい。
-
-```python
-import nltk
-nltk.download("punkt_tab", quiet=True)
-nltk.download("averaged_perceptron_tagger_eng", quiet=True)
-nltk.download("universal_tagset", quiet=True)
-
-tokens = nltk.word_tokenize("Time flies like an arrow; fruit flies like a banana.")
-print(nltk.pos_tag(tokens))                       # Penn Treebank タグ
-print(nltk.pos_tag(tokens, tagset="universal"))   # 粗い共通タグ
-```
-
-```python
-!python -m spacy download en_core_web_sm -q
-```
-
-```python
-import spacy
-
-nlp = spacy.load("en_core_web_sm")
-for t in nlp("Time flies like an arrow; fruit flies like a banana."):
-    print(f"{t.text:8}{t.pos_:7}{t.tag_:5}{spacy.explain(t.tag_)}")
-```
-
-- `pos_` は Universal Dependencies の粗い品詞、`tag_` は Penn Treebank の細かい品詞。
 
 ## 英単語の単数形・複数形・冠詞を変換する (inflect) {inflect}
 
