@@ -1,6 +1,6 @@
 # 意味解析
 
-「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。
+「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。
 
 ## 日本語の述語項構造解析をする (KWJA) {pas_kwja}
 
@@ -328,6 +328,164 @@ print([(h, t, d["relation"]) for h, t, d in G.edges(data=True) if "Toyota" in h]
 - 関係の種類は Wikidata のプロパティ（約 220 種類）に限られる。それ以外の関係や、ドメイン固有の関係は取れない。
 - 文に書かれていない関係を「知識」から出力してしまうことがある。抽出した主語・目的語が原文に出現するかで検証するとよい。
 - 多言語版の mREBEL もあるが、日本語の精度は英語に及ばない。日本語では、係り受けと固有表現を組み合わせた規則（構文解析の章の三つ組抽出）や、この章の最初の KWJA による述語項構造解析が現実的な選択肢になる。
+
+## 2 つのエンティティの関係を分類する BERT を学習する（エンティティの印、SemEval-2010 Task 8） {relation_classification gpu}
+
+文中の 2 つの名詞の間の関係（「原因と結果」「部分と全体」「中身と容器」など）を、自分のラベルで分類するモデルを学習したい。エンティティを `<e1>…</e1>` などの印で囲み、BERT をファインチューニングする。
+
+```python
+import re
+import numpy as np
+import pandas as pd
+import torch
+from datasets import load_dataset
+
+# SemEval-2010 Task 8（Hendrickx ら, 2010）。CC BY 3.0。学習 8000 文、評価 2717 文、名詞の組ごとに 9 種類の関係 × 方向 2 つ + Other
+ds = load_dataset("SemEvalWorkshop/sem_eval_2010_task_8")
+labels = ds["train"].features["relation"].names
+print(len(labels), "ラベル:", labels[:4], "...", labels[-1])
+for ex in ds["train"].select(range(3)):
+    print(labels[ex["relation"]], "|", ex["sentence"])
+counts = pd.DataFrame({sp: pd.Series([labels[r] for r in ds[sp]["relation"]]).value_counts() for sp in ["train", "test"]})
+counts = counts.sort_values("test", ascending=False)   # ラベルごとの件数（学習と評価）
+print(counts.head(3).to_string(), "\n...\n", counts.tail(3).to_string(), sep="")
+```
+
+```python
+from torch import nn
+from transformers import AutoModel, AutoTokenizer, DataCollatorWithPadding, Trainer, TrainingArguments, set_seed
+
+model_name = "google-bert/bert-base-uncased"   # Apache-2.0
+MARKERS = ["<e1>", "</e1>", "<e2>", "</e2>"]
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+tokenizer.add_tokens(MARKERS, special_tokens=True)   # 印を 1 トークンとして語彙に足す（分割も小文字化もされない）
+print(tokenizer.tokenize("The <e1>song</e1> was composed for a famous Brazilian <e2>musician</e2>."))
+
+def encode(batch, marker):
+    if marker:
+        texts = batch["sentence"]
+    else:   # 印なし: 印を消して文だけを入れる（どの 2 語の関係を聞いているのか、モデルには分からない）
+        texts = [re.sub(r"</?e[12]>", "", s) for s in batch["sentence"]]
+    enc = tokenizer(texts, truncation=True, max_length=128)   # 印が 128 トークンより後ろにあると切れて見つからず、下の index で止まる。長い文では増やす
+    ids = tokenizer.convert_tokens_to_ids(["<e1>", "<e2>"])
+    # <e1> と <e2> の位置（印なしのときは [CLS] の位置 0 にしておく。使わない）
+    enc["e1_pos"] = [x.index(ids[0]) if marker else 0 for x in enc["input_ids"]]
+    enc["e2_pos"] = [x.index(ids[1]) if marker else 0 for x in enc["input_ids"]]
+    enc["labels"] = batch["relation"]
+    return enc
+
+class RelationClassifier(nn.Module):
+    """BERT + 線形層。pool="cls" は [CLS] のベクトル、"entity" は <e1> と <e2> の位置のベクトルをつないで分類する"""
+    def __init__(self, pool):
+        super().__init__()
+        self.bert = AutoModel.from_pretrained(model_name)
+        self.bert.resize_token_embeddings(len(tokenizer))   # 足した印の埋め込みを用意する（乱数で初期化され、学習で決まる）
+        self.pool = pool
+        hidden = self.bert.config.hidden_size * (2 if pool == "entity" else 1)
+        self.head = nn.Sequential(nn.Dropout(0.1), nn.Linear(hidden, len(labels)))
+
+    def forward(self, input_ids, attention_mask, e1_pos, e2_pos, labels=None, token_type_ids=None):
+        h = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        if self.pool == "entity":
+            rows = torch.arange(len(h), device=h.device)
+            vec = torch.cat([h[rows, e1_pos], h[rows, e2_pos]], dim=-1)
+        else:
+            vec = h[:, 0]
+        logits = self.head(vec)
+        loss = nn.functional.cross_entropy(logits, labels) if labels is not None else None
+        return {"loss": loss, "logits": logits}
+```
+
+```python
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+
+def train(marker, pool, epochs=4):
+    set_seed(0)
+    data = ds.map(lambda b: encode(b, marker), batched=True, remove_columns=["sentence", "relation"])
+    model = RelationClassifier(pool)
+    args = TrainingArguments(
+        output_dir="re-out", num_train_epochs=epochs, learning_rate=5e-5, warmup_steps=100, weight_decay=0.01,
+        per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
+        bf16=BF16, fp16=not BF16, logging_steps=100, report_to="none", seed=0)
+    trainer = Trainer(model=model, args=args, train_dataset=data["train"], data_collator=DataCollatorWithPadding(tokenizer))
+    trainer.train()
+    pred = trainer.predict(data["test"]).predictions.argmax(-1)
+    return model, pred
+
+gold = np.array(ds["test"]["relation"])
+results = {}
+for name, marker, pool in [("印なし + [CLS]", False, "cls"), ("印あり + [CLS]", True, "cls"), ("印あり + 印の位置", True, "entity")]:
+    model, pred = train(marker, pool)   # T4 で 1 つあたり 3〜4 分
+    results[name] = pred
+    print(name, "正解率:", round(float((pred == gold).mean()), 3))
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+from sklearn.metrics import classification_report
+
+rel_type = np.array([l.split("(")[0] for l in labels])   # "Cause-Effect(e1,e2)" → "Cause-Effect"
+TYPES = [t for t in dict.fromkeys(rel_type) if t != "Other"]
+
+def official_f1(gold, pred):
+    """SemEval-2010 Task 8 の公式のスコアラー（Perl）と同じ計算: 9 種類の関係ごとの F1 の平均（Other は平均に入れない）。
+    方向を間違えたら不正解とし、精度は「その関係と予測した数」、再現率は「正解がその関係の数」で割る"""
+    f1s = []
+    for t in TYPES:
+        tp = np.sum((pred == gold) & (rel_type[gold] == t))
+        p, r = tp / max(np.sum(rel_type[pred] == t), 1), tp / max(np.sum(rel_type[gold] == t), 1)
+        f1s.append(2 * p * r / (p + r) if p + r else 0.0)
+    return float(np.mean(f1s))
+
+rng = np.random.default_rng(0)
+boot = [rng.integers(0, len(gold), len(gold)) for _ in range(1000)]   # 評価データを復元抽出で作り直す（ブートストラップ）
+for name, pred in results.items():
+    scores = [official_f1(gold[i], pred[i]) for i in boot]
+    print(f"{name}: 公式の F1 {official_f1(gold, pred):.3f}（95% 信頼区間 {np.percentile(scores, 2.5):.3f}〜{np.percentile(scores, 97.5):.3f}）")
+a, b = results["印あり + [CLS]"], results["印あり + 印の位置"]
+diff = [official_f1(gold[i], b[i]) - official_f1(gold[i], a[i]) for i in boot]   # 同じ復元抽出で差をとる（対応のあるブートストラップ）
+print(f"印の位置 − [CLS] の差: {official_f1(gold, b) - official_f1(gold, a):+.3f}（95% 信頼区間 {np.percentile(diff, 2.5):+.3f}〜{np.percentile(diff, 97.5):+.3f}）\n")
+pred = results["印あり + 印の位置"]
+print(classification_report(gold, pred, labels=range(len(labels)), target_names=labels, digits=3, zero_division=0))
+```
+
+```python
+# 方向をまとめた 10 種類で混同行列を見る。対角線の数には、方向を間違えたものも含む
+short = {t: "".join(w[0] for w in t.split("-")) for t in dict.fromkeys(rel_type)}   # "Cause-Effect" → "CE"、"Other" → "O"
+cm = pd.crosstab(pd.Series([short[t] for t in rel_type[gold]], name="正解"), pd.Series([short[t] for t in rel_type[pred]], name="予測"))
+print(cm.to_string())
+same_type = rel_type[gold] == rel_type[pred]
+print("関係の種類は合っていて方向だけ違う:", int(np.sum(same_type & (gold != pred))), "件 /",
+      "Other を関係ありと予測:", int(np.sum((rel_type[gold] == "Other") & (rel_type[pred] != "Other"))), "件 /",
+      "関係ありを Other と予測:", int(np.sum((rel_type[gold] != "Other") & (rel_type[pred] == "Other"))), "件")
+```
+
+```python
+# 新しい文で予測する。model はループで最後に学習したもの（印あり + 印の位置）。SemEval では先に出る名詞が常に e1 なので、同じ関係でも語順によって向きが変わる
+model.eval()
+
+@torch.no_grad()
+def classify(sentence):
+    enc = encode({"sentence": [sentence], "relation": [0]}, marker=True)
+    batch = {k: torch.tensor(v).to(model.bert.device) for k, v in enc.items() if k != "labels"}
+    prob = model(**batch)["logits"][0].float().softmax(-1)
+    return labels[int(prob.argmax())], round(float(prob.max()), 2)
+
+for s in ["The <e1>fire</e1> was caused by a faulty <e2>heater</e2>.",
+          "A faulty <e1>heater</e1> caused the <e2>fire</e2>.",
+          "She put the <e1>letters</e1> into an old wooden <e2>box</e2>.",
+          "The <e1>engine</e1> of the <e2>car</e2> was replaced last week.",
+          "The <e1>girl</e1> sat quietly next to the <e2>window</e2>."]:
+    print(classify(s), s)
+```
+
+- 関係分類は、文と 2 つのエンティティが与えられたときに、その組の関係のラベルを 1 つ選ぶ文分類である。この章の「文から関係の三つ組を抽出する (REBEL)」は、学習済みのモデルが Wikidata の関係を文から生成するだけで、関係の種類を自分では決められない。自分の分野の関係（薬と副作用、部品と製品など）を扱うには、注釈を付けたデータでこのような分類器を学習する。
+- 実務では、固有表現抽出の章の「BERT をファインチューニングして日本語の固有表現抽出器を作る」で文中のエンティティを見つけ、その組ごとに印を付けてこの分類器にかけるパイプラインにすることが多い。組の大半は関係なしになるので、Other (no_relation) の例を十分に学習させる必要がある。BERT に分類の層を付けて Trainer で学習する流れは、テキスト分類の章の「BERT をファインチューニングして文書分類する (Trainer)」と同じで、ここでは印の位置のベクトルを取り出すために自作のモデルを渡している。
+- 公式の F1 は、印なし 0.808、印あり + [CLS] 0.889、印あり + 印の位置 0.891 になった。印の効果ははっきりしている。印なしでも 0.81 になるのは、SemEval の文は短く、関係を聞く名詞の組が 1 つで、先に出る名詞が常に e1 だからと考えられる。印の位置のベクトルを使う方法は Baldini Soares ら (2019) が最もよかったと報告しているが、ここでは [CLS] との差 +0.003 の信頼区間（-0.005〜+0.011）が 0 をまたいでおり、ばらつきの範囲である。
+- ラベルは方向付きで、`Cause-Effect(e1,e2)` は e1 が原因、`(e2,e1)` は e2 が原因を表す。上の例でも、受け身の文と能動の文で向きが入れ替わった。関係の種類は合っていて方向だけを間違えたのは 7 件と少ない。ただし `Entity-Destination(e2,e1)` は学習データにも評価データにも 1 件しかなく、評価データの 1 件も当たっていない。
+- 公式の評価は、Other を除く 9 種類の関係の F1 のマクロ平均で、方向を間違えると不正解になる。Other は「9 種類のどれでもない」の寄せ集めで、クラスごとの F1 は 0.666 にとどまり、関係ありのラベル（0.77〜0.95。評価データが 1 件だけの `Entity-Destination(e2,e1)` を除く）より明らかに低い。混同行列でも、Other を関係ありと予測した 163 件と、関係ありを Other と予測した 129 件が誤りの大半を占める。
+- T4 では、3 つの学習で合わせて 10 分ほどかかる見込みで、GPU メモリの最大は 3.7 GB である。ここでは学習データ全体で学習し、評価データで 1 回だけ測っている。学習率やエポック数を選ぶなら、学習データの一部を開発データとして分ける。
+- 日本語では、ライセンスが明確で手軽に使える関係分類の注釈付きデータが見当たらない。日本語で作るなら、同じ形式（印を付けた文とラベル）で自分のデータに注釈を付け、`tohoku-nlp/bert-base-japanese-v3` などの日本語のモデルに替える。
 
 ## 固有表現を Wikidata のエンティティに結び付ける（エンティティリンキング） {entity_linking norun}
 

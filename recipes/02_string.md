@@ -1,6 +1,6 @@
 # 文字列処理と正規化
 
-形態素解析やモデルに入れる前の、文字レベルの下ごしらえ。日付や住所のような表記ゆれの多い表現の正規化と、会社名や住所の名寄せも扱う。
+形態素解析やモデルに入れる前の、文字レベルの下ごしらえ。日付や住所のような表記ゆれの多い表現の正規化、旧字体・歴史的仮名遣いの新字新仮名への変換、会社名や住所の名寄せも扱う。
 
 ## 文字コードを判定して UTF-8 に変換する {encoding_detect}
 
@@ -143,6 +143,309 @@ print(neologdn.normalize("Ｃｏｋｅ ｚｅｒｏ　を　飲む"))
 
 - mecab-ipadic-NEologd の正規化ルールの実装。日本語文字間の空白は消え、英単語間の空白は残る。
 - NFKC とは挙動が異なる（全角記号を残すなど）ので、どちらを使うかはタスク次第。
+
+## 旧字体・歴史的仮名遣いの文章を新字体・現代仮名遣いに直す {kyujitai_kana gpu}
+
+「舊字體」「言ふ」「ゐる」のような旧字旧仮名の文章を、「旧字体」「言う」「いる」の新字新仮名に直して、現代語用の解析器や検索で扱いやすくしたい。対応表と規則で直す方法と、手元の LLM に直させる方法を、青空文庫の同じ作品の新字新仮名版と比べて評価する。
+
+```python
+!pip install -q fugashi==1.5.2 unidic-lite==1.0.8 rapidfuzz==3.14.6
+# kyujipy は実行に要らない build や twine も依存に持つので、--no-deps で入れて表の読み込みに要る cson だけを足す
+!pip install -q --no-deps kyujipy==0.6.8 cson==0.8 speg==0.3
+```
+
+```python
+import csv, io, re, urllib.request, zipfile
+from rapidfuzz.distance import Levenshtein
+
+def fetch_zip(url):
+    with urllib.request.urlopen(url) as r:
+        return zipfile.ZipFile(io.BytesIO(r.read()))
+
+# 青空文庫の「公開中 作家別作品一覧拡充版」（書誌データは CC BY 4.0）から、同じ作品の旧字旧仮名版と新字新仮名版を探す
+z = fetch_zip("https://www.aozora.gr.jp/index_pages/list_person_all_extended_utf8.zip")
+versions = {}
+for r in csv.DictReader(io.TextIOWrapper(z.open(z.namelist()[0]), encoding="utf-8-sig")):
+    if r["役割フラグ"] == "著者" and r["作品著作権フラグ"] == "なし":
+        versions.setdefault((r["姓"] + r["名"], r["作品名"]), {}).setdefault(r["文字遣い種別"], r)
+both = [k for k, v in versions.items() if "旧字旧仮名" in v and "新字新仮名" in v]
+print("旧字旧仮名版と新字新仮名版がそろった作品名:", len(both))     # 副題の違う連作（捕物帳など）は 1 つに数える
+
+def jis_x0213(plane, row, cell):
+    """JIS X 0213 の面区点番号を文字にする（EUC-JIS-2004 のバイト列にして復号する）"""
+    b = bytes([0xA0 + row, 0xA0 + cell])
+    return (b if plane == 1 else b"\x8f" + b).decode("euc_jis_2004")
+
+def gaiji(m):
+    """外字の注記を文字に戻す。例: ※［＃「言＋墟のつくり」、第4水準2-88-74］→ 譃"""
+    note = m.group(1)
+    if u := re.search(r"U\+([0-9A-Fa-f]{4,5})", note):
+        return chr(int(u.group(1), 16))
+    if j := re.search(r"([12])-(\d{1,2})-(\d{1,2})］?$", note):
+        return jis_x0213(*map(int, j.groups()))
+    return "〓"   # 面区点番号のない外字（字形の説明とページ数だけのもの）
+
+def aozora_paragraphs(url):
+    """データの収集と入出力の章の「青空文庫から作品をダウンロードして本文を取り出す」に、外字の復元と段落への分割を足したもの"""
+    z = fetch_zip(url)
+    raw = z.read([n for n in z.namelist() if n.endswith(".txt")][0]).decode("cp932")
+    parts = re.split(r"-{50,}", raw)
+    body = (parts[2] if len(parts) >= 3 else raw).split("底本：")[0]
+    body = re.sub(r"※［＃(.+?)］", gaiji, body)       # JIS X 0208 にない旧字は「※」と注記で書かれている
+    body = re.sub(r"《.+?》|［＃.+?］|｜", "", body)    # ルビ、入力者注、ルビの開始位置の記号
+    return [p.strip("　 ") for p in body.replace("\r\n", "\n").split("\n") if p.strip("　 ")]
+
+print(aozora_paragraphs(versions[("芥川竜之介", "羅生門")]["旧字旧仮名"]["テキストファイルURL"])[1][:60])
+```
+
+```python
+def align(src, tgt, key=lambda s: s):
+    """2 つの版の段落の対応をとる（1 対 1 か読み飛ばし。似ていない段落どうしは組にしない）"""
+    a = [key(s) for s in src]
+    n, m = len(a), len(tgt)
+    score = [[0.0] * (m + 1) for _ in range(n + 1)]
+    back = {}
+    for i in range(n + 1):
+        for j in range(m + 1):
+            cands = []
+            if i and j:
+                cands.append((score[i - 1][j - 1] + Levenshtein.normalized_similarity(a[i - 1], tgt[j - 1]) - 0.3, (i - 1, j - 1)))
+            if i:
+                cands.append((score[i - 1][j], (i - 1, j)))
+            if j:
+                cands.append((score[i][j - 1], (i, j - 1)))
+            if cands:
+                score[i][j], back[i, j] = max(cands)
+    pairs, (i, j) = [], (n, m)
+    while i or j:
+        pi, pj = back[i, j]
+        if (pi, pj) == (i - 1, j - 1):
+            pairs.append((src[i - 1], tgt[j - 1]))
+        i, j = pi, pj
+    return pairs[::-1]
+
+# 規則を作るときに誤りを見た作品 (dev) と、評価だけに使う作品 (test) を分ける
+WORKS = {"dev": [("太宰治", "列車"), ("太宰治", "ダス・ゲマイネ"), ("堀辰雄", "窓"), ("堀辰雄", "鳥料理"),
+                 ("永井荷風", "虫の声"), ("伊藤左千夫", "奈々子")],
+         "test": [("芥川竜之介", "羅生門"), ("芥川竜之介", "藪の中"), ("芥川竜之介", "蜜柑"), ("中島敦", "山月記"),
+                  ("中島敦", "名人伝"), ("梶井基次郎", "檸檬"), ("夏目漱石", "変な音"), ("国木田独歩", "画の悲み"),
+                  ("森鴎外", "寒山拾得"), ("森鴎外", "高瀬舟")]}
+```
+
+```python
+from kyujipy import BasicConverter, KyujitaiConverter
+import unicodedata
+
+# 旧字→新字の対応表: kyujipy (MIT)。常用漢字表・人名用漢字表・Unicode の Standardized Variants・kyujitai.js をもとにした 1 字ずつの表
+bc = BasicConverter()
+def shinjitai(t):
+    """字体だけを新字にする。「辨・瓣・辯」→「弁」は kyujipy では書きかえの表にあるので、ここで足す"""
+    return bc.kyujitai_to_shinjitai(t).translate(str.maketrans("辨瓣辯", "弁弁弁"))
+
+print(shinjitai("舊字體の國語を學び、圓い燈を點す"))
+# KyujitaiConverter は同音の漢字による書きかえ（輿論→世論、編輯→編集）までするので、語を変えたくないときは使わない
+print(shinjitai("輿論と編輯"), "/", KyujitaiConverter().kyujitai_to_shinjitai("輿論と編輯"))
+print(unicodedata.normalize("NFKC", "舊字體の國語"))     # NFKC では旧字体は変わらない
+
+data = []
+for group, works in WORKS.items():
+    for author, title in works:
+        v = versions[(author, title)]
+        src, tgt = aozora_paragraphs(v["旧字旧仮名"]["テキストファイルURL"]), aozora_paragraphs(v["新字新仮名"]["テキストファイルURL"])
+        pairs = align(src, tgt, key=shinjitai)     # 漢字だけ新字にしてから似ている段落を探す
+        data += [{"group": group, "work": title, "kyu": a, "shin": b} for a, b in pairs]
+        print(f"{group:4} {author} {title}: 段落 {len(src)} / {len(tgt)} → 対応 {len(pairs)}")
+print(data[0]["kyu"][:50]); print(data[0]["shin"][:50])
+```
+
+```python
+import fugashi
+
+tagger = fugashi.Tagger()     # UniDic (unidic-lite) は歴史的仮名遣いの語も持っていて、語形 (form) に現代の発音の形が入っている
+for w in tagger("さうして私はかう思ふのである。雨が降つてゐる。"):
+    print(w.surface, w.feature.pos1, w.feature.kana, w.feature.form, sep="\t")
+```
+
+```python
+K2H = {i: i - 0x60 for i in range(0x30A1, 0x30F7)}
+VOICE = dict(zip("かきくけこさしすせそたちつてとはひふへほカキクケコサシスセソタチツテトハヒフヘホ",
+                 "がぎぐげござじずぜぞだぢづでどばびぶべぼガギグゲゴザジズゼゾダヂヅデドバビブベボ"))
+UNVOICE = {v: k for k, v in VOICE.items()}
+A2O = dict(zip("あかがさざただなばぱまやらわは", "おこごそぞとどのぼぽもよろおお"))
+
+def odoriji(t):
+    """踊り字を開く: こゝろ→こころ、づゝ→づつ、たゞ→ただ、うと／＼→うとうと（くの字点は直前の 2 文字の繰り返しとみなす）"""
+    t = re.sub(r"(.)(.)／″＼", lambda m: m.group(1) + m.group(2) + VOICE.get(m.group(1), m.group(1)) + m.group(2), t)
+    t = re.sub(r"(..)／＼", r"\1\1", t)
+    t = re.sub(r"(.)[ゝヽ]", lambda m: m.group(1) + UNVOICE.get(m.group(1), m.group(1)), t)     # ゝ は清音で繰り返す
+    return re.sub(r"(.)[ゞヾ]", lambda m: m.group(1) + VOICE.get(UNVOICE.get(m.group(1), m.group(1)), m.group(1)), t)
+
+def kana_simple(t):
+    """形態素を見ずに、文字の並びだけで置き換える"""
+    t = t.translate(str.maketrans("ゐゑぢづ", "いえじず"))
+    t = re.sub("(?<=[ぁ-ゖ])[はひふへほ]", lambda m: "わいうえお"["はひふへほ".index(m.group())], t)   # 語中・語末のハ行
+    t = re.sub("([あかがさざただなばぱまやらわ])う", lambda m: A2O[m.group(1)] + "う", t)         # さう→そう、だらう→だろう
+    return re.sub("つ(?=[たて])", "っ", t)                                                    # 言つた→言った
+
+def rewrite(surface, kana, form):
+    """表層形の仮名の部分だけを語形の仮名に置き換える（思ふ → 思う、言ひ → 言い）。漢字の部分は読みごとそのまま"""
+    segs = re.findall(r"[ぁ-ゖ]+|[^ぁ-ゖ]+", surface)
+    is_kana = [bool(re.match("[ぁ-ゖ]", s)) for s in segs]
+    m = re.fullmatch("".join(f"({re.escape(s)})" if k else "(.+?)" for s, k in zip(segs, is_kana)), kana.translate(K2H))
+    if not m:
+        return surface
+    m2 = re.fullmatch("".join("(.*?)" if k else re.escape(r) for r, k in zip(m.groups(), is_kana)), form.translate(K2H))
+    if not m2:
+        return surface
+    new = iter(m2.groups())
+    return "".join(next(new) if k else s for s, k in zip(segs, is_kana))
+
+KEEP = "\uE000"     # 促音にしない「つ」の目印（私用領域の文字）
+
+def standalone(prev):
+    """直前が文頭・記号か、名詞などに付いた助詞 1 つ（彼は/かつて）なら、独立した語とみなす（向/かつて、通り/か/かつて は除く）"""
+    pos = [p.feature.pos1 for p in prev[-2:]]
+    if prev and prev[-1].surface.endswith("か"):     # 「かかつて」はたいてい「掛かって」
+        return False
+    return not pos or pos[-1] == "補助記号" or (pos[-1] == "助詞" and (len(pos) == 1 or pos[0] not in ("助詞", "補助記号")))
+
+def kana_morph(t):
+    """形態素解析の結果を使って置き換える。助詞の「は・へ・を」や語頭のハ行（母、はは）はそのまま残る"""
+    out, prev = [], []
+    for w in tagger(t):
+        s, f = w.surface, w.feature
+        changed = False
+        if not w.is_unk and f.kana not in ("", "*") and f.form not in ("", "*") and f.kana != f.form and re.search("[ぁ-ゖ]", s):
+            s2 = rewrite(s, f.kana, f.form)     # 辞書にある語: 言ふ→言う、ゐる→いる、てふてふ→ちょうちょう
+            changed, s = s2 != s, s2
+        if not changed:
+            s = re.sub("([あかがさざただなばぱまやらわ])う", lambda m: A2O[m.group(1)] + "う", s)   # 1 語の中の「a 段+う」
+            if s in ("ひ", "ふ", "へ", "ほ") and f.pos1 != "助詞" and out and re.search(r"[一-鿿々]$", out[-1]):
+                s = "いうえお"["ひふへほ".index(s)]        # 漢字の直後の、助詞でない 1 文字は送り仮名とみなす（工合ひ）
+        if s == "う" and f.pos1 in ("助動詞", "感動詞") and out:   # 推量・意志の「う」の前: 書か/う→書こう、ませ/う→ましょう
+            out[-1] = re.sub("([あかがさざただなばぱまやらわ])$", lambda m: A2O[m.group(1)], out[-1])
+            out[-1] = re.sub("せ$", "しょ", out[-1])
+        if (f.lemma == "嘗て" and standalone(prev)) or (re.match("つ[たて]", s) and f.lemma in ("拙い", "伝える", "伝わる")):
+            s = s.replace("つ", KEEP, 1)     # 副詞の「かつて」と「つたない」などの「つ」は促音にしない
+        out.append(w.white_space + s)
+        prev.append(w)
+    t = "".join(out).translate(str.maketrans("ゐゑヰヱ", "いえイエ"))
+    # 促音: 持つて→持って、なかつた→なかった。旧仮名では語の区切りが崩れやすい（なか/つた）ので文字の並びで直す
+    return re.sub(r"(?<=[ぁ-ゖ一-鿿々])つ(?=[たて])", "っ", t).replace(KEEP, "つ")
+
+SYSTEMS = {"変換なし": lambda t: t,
+           "漢字だけ": lambda t: shinjitai(odoriji(t)),
+           "漢字+文字の規則": lambda t: kana_simple(shinjitai(odoriji(t))),
+           "漢字+形態素の規則": lambda t: kana_morph(shinjitai(odoriji(t)))}
+
+for s in ["はゝは川へ行つた。", "これはあひるです。", "道がつゞく。", "一本づゝ。", "さうでせう。", "彼はかつて海へ向かつて歩いた。",
+          "人にしたがふ。", "思ひ出してゐた。", "つい忘れてしまふのだ。", "言ひつたへ。"]:
+    print(s, "→", SYSTEMS["漢字+文字の規則"](s), "/", SYSTEMS["漢字+形態素の規則"](s))
+```
+
+```python
+import pandas as pd
+
+for d in data:
+    for name, fn in SYSTEMS.items():
+        d[name] = fn(d["kyu"])
+
+def cer(rows, name):
+    """文字誤り率: 新字新仮名版を正解とした編集距離の合計 ÷ 正解の文字数"""
+    return sum(Levenshtein.distance(d[name], d["shin"]) for d in rows) / sum(len(d["shin"]) for d in rows)
+
+df = pd.DataFrame(data)
+table = pd.DataFrame({(g, w): {name: cer(df[(df.group == g) & (df.work == w)].to_dict("records"), name) for name in SYSTEMS}
+                      for g, w in df[["group", "work"]].drop_duplicates().itertuples(index=False)}).T
+print(table.round(3).to_string())
+print(pd.DataFrame({g: {name: cer(df[df.group == g].to_dict("records"), name) for name in SYSTEMS} for g in WORKS})
+      .T.assign(段落数=df.group.value_counts()).round(3).to_string())
+```
+
+```python
+import difflib
+from collections import Counter
+
+# test の作品で、形態素の規則の出力と新字新仮名版とで違うところ（前後 2 文字を付けて数える）
+diffs = Counter()
+for d in df[df.group == "test"].to_dict("records"):
+    h, y = d["漢字+形態素の規則"], d["shin"]
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, h, y, autojunk=False).get_opcodes():
+        if op != "equal":
+            diffs[(h[max(0, i1 - 2):i2 + 1], y[max(0, j1 - 2):j2 + 1])] += 1
+for (h, y), c in diffs.most_common(25):
+    print(c, h, "→", y)
+```
+
+```python
+# 手元の LLM に直させて比べる（GPU 向けのセル。T4 で 5〜10 分。初回はモデルの約 8GB のダウンロードが加わる）
+import random, time
+import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "Qwen/Qwen3-4B-Instruct-2507"     # Alibaba の Qwen チーム、Apache 2.0
+tok = AutoTokenizer.from_pretrained(name, padding_side="left")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+INSTRUCTION = ("次の文章の旧字体を新字体に、歴史的仮名遣いを現代仮名遣いに直してください。"
+               "語の選び方、漢字と仮名の使い分け、句読点は変えないでください。直した文章だけを出力してください。")
+EXAMPLE = ("其の男は「さうでせう。」と云つて、舊い家へ歸つて行つた。", "其の男は「そうでしょう。」と云って、旧い家へ帰って行った。")
+
+def messages(text):
+    return [{"role": "user", "content": f"{INSTRUCTION}\n\n{EXAMPLE[0]}"}, {"role": "assistant", "content": EXAMPLE[1]},
+            {"role": "user", "content": f"{INSTRUCTION}\n\n{text}"}]
+
+@torch.no_grad()
+def llm_convert(texts, batch_size=16):
+    outs = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        prompts = [tok.apply_chat_template(messages(t), add_generation_prompt=True, tokenize=False) for t in batch]
+        enc = tok(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+        gen = llm.generate(**enc, max_new_tokens=int(max(map(len, batch)) * 1.5) + 20, do_sample=False)
+        outs += [s.strip() for s in tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return outs
+
+random.seed(0)
+sample = random.sample([d for d in data if d["group"] == "test" and len(d["kyu"]) <= 300], 120)
+t0 = time.time()
+for d, out in zip(sample, llm_convert([d["kyu"] for d in sample])):
+    d["LLM"] = out
+print(f"{len(sample)} 段落、{time.time() - t0:.0f} 秒、GPU メモリの最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+
+names = list(SYSTEMS) + ["LLM"]
+def leftovers(t):
+    """直し残し: 表で新字にできる旧字、ゐ・ゑ、「た・て」の前の大きい「つ」の数"""
+    return (sum(shinjitai(c) != c for c in t), len(re.findall("[ゐゑ]", t)), len(re.findall("(?<=[ぁ-ゖ一-鿿])つ(?=[たて])", t)))
+print(pd.DataFrame({n: {"CER": cer(sample, n), **dict(zip(["旧字", "ゐ・ゑ", "つ+た・て"], np.sum([leftovers(d[n]) for d in sample], axis=0)))}
+                    for n in names + ["shin"]}).T.round(3).to_string())     # shin は正解（新字新仮名版）
+
+# 段落を選び直すブートストラップで、CER の差の 95% 信頼区間を求める
+rng = np.random.default_rng(0)
+err = {n: np.array([Levenshtein.distance(d[n], d["shin"]) for d in sample]) for n in names}
+length = np.array([len(d["shin"]) for d in sample])
+idx = rng.integers(0, len(sample), (2000, len(sample)))
+for a, b in [("LLM", "漢字+形態素の規則"), ("LLM", "漢字だけ")]:
+    diff = err[a][idx].sum(1) / length[idx].sum(1) - err[b][idx].sum(1) / length[idx].sum(1)
+    print(f"{a} − {b}: {cer(sample, a) - cer(sample, b):+.3f}  95% CI {np.percentile(diff, [2.5, 97.5]).round(3)}")
+```
+
+```python
+# LLM と規則の出力を並べる: 規則より LLM の CER が大きい段落
+worst = sorted(sample, key=lambda d: Levenshtein.distance(d["LLM"], d["shin"]) - Levenshtein.distance(d["漢字+形態素の規則"], d["shin"]))[-3:]
+for d in worst:
+    print("原文:", d["kyu"][:80]); print("規則:", d["漢字+形態素の規則"][:80]); print("LLM :", d["LLM"][:80]); print("正解:", d["shin"][:80]); print()
+```
+
+- 青空文庫の著作権の切れた作品は、「青空文庫収録ファイルの取り扱い規準」で複製・再配布・翻案が自由とされ、著作権法の範囲で旧かな・旧漢字を現代表記にあらためる書き換えもできるとされている（入力者などの情報を残すことと、書き換えの履歴を書くことが望まれている）。作家別作品一覧の CSV は CC BY 4.0。kyujipy と fugashi は MIT、unidic-lite はパッケージが MIT で、同梱の UniDic 2.1.2 は GPL、LGPL、BSD から選べる。Qwen3-4B-Instruct-2507 は Apache 2.0。
+- 「正解」の新字新仮名版は底本が違い、仮名遣い以外の書き換え（「云う」→「言う」、「居る」→「いる」、「唯」→「ただ」、「ます。」」→「ます」」）も含むので、CER は 0 にならない。test の 10 作品の CER は、変換なしで 0.137、漢字だけで 0.109、文字の規則を足して 0.085、形態素の規則を足して 0.064 だった。残った差の上位はこうした書き換えが多いが、規則の誤り（「てしもう」「はひっ」「さつき」「やつと」）も混ざっている。dev の「虫の声」「奈々子」は 0.154 残り、底本どうしの違いが大きい。
+- 文字の並びだけの規則では、語頭や助詞のハ行と語中のハ行の区別がつかず、「はゝは」が「はわわ」、「これは」が「これわ」、「あひる」が「あいる」、「つゞく」が「つずく」、「したがふ」が「したごう」、副詞の「かつて」が「かって」になった。形態素解析で語の切れ目と品詞が分かれば、助詞の「は・へ・を」や語頭の「は」（母、はは）、副詞の「かつて」を残せる。
+- 形態素の規則は、UniDic の語形 (form) に入っている現代の形（イウ、イル、ソウ）に表層形の仮名を合わせ、辞書で拾えない「書か/う」「なかつた」などを少しの規則で補ったもの（補う規則は dev の作品の誤りだけを見て作った）。旧仮名では語の区切りが崩れやすく、「人にしたがふ」は「し/た/がふ」と区切られて残り、「思ひ出」も残り、「つい忘れてしまふ」は語形の選び方で「しもう」になり、「言ひつたへ」は「つた」を「蔦」とみて「言いったへ」になった。
+- 漢字は字体だけを 1 字ずつ変える BasicConverter を使った。KyujitaiConverter は「輿論→世論」「編輯→編集」のような同音の漢字による書きかえもするので、語を変えたくないときには向かない。表にない異体字は変わらず（上の例の「迂囘」）、test の 120 段落の新字新仮名版にも表で変わる字が 13 字残っていて、そこでは表の変換が正解と食い違う。「舊」のような統合漢字の旧字体は NFKC では変わらない。
+- 青空文庫のテキストは Shift_JIS (JIS X 0208) なので、それにない字は「※［＃「言＋墟のつくり」、第4水準2-88-74］」のような注記になっている。面区点番号があれば EUC-JIS-2004 のコーデックで文字に戻せる。データの収集と入出力の章の「青空文庫から作品をダウンロードして本文を取り出す」の関数は注記を消すので、旧字の多い作品ではこのように戻してから使う。
+- LLM の比較のセルだけが GPU 向けで、それより前のセルは CPU で動く。Qwen3-4B-Instruct-2507 に 1 例を付けて直させると、test の 120 段落の CER は 0.103 で、漢字だけ新字にしたもの (0.108) との差 −0.006 は 95% 信頼区間 [−0.011, 0.000] の上限が 0 にかかり、形態素の規則 (0.064) より 0.039 悪かった。旧字 435 字のうち 160 字、ゐ・ゑ 84 字のうち 16 字が残り、上の例では最初の数語だけ直してあとは原文のまま写していた。GPU メモリの最大は 9.8 GB（T4 と同じ float16 の値。bf16 の GPU では出力が変わりうる）。
 
 ## 繰り返し文字を縮約する（「すごーーーい」「wwww」） {squeeze_repeats}
 
