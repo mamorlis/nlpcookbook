@@ -1,6 +1,6 @@
 # トピックとキーワードの抽出
 
-ワードクラウドで眺める、文書を代表する語（特徴語やキーワード）を選ぶ、共起ネットワークを描く、文書集合に潜む話題（トピック）を見つける、急に増えた語を見つける（バースト検出）。
+ワードクラウドで眺める、文書を代表する語（特徴語やキーワード）を選ぶ、共起ネットワークを描く、文書集合に潜む話題（トピック）を見つける、急に増えた語を見つける（バースト検出）、アンケートの自由記述を話題ごとに集計する。
 
 ## 日本語のワードクラウドを作る {wordcloud_ja}
 
@@ -351,7 +351,345 @@ for c in joined.index:
 
 - この「埋め込み → UMAP → クラスタリング → c-TF-IDF」の流れをまとめたライブラリが BERTopic (`pip install bertopic`)。密度ベースの HDBSCAN でクラスタ数を自動で決め、どこにも属さない外れ値も扱える。
 - 短い文（タイトル、ツイート、アンケートの回答）に特に向く。長い文書は段落に分けてから埋め込む。
-- トピックの名前付けは、特徴語と代表文書を LLM に渡して要約させると読みやすくなる。
+- トピックの名前付けは、特徴語と代表文書を LLM に渡して要約させると読みやすくなる。この章の「アンケートの自由記述を話題ごとに集計して報告する（LLM によるラベル付け）」で、その方法を使っている。
+
+## アンケートの自由記述を話題ごとに集計して報告する（LLM によるラベル付け） {survey_free_text gpu}
+
+アンケートの自由記述が数百件ある。文埋め込みでクラスタリングして話題を見つけ、各話題に LLM でラベルと説明を付け、件数と代表的な回答を報告用の表と図にしたい。1 件が複数の話題にまたがる回答の扱い、ラベルの粒度の調整、少数意見の取りこぼしの確かめ方も知りたい。
+
+（T4 の GPU ランタイムで、モデルのダウンロードを含めて全体で 10 分程度かかる。）
+
+```python
+!pip install -q matplotlib-fontja==1.1.0
+```
+
+```python
+import random
+import re
+import pandas as pd
+
+# このレシピのために作った架空のアンケート（市立図書館の利用者アンケート「図書館へのご意見・ご要望をご自由にお書きください」）。
+# 話題ごとに手で書いた文を 1 つ（単一の話題）か 2 つ（複数の話題）つないで回答にした。実在の回答ではない。
+# 正解の話題 (true) は、最後の答え合わせにだけ使う
+FRAG = {
+    "開館時間": [
+        "平日も夜9時まで開いていると、仕事帰りに寄れて助かります。", "閉館が18時なので、会社員はほとんど利用できません。",
+        "月曜休館をやめて、別の曜日を休みにしてほしい。", "土日だけでも朝9時より早く開けてもらえないでしょうか。",
+        "年末年始の休館期間が長すぎると思います。", "夜間開館の日を増やしてほしいです。", "開館時間を延長してください。",
+        "祝日に閉まっていることがあり、何度か無駄足になりました。", "試験期間中だけでも閉館時間を遅くしてほしい。",
+        "館内整理日がいつなのか分かりにくいです。", "日曜日は17時に閉まるのが早すぎる。", "朝早くから開いているのはありがたい。",
+        "分館は平日の昼間しか開いていないので、もう少し時間を広げてほしい。", "仕事が終わってから行くと、もう閉まっています。"],
+    "座席": [
+        "自習席が少なく、土日は朝から満席です。", "学生が席を長時間占領していて、本を読む場所がない。", "座席の予約制を導入してほしい。",
+        "窓際の閲覧席は明るくて気に入っています。", "机が狭くてノートパソコンと本を同時に広げられない。",
+        "椅子が硬く、長く座っていると腰が痛くなります。", "グループで話し合いができる部屋がほしい。",
+        "荷物だけ置いて席を取る人がいて困っている。", "新聞コーナーのソファーがいつも同じ人で埋まっている。", "学習室を増やしてほしいです。",
+        "席数が足りないので、使っていない会議室を開放してはどうか。", "閲覧席の照明が暗くて字が読みにくい。",
+        "一人用の仕切りのある席があると集中できる。", "夏休みは中高生で席が全く空いていない。"],
+    "蔵書": [
+        "新刊の入荷が遅く、話題の本はいつも予約待ちです。", "専門書が古いものばかりで、最新の版がない。", "雑誌の種類を増やしてほしい。",
+        "リクエストした本をすぐに購入してもらえて嬉しかった。", "人気の小説を何冊か複本で置いてほしい。",
+        "郷土資料が充実しているのはこの図書館の良いところだと思う。", "プログラミングやITの本が少ない。",
+        "漫画も少し置いてもらえると若い人が来やすいと思う。", "電子書籍の貸出を始めてほしい。",
+        "資格試験の問題集が古い年度のものしかない。", "大活字本をもっと増やしてほしい。", "同じシリーズの途中の巻が抜けていることが多い。",
+        "古い本が汚れていて、手に取る気になれないものがある。", "ビジネス書の棚をもう少し充実させてほしい。"],
+    "予約・Web": [
+        "ホームページの蔵書検索が使いにくい。", "予約した本の取り置き期限が短すぎる。", "スマホから予約や延長ができるようにしてほしい。",
+        "予約の順番があと何人か分かるようにしてほしい。", "貸出の延長手続きがネットでできるのは便利です。",
+        "Webサイトのデザインが古く、どこに何があるか分からない。", "予約の本が届いたメールがよく迷惑メールに入ってしまう。",
+        "パスワードを忘れたときの再発行が窓口でしかできないのは不便。", "自動貸出機の操作がわかりにくく、毎回職員さんを呼んでいる。",
+        "予約できる冊数の上限を増やしてほしい。", "検索結果に貸出中かどうかがすぐ表示されないのが不便です。",
+        "カードを忘れてもスマホの画面で借りられるようにしてほしい。"],
+    "職員": [
+        "カウンターの職員さんがいつも親切で、気持ちよく利用できます。", "レファレンスで調べ物を手伝っていただき、大変助かりました。",
+        "一部の職員の言葉づかいが冷たく感じることがある。", "本の場所を尋ねたら、棚まで案内してくれてありがたかった。",
+        "窓口が混んでいるのに一人しか対応していないことがある。", "子どもにも優しく声をかけてくださり感謝しています。",
+        "質問しても「分かりません」で終わってしまい残念だった。", "司書の方のおすすめ本の展示がいつも楽しみです。",
+        "返却が少し遅れただけで強い口調で注意された。", "職員の皆さんの丁寧な対応に感謝しています。", "電話の問い合わせにも丁寧に答えてもらえた。"],
+    "駐車場・交通": [
+        "駐車場が狭く、土日は停められないことが多い。", "駐輪場に屋根がなく、雨の日は自転車が濡れる。",
+        "駅から遠いので、バスの本数を増やしてほしい。", "駐車場の無料時間を2時間に延ばしてほしい。",
+        "駐車場の出入口が狭くて車をぶつけそうになる。", "最寄りのバス停から図書館までの道が分かりにくい。",
+        "駐輪場がいっぱいで、歩道に自転車があふれている。", "近くの市営駐車場と提携してほしい。", "送迎の車が入口前に停まっていて危ない。"],
+    "静かさ・マナー": [
+        "館内で携帯電話で話している人がいて気になる。", "中高生のおしゃべりがうるさいときがある。", "静かな環境で読書ができて満足しています。",
+        "イヤホンの音漏れを注意してほしい。", "飲食禁止のはずなのに、お菓子を食べている人がいる。", "職員同士の私語が意外と響いている。",
+        "キーボードの音が気になるので、パソコンを使える席を分けてほしい。", "寝ている人のいびきが気になることがある。",
+        "マナーの悪い利用者には、もっと注意してほしい。"],
+    "Wi-Fi・電源": [
+        "館内のWi-Fiがすぐ切れる。", "電源の使える席を増やしてほしい。", "無料Wi-Fiがあるのは便利です。",
+        "Wi-Fiの接続に毎回登録が必要で面倒。", "パソコン席のコンセントが壊れていることがある。",
+        "オンライン会議に使えるくらい通信速度を上げてほしい。", "スマホの充電ができる場所があると助かる。", "調べ物用のパソコンが古くて動作が遅い。"],
+    "子ども・イベント": [
+        "子ども向けのおはなし会を毎回楽しみにしています。", "児童書コーナーをもう少し広くしてほしい。",
+        "小さい子どもが少し声を出しても気にならないスペースがあると助かる。", "夏休みの工作教室に参加して、子どもが本に興味を持つようになった。",
+        "大人向けの講座や読書会も開いてほしい。", "授乳室とおむつ替えの場所を分かりやすくしてほしい。",
+        "絵本の数が多くて、子どもと一緒に選ぶのが楽しい。", "中高生向けの本のコーナーがあるとよい。"],
+    # 少数意見: 件数が少なく、ほかの話題と同じ語（カウンター、棚、本）を含む
+    "バリアフリー": [
+        "車いすだとカウンターが高くて、職員さんと話しにくい。", "二階へのエレベーターがなく、足の悪い母は一階しか利用できない。",
+        "書架の間が狭くて、車いすでは奥の棚まで行けません。", "入口のスロープが急で、一人では上れない。",
+        "多目的トイレが一階に一か所しかないので増やしてほしい。"],
+    "外国語": [
+        "英語や中国語の本がほとんどないので、外国出身の家族は使いにくい。", "館内の案内表示に英語も入れてほしい。",
+        "やさしい日本語の本のコーナーがあると、日本語を勉強している人に役立つと思う。", "利用案内のパンフレットを多言語で作ってほしい。"],
+}
+rng = random.Random(0)
+rows = [{"text": f, "true": [t]} for t, fs in FRAG.items() for f in fs]
+main = [t for t in FRAG if t not in ("バリアフリー", "外国語")]
+for _ in range(80):                                     # 2 つの話題にまたがる回答
+    t1, t2 = rng.sample(main, 2)
+    rows.append({"text": rng.choice(FRAG[t1]) + rng.choice(FRAG[t2]), "true": [t1, t2]})
+for t in ["特になし", "特にありません。", "なし", "とくにないです", "特にない", "なし。", "今のままで十分です。", "いつもありがとうございます。"]:
+    rows.append({"text": t, "true": []})
+for r in rows:                                           # 前置きや結びの言葉を付けて、表現を少しばらつかせる
+    if r["true"]:
+        r["text"] = rng.choice(["", "", "", "いつも利用しています。", "週に一度は来ています。"]) + r["text"]
+        r["text"] += rng.choice(["", "", "", "よろしくお願いします。", "ご検討ください。"])
+df = pd.DataFrame(rows).sample(frac=1, random_state=0).reset_index(drop=True)
+print(len(df), "件")
+df.head(8)
+```
+
+```python
+import json
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# 「特になし」のような中身のない回答は、件数だけ数えて分析から除く
+# 「今のままで十分です。」やお礼だけの回答は正規表現では除かず、LLM に話題なしと判断させる（手順 4 でラベルなしに出る）
+empty = df["text"].str.fullmatch(r"(特に|とくに)?(なし|ない|ないです|ありません)。?")
+print("中身のない回答:", empty.sum(), "件")
+ans = df[~empty].reset_index(drop=True)
+
+torch.manual_seed(0)
+name = "Qwen/Qwen3-4B-Instruct-2507"     # Apache 2.0。思考 (thinking) をしない版
+tokenizer = AutoTokenizer.from_pretrained(name)
+tokenizer.padding_side = "left"           # バッチ生成では左パディング
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+@torch.no_grad()
+def generate(prompts, max_new_tokens=100, batch_size=16):
+    """プロンプトのリストをバッチで貪欲生成する（大規模言語モデルの章の「複数のプロンプトをまとめてバッチ生成する」と同じ）"""
+    outs = []
+    for i in range(0, len(prompts), batch_size):
+        texts = [tokenizer.apply_chat_template([{"role": "user", "content": p}], add_generation_prompt=True, tokenize=False)
+                 for p in prompts[i:i + batch_size]]
+        enc = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+        out = llm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        outs += [s.strip() for s in tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return outs
+
+def extract_json(text):
+    """最初の JSON オブジェクトを取り出す（大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」と同じ考え方）"""
+    start = text.find("{")
+    try:
+        return json.JSONDecoder().raw_decode(text[start:])[0] if start >= 0 else {}
+    except json.JSONDecodeError:
+        return {}
+```
+
+```python
+# 1. 回答ごとに、意見の対象になっている話題を短い句で LLM に書き出させる（1 件に話題が複数あれば複数。Colab の T4 で 1〜2 分）
+PHRASE_PROMPT = """次の図書館の利用者アンケートの回答から、意見や要望の対象になっている話題を、短い名詞句（15 字以内）で書き出してください。
+話題が複数あればすべて書き出し、1 行に 1 つずつ「- 」で始めてください。挨拶やお礼だけの言葉は話題にしません。話題がなければ「- なし」と書いてください。
+
+回答: {text}"""
+outs = generate([PHRASE_PROMPT.format(text=t) for t in ans["text"]], max_new_tokens=60)
+ans["phrases"] = [[p for p in (re.sub(r"^[-・\s]+", "", line).strip() for line in o.split("\n")) if p and p != "なし"] for o in outs]
+print("句の数の分布:", ans["phrases"].map(len).value_counts().sort_index().to_dict())
+ans[["text", "phrases"]].head(6)
+```
+
+```python
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+
+# 2. 句を文埋め込みにしてクラスタリングする。回答の文全体より、言い回しや挨拶に引きずられにくい
+ph = ans[["phrases"]].explode("phrases").dropna().reset_index().rename(columns={"index": "answer", "phrases": "phrase"})
+model = SentenceTransformer("cl-nagoya/ruri-v3-310m")   # Apache 2.0。日本語の文埋め込みモデル。クラスタリングには「トピック: 」を前に付ける
+emb = model.encode(["トピック: " + t for t in ph["phrase"]], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
+
+K = 15          # 少し細かめに分けておき、あとでまとめる（粒度の調整を参照）
+km = KMeans(n_clusters=K, n_init=10, random_state=0).fit(emb)
+ph["cluster"] = km.labels_
+cent = km.cluster_centers_ / np.linalg.norm(km.cluster_centers_, axis=1, keepdims=True)
+ph["sim"] = (emb * cent[ph["cluster"]]).sum(axis=1)        # 自分のクラスタの中心とのコサイン類似度
+print(len(ph), "個の句")
+for c in ph["cluster"].value_counts().index:
+    g = ph[ph.cluster == c].sort_values("sim", ascending=False)
+    print(f"[{c:2}] {len(g):3} 個 | " + "、".join(g["phrase"].drop_duplicates().head(6)))
+```
+
+```python
+# 3. 各クラスタに LLM でラベルと説明を付ける。中心に近い句 10 個とそれ以外から無作為に 10 個、元の回答 3 件を見せる
+LABEL_PROMPT = """次は、図書館の利用者アンケートの自由記述から取り出した話題のうち、似たものを集めたものです。
+これら全体に共通する話題を表すラベル（12 字以内）と、どのような意見があるかの説明（40 字以内）を考えてください。
+一部の話題だけに当てはまる狭いラベルにはしないでください。
+出力は {{"label": "...", "description": "..."}} の形の JSON だけにしてください。
+
+話題: {phrases}
+
+回答の例:
+{answers}"""
+prompts = []
+for c in range(K):
+    g = ph[ph.cluster == c].sort_values("sim", ascending=False).drop_duplicates("phrase")
+    phrases = list(g["phrase"].head(10)) + list(g["phrase"].iloc[10:].sample(min(10, max(len(g) - 10, 0)), random_state=0))
+    answers = "\n".join("- " + ans["text"][a] for a in g["answer"].drop_duplicates().head(3))
+    prompts.append(LABEL_PROMPT.format(phrases="、".join(phrases), answers=answers))
+info = [extract_json(o) for o in generate(prompts, max_new_tokens=100)]
+codebook = pd.DataFrame({"cluster": range(K), "ラベル": [d.get("label", f"クラスタ{c}") for c, d in enumerate(info)],
+                         "説明": [d.get("description", "") for d in info], "句の数": ph["cluster"].value_counts().sort_index().values})
+codebook
+```
+
+```python
+# 4. ラベルの一覧（コードブック）を選択肢にして、全回答に当てはまるラベルをすべて LLM に選ばせる（マルチラベル。Colab の T4 で 2〜3 分）
+choices = "\n".join(f"{i}. {r.ラベル}: {r.説明}" for i, r in enumerate(codebook.itertuples(), 1))
+MULTI_PROMPT = """次の図書館の利用者アンケートの回答が触れている話題を、下の一覧からすべて選んでください。
+番号だけをカンマ区切りで出力してください（例: 2,5）。どれにも当てはまらない場合は 0 と出力してください。
+
+話題:
+{choices}
+
+回答: {text}"""
+outs = generate([MULTI_PROMPT.format(choices=choices, text=t) for t in ans["text"]], max_new_tokens=12)
+ans["labels"] = [sorted({int(x) - 1 for x in re.findall(r"\d+", o) if 0 < int(x) <= K}) for o in outs]
+ans["from_cluster"] = [sorted(set(ph[ph.answer == i]["cluster"])) for i in range(len(ans))]   # 句のクラスタから決めたラベル
+print("ラベルの数の分布:", ans["labels"].map(len).value_counts().sort_index().to_dict())
+print("句のクラスタと LLM の選択が一致した回答:", f"{np.mean([a == b for a, b in zip(ans.labels, ans.from_cluster)]):.0%}")
+print(f"最大メモリ: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+import matplotlib.pyplot as plt
+import matplotlib_fontja
+
+# 5. 報告用の表と図: ラベルごとの回答数（1 件が複数のラベルに数えられる）、割合、説明、代表的な回答
+def representatives(c, n=2):
+    """そのラベルが付いた回答のうち、ほかのラベルが少なく、句がクラスタの中心に近い順に n 件"""
+    g = ph[(ph.cluster == c) & ph.answer.map(lambda a: c in ans["labels"][a])].copy()
+    g["n_labels"] = g["answer"].map(lambda a: len(ans["labels"][a]))
+    g = g.sort_values(["n_labels", "sim"], ascending=[True, False])
+    return " / ".join(ans["text"][a] for a in g["answer"].drop_duplicates().head(n))
+
+report = codebook[["ラベル", "説明"]].copy()
+report["回答数"] = [sum(c in l for l in ans["labels"]) for c in range(K)]
+report["割合"] = report["回答数"] / len(ans)
+report["代表的な回答"] = [representatives(c) for c in range(K)]
+report = report.sort_values("回答数", ascending=False)
+report.to_csv("survey_report.csv", index=False, encoding="utf-8-sig")   # Excel で開けるように BOM 付きで保存
+display(report.style.format({"割合": "{:.1%}"}).hide(axis="index"))
+
+fig, ax = plt.subplots(figsize=(8, 5.5))
+ax.barh(report["ラベル"][::-1], report["回答数"][::-1], color="tab:blue")
+for i, n in enumerate(report["回答数"][::-1]):
+    ax.text(n + 0.3, i, str(n), va="center")
+ax.set_xlabel("回答数（複数のラベルに数える）")
+ax.set_title(f"図書館へのご意見・ご要望（{len(ans)} 件、中身のない回答 {empty.sum()} 件を除く）")
+plt.tight_layout(); plt.savefig("survey_topics.png", dpi=150); plt.show()
+```
+
+```python
+# 6. 粒度の調整: 細かいラベルを、LLM に大きな分類にまとめさせる（どの分類にも 1 回ずつ入っているかを確かめる）
+GROUP_PROMPT = """次は、図書館の利用者アンケートの自由記述から作った話題の一覧です。これらを 6 個程度の大きな分類にまとめてください。
+すべての番号をどれか 1 つの分類に入れ、{{"分類名": [番号, ...], ...}} の形の JSON だけを出力してください。
+
+{items}"""
+items = "\n".join(f"{i}. {r.ラベル}: {r.説明}" for i, r in enumerate(codebook.itertuples(), 1))
+groups = {g: [int(c) - 1 for c in cs] for g, cs in extract_json(generate([GROUP_PROMPT.format(items=items)], max_new_tokens=200)[0]).items()}
+assigned = sorted(c for cs in groups.values() for c in cs)
+print("すべてのラベルが 1 回ずつ入っている:", assigned == list(range(K)))
+for g, cs in groups.items():
+    n = sum(any(c in l for c in cs) for l in ans["labels"])
+    print(f"{g}（{n} 件）: " + "、".join(codebook["ラベル"][c] for c in cs if 0 <= c < K))
+```
+
+```python
+# 7. 少数意見の取りこぼしを確かめる
+# (1) LLM がどのラベルにも当てはまらないとした回答: コードブックにない話題の候補
+print("■ どのラベルにも当てはまらない回答:", (ans["labels"].map(len) == 0).sum(), "件")
+for t in ans[ans["labels"].map(len) == 0]["text"]:
+    print("  ", t)
+# (2) 自分のクラスタの中心から遠い句: クラスタになじまない意見の候補
+print("■ クラスタの中心から遠い句")
+for _, r in ph.nsmallest(10, "sim").iterrows():
+    print(f"  {r.sim:.3f} {r.phrase} [{codebook['ラベル'][r.cluster]}] ← {ans['text'][r.answer]}")
+# (3) クラスタ数を増やしたときに現れる小さなクラスタ
+lab = KMeans(n_clusters=30, n_init=10, random_state=0).fit_predict(emb)
+size = pd.Series(lab).value_counts()
+print("■ K=30 で句が 4 個以下のクラスタ")
+for c in size[size <= 4].index:
+    print(f"  {size[c]} 個: " + "、".join(ph["phrase"][lab == c]))
+```
+
+```python
+# (4) 取りこぼしの候補をまとめて LLM に見せ、新しいラベルが要るかを考えさせる
+cand = list(dict.fromkeys(list(ans[ans["labels"].map(len) == 0]["text"]) + [ans["text"][a] for a in ph.nsmallest(10, "sim")["answer"]]))
+NEW_PROMPT = """次は、図書館の利用者アンケートの回答のうち、既存の話題の一覧に当てはまりにくかったものです。
+既存の話題: {labels}
+
+この中に、既存の話題とは別の話題で、2 件以上の回答に共通するものがあれば、
+{{"topics": [{{"label": "...", "answers": [回答の番号, ...]}}]}} の形の JSON だけを出力してください。
+
+{answers}"""
+out = generate([NEW_PROMPT.format(labels="、".join(codebook["ラベル"]), answers="\n".join(f"{i}. {t}" for i, t in enumerate(cand, 1)))],
+               max_new_tokens=300)[0]
+for t in extract_json(out).get("topics", []):
+    print(t.get("label"), "←", [cand[i - 1] for i in t.get("answers", []) if 0 < i <= len(cand)])
+```
+
+```python
+# (5) 件数が少なくても見落としたくない観点は、クラスタに頼らず文埋め込みの検索で確かめる（ruri-v3 の検索用の接頭辞を使う）
+checks = ["車いすや段差、エレベーターなどのバリアフリー", "外国語や多言語での案内", "けがや事故などの安全"]
+doc = model.encode(["検索文書: " + t for t in ans["text"]], normalize_embeddings=True, show_progress_bar=False)
+q = model.encode(["検索クエリ: " + c for c in checks], normalize_embeddings=True)
+for c, sims in zip(checks, q @ doc.T):
+    print("■", c)
+    for i in sims.argsort()[::-1][:5]:
+        print(f"  {sims[i]:.3f} [{'、'.join(codebook['ラベル'][j] for j in ans['labels'][i]) or 'ラベルなし'}] {ans['text'][i]}")
+```
+
+```python
+from sklearn.metrics import adjusted_rand_score
+
+# 8. 答え合わせ（この架空のデータでは正解の話題が分かっている）
+# 単一の話題の回答で、クラスタと正解の話題の一致度 (ARI) を比べる: 回答の文全体をクラスタリングした場合と、句をクラスタリングした場合
+single = ans["true"].map(len) == 1
+ans_emb = model.encode(["トピック: " + t for t in ans["text"]], normalize_embeddings=True, show_progress_bar=False)
+direct = KMeans(n_clusters=K, n_init=10, random_state=0).fit_predict(ans_emb)
+first = [l[0] if l else -1 for l in ans["from_cluster"]]
+truth = ans["true"][single].map(lambda t: t[0])
+print(f"ARI 回答の文全体: {adjusted_rand_score(truth, direct[single]):.3f} / 句: {adjusted_rand_score(truth, np.array(first)[single]):.3f}")
+
+# 各ラベルが付いた回答のうち、最も多い正解の話題とその割合
+check_rows = []
+for c in report.index:
+    top = pd.Series([t for l, ts in zip(ans["labels"], ans["true"]) if c in l for t in ts]).value_counts()
+    if len(top):
+        check_rows.append({"ラベル": codebook["ラベル"][c], "回答数": report["回答数"][c], "最多の正解の話題": top.index[0],
+                           "その回答数": top.iloc[0]})
+display(pd.DataFrame(check_rows).style.hide(axis="index"))
+
+# どのラベルでも最多にならなかった正解の話題（コードブックにラベルができなかった話題の候補）と、その回答数
+covered = {r["最多の正解の話題"] for r in check_rows}
+n_true = ans["true"].explode().value_counts()
+print("どのラベルでも最多にならなかった正解の話題:", {t: int(n_true[t]) for t in FRAG if t not in covered})
+
+# 少数意見（バリアフリー、外国語）の回答に付いたラベル
+for _, r in ans[ans["true"].map(lambda ts: ts[0] in ("バリアフリー", "外国語") if ts else False)].iterrows():
+    print(f"{r.true[0]}: {[codebook['ラベル'][c] for c in r.labels] or 'ラベルなし'} | {r.text}")
+```
+
+- データはこのレシピのために作った架空のアンケート（196 件、うち中身のない回答 6 件）で、話題ごとに手で書いた文を 1 つか 2 つつないで回答にした。同じ文が別の回答の一部として何度も出てくるので、実際の自由記述より話題が分かれやすい。LLM は Qwen3-4B-Instruct-2507、文埋め込みは cl-nagoya/ruri-v3-310m で、どちらも Apache 2.0。float16 での GPU メモリの最大は 11.3GB だった。
+- この出力では、単一の話題の回答でクラスタと正解の話題の一致度 (ARI) は、回答の文全体をクラスタリングすると 0.114、LLM で取り出した句をクラスタリングすると 0.389 だった。文全体では「いつも利用しています。」のような前置きや言い回しに引きずられやすいことや、2 つの話題にまたがる回答も一緒にクラスタリングしていることが差の原因と考えられるが、確かめてはいない（句の側は、回答の句のクラスタのうち番号が最小のもので比べている）。句に分けると、2 つの話題にまたがる回答（この出力では 87 件が句を 2 つ持つ）も話題ごとに数えられる。この章の「文埋め込みとクラスタリングでトピックを作る（BERTopic 方式）」は LLM を使わずに c-TF-IDF の特徴語で名前を付ける方法、文埋め込みとクラスタリングの章の「文をクラスタリングして話題ごとにまとめる」は文をそのままクラスタリングする基本形である。
+- クラスタに付けたラベルを固定の一覧（コードブック）にして、全回答を LLM で付け直すと、件数をラベルの定義に基づいて数えられ、次回の調査でも同じ一覧で比べられる。この出力では、句のクラスタから決めたラベルと LLM が選んだラベルが完全に一致した回答は 45% で、「送迎車の駐車場」（中身は駐車場全般）や「利用環境の整備」のように中身と合わないラベルや曖昧なラベルもある。コードブックにラベルができない話題もある。この出力では、正解の話題では「静かさ・マナー」より多い 22 件の「子ども・イベント」にラベルができず（答え合わせのどのラベルでも最多にならなかった）、児童書コーナーの句は「読書環境の整備」のクラスタに入り、おはなし会、工作教室、授乳室の 3 件はラベルなしになった。報告の前に人がコードブックを見直してラベルと説明を直し（足りない話題は加える）、手順 4 からやり直す。表の回答数は 1 件を複数のラベルに数えるので、合計は回答数を超える（報告ではそのことを書き添える）。
+- 粒度は、クラスタ数 `K` を変えるか、細かいラベルを LLM にまとめさせて調整する。この出力では 15 個のラベルが 6 個の分類にまとまった。LLM のまとめ方は抜けや重複が起きうるので、すべてのラベルが 1 回ずつ入っているかを確かめている。
+- 件数の少ない意見は、大きなラベルに吸収されやすい。この出力では、バリアフリーの回答 5 件のうち 4 件が「読書環境の整備」に入り、外国語の 4 件は 2 件が「本の充実と予約上限」、2 件がラベルなしになった。取りこぼしの候補（ラベルなしの回答と、中心から遠い句を持つ回答）を LLM に見直させると「案内表示の多言語化」が見つかった（道案内の回答 2 件も混ざった）が、バリアフリーと子ども・イベントは見つからなかった。見落としたくない観点（安全、バリアフリー、差別など）は、件数にかかわらず検索でも確かめると取りこぼしを減らせる。この出力では、外国語の 4 件は上位 4 件に入ったが、バリアフリーは 5 件のうち 3 件が上位 3 件に入り、2 件は上位 5 件に入らなかった。
+- 実際のアンケートの自由記述には、名前や連絡先などの個人情報が書かれていることがある。LLM の API（LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」など）を使えばより大きなモデルでラベルを付けられるが、外部に送る前に、調査の同意の範囲や組織の規則を確かめ、必要なら個人情報を伏せる。
 
 ## 日付のあるテキストから急に増えた語を見つける（バースト検出） {burst_detection}
 

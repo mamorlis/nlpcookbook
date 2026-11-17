@@ -1,6 +1,6 @@
 # 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換と、その評価。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、話題の切れ目での区切り、口コミからの意見の要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換と、その評価。
 
 ## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
 
@@ -371,6 +371,270 @@ print(final)
 - 前の部分の要約を次の部分の入力に加えていく方法（逐次的な洗練）だと、話のつながりは保ちやすいが、並列化はできず、誤りが後ろに伝わる。
 - 長い入力をそのまま読めるモデルでも、文書が長くなるほど中ほどの内容を見落としやすい。分割は今でも有効な方法。
 
+## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
+
+長い文章や会議の書き起こしを、話題が変わるところで区切りたい。単語の重なりで見る TextTiling と、文埋め込みの類似度の谷で見る方法を、正解の切れ目があるデータで Pk と WindowDiff を使って比べる。
+
+```python
+!pip install -q fugashi==1.5.2 unidic-lite==1.0.8
+```
+
+```python
+import io, re, tarfile, urllib.request
+import numpy as np
+import pandas as pd
+
+def load_livedoor():
+    """livedoor ニュースコーパス（株式会社ロンウイット配布）。記事は CC BY-ND 2.1 JP（表示・改変禁止）"""
+    url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
+    with urllib.request.urlopen(url) as r:
+        tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
+    rows = []
+    for m in tar.getmembers():
+        parts = m.name.split("/")
+        if m.isfile() and len(parts) == 3 and parts[2] != "LICENSE.txt":
+            lines = tar.extractfile(m).read().decode("utf-8").split("\n")
+            rows.append({"label": parts[1], "title": lines[2].strip(), "text": "\n".join(lines[3:]).strip()})
+    return pd.DataFrame(rows)
+
+def split_sentences(text):
+    sents = [s.strip() for s in re.split(r"(?<=[。！？])|\n+", text) if s and len(s.strip()) > 5]
+    return [s for s in sents if "http" not in s and not s.startswith(("■", "【関連"))]   # リンクや関連記事の行を除く
+
+df = load_livedoor()
+df["sents"] = df["text"].map(split_sentences)
+df = df[df["sents"].map(len).between(5, 15)].reset_index(drop=True)   # 5〜15 文の記事だけを使う
+
+def make_docs(df, n_docs, n_articles=4, same_label=False, seed=0):
+    """記事を n_articles 本つなげて 1 文書にし、記事の境界を正解の切れ目にする。
+    same_label=False なら隣り合う記事のカテゴリが必ず違い、True なら 1 つのカテゴリの記事だけを使う。
+    正解は文ごとの "0"/"1" の列で、"1" はその文の後ろで話題が変わることを表す"""
+    rng = np.random.default_rng(seed)
+    cats = df["label"].unique()
+    docs = []
+    for _ in range(n_docs):
+        if same_label:
+            labels = [rng.choice(cats)] * n_articles
+        else:
+            labels = [rng.choice(cats)]
+            while len(labels) < n_articles:
+                labels.append(rng.choice([c for c in cats if c != labels[-1]]))
+        idx = []
+        for c in labels:   # カテゴリごとに、まだ使っていない記事を 1 本選ぶ
+            idx.append(rng.choice(df.index[(df["label"] == c) & ~df.index.isin(idx)]))
+        arts = df.loc[idx]
+        sents, ref = [], ""
+        for s in arts["sents"]:
+            sents += s
+            ref += "0" * (len(s) - 1) + "1"
+        docs.append({"sents": sents, "ref": ref[:-1] + "0", "labels": list(arts["label"])})
+    return docs
+
+# 調整用 (dev) と評価用 (test) で記事が重ならないように分ける
+rng = np.random.default_rng(0)
+is_dev = rng.random(len(df)) < 0.3
+dev = make_docs(df[is_dev], 10, seed=1) + make_docs(df[is_dev], 10, same_label=True, seed=4)   # 両方の種類を 10 文書ずつ
+test_mixed = make_docs(df[~is_dev], 30, seed=2)                    # 隣り合う記事のカテゴリが違う（切れ目が見つけやすい）
+test_same = make_docs(df[~is_dev], 30, same_label=True, seed=3)    # 同じカテゴリの記事だけをつなげる（難しい）
+print(len(df), "記事 / 1 文書の平均", round(np.mean([len(d["sents"]) for d in test_mixed]), 1), "文 / 埋め込む文の数",
+      sum(len(d["sents"]) for d in dev + test_mixed + test_same))
+print(test_mixed[0]["labels"])
+```
+
+```python
+from fugashi import Tagger
+from nltk.tokenize.texttiling import TextTilingTokenizer
+
+tagger = Tagger()
+vocab = {}
+
+def to_ascii(sent):
+    """内容語の原形を、英小文字だけの記号 (a, b, ..., aa, ab, ...) に置き換える。
+    NLTK の TextTiling は a-z 以外の文字を消してから単語を数えるので、日本語のままでは単語が 1 つも残らない"""
+    out = []
+    for w in tagger(sent):
+        f = w.feature
+        if f.pos1 in ("名詞", "動詞", "形容詞") and f.pos2 not in ("非自立可能", "数詞"):
+            i = vocab.setdefault(f.lemma or w.surface, len(vocab))
+            code = ""
+            while True:
+                code = chr(97 + i % 26) + code
+                i = i // 26 - 1
+                if i < 0:
+                    break
+            out.append(code)
+    return " ".join(out)
+
+def pick_boundaries(depth, threshold=None, n_boundaries=None, min_gap=3):
+    """depth[i] は i 番目の文の後ろの谷の深さ。深い順に、threshold 以上のものを全部、または n_boundaries 個だけ選ぶ。
+    すでに選んだ切れ目から min_gap 文以内のものは選ばない"""
+    chosen = []
+    for i in np.argsort(-depth):
+        if (n_boundaries is None and depth[i] < threshold) or (n_boundaries is not None and len(chosen) >= n_boundaries):
+            break
+        if all(abs(i - j) >= min_gap for j in chosen):
+            chosen.append(i)
+    return "".join("1" if i in chosen else "0" for i in range(len(depth) + 1))
+
+def texttiling(sents, w=20, k=4, n_boundaries=None):
+    """TextTiling で切れ目を求め、文ごとの "0"/"1" の列で返す。n_boundaries を与えると、谷の深い順にその数だけ選ぶ"""
+    codes = [to_ascii(s) for s in sents]
+    ends = np.cumsum([len(c.split()) for c in codes])     # 各文の終わりが何語目か
+    # stopwords を渡さないと英語のストップワードを読みに行く（内容語だけにしたので不要）。
+    # demo_mode=True で、w 語ずつの擬似文の間（ギャップ）ごとの谷の深さと、切れ目かどうかの判定を受け取る
+    tt = TextTilingTokenizer(w=w, k=k, stopwords=[], demo_mode=True)
+    try:
+        _, _, depth_gap, is_boundary = tt.tokenize("\n\n".join(codes))
+    except (ValueError, ZeroDivisionError):      # 文書が短すぎるとき
+        return "0" * len(sents)
+    # ギャップ g は (g + 1) * w 語目の後ろ。いちばん近い文の終わりに対応づける
+    depth, auto = np.zeros(len(sents) - 1), np.zeros(len(sents) - 1)
+    for g, (dep, b) in enumerate(zip(depth_gap, is_boundary)):
+        j = int(np.argmin(np.abs(ends - (g + 1) * w)))
+        if j < len(sents) - 1:
+            depth[j], auto[j] = max(depth[j], dep), max(auto[j], b)
+    if n_boundaries is None:
+        return "".join("1" if x else "0" for x in auto) + "0"
+    return pick_boundaries(depth, n_boundaries=n_boundaries)
+
+print(test_mixed[0]["ref"])
+print(texttiling(test_mixed[0]["sents"]))
+```
+
+```python
+from sentence_transformers import SentenceTransformer
+
+# 日本語の文埋め込みモデル Ruri v3 の最小のもの (Apache 2.0)。"トピック: " は話題を捉えるためのプレフィックス（モデルカードによる）
+model = SentenceTransformer("cl-nagoya/ruri-v3-30m")
+
+def embed(docs):
+    for d in docs:
+        d["emb"] = model.encode(["トピック: " + s for s in d["sents"]], normalize_embeddings=True, batch_size=64, show_progress_bar=False)
+
+def gap_similarity(emb, window=3):
+    """各文の後ろの切れ目について、前の window 文と後ろの window 文の平均ベクトルのコサイン類似度"""
+    sims = []
+    for i in range(len(emb) - 1):
+        a, b = emb[max(0, i - window + 1):i + 1].mean(0), emb[i + 1:i + 1 + window].mean(0)
+        sims.append(a @ b / np.linalg.norm(a) / np.linalg.norm(b))
+    return np.array(sims)
+
+def depth_scores(sims):
+    """谷の深さ: 左右それぞれ、類似度が上がり続ける間たどった山の高さと、谷の底との差の和（TextTiling と同じ考え方）"""
+    depth = []
+    for i, s in enumerate(sims):
+        l = i
+        while l > 0 and sims[l - 1] >= sims[l]:
+            l -= 1
+        r = i
+        while r < len(sims) - 1 and sims[r + 1] >= sims[r]:
+            r += 1
+        depth.append(sims[l] + sims[r] - 2 * s)
+    return np.array(depth)
+
+def embedding_seg(emb, window=3, threshold=0.1, n_boundaries=None, min_gap=3):
+    return pick_boundaries(depth_scores(gap_similarity(emb, window)), threshold, n_boundaries, min_gap)
+
+# Colab の CPU で 2 分ほど
+for docs in (dev, test_mixed, test_same):
+    embed(docs)
+print(test_mixed[0]["ref"])
+print(embedding_seg(test_mixed[0]["emb"]))
+```
+
+```python
+from nltk.metrics.segmentation import pk, windowdiff
+
+def evaluate(docs, segment):
+    """Pk と WindowDiff の平均（小さいほどよい）と、Pk の標準誤差。窓の幅 k は、正解の区間の平均の長さの半分"""
+    rows = []
+    for d in docs:
+        ref, hyp = d["ref"], segment(d)
+        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
+        rows.append({"Pk": pk(ref, hyp, k), "WindowDiff": windowdiff(ref, hyp, k), "切れ目の数": hyp.count("1")})
+    rows = pd.DataFrame(rows)
+    return pd.Series({"Pk": rows["Pk"].mean(), "Pk の標準誤差": rows["Pk"].sem(), "WindowDiff": rows["WindowDiff"].mean(), "切れ目の数": rows["切れ目の数"].mean()})
+
+# 窓の大きさとしきい値は、調整用の文書 (dev) で WindowDiff が最小になるものを選ぶ
+def tune(segment, grid):
+    return min(grid, key=lambda p: evaluate(dev, lambda d: segment(d, *p))["WindowDiff"])
+
+n_ref = lambda d: d["ref"].count("1")
+best_tt = tune(lambda d, w, k: texttiling(d["sents"], w, k), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
+best_tt_n = tune(lambda d, w, k: texttiling(d["sents"], w, k, n_ref(d)), [(w, k) for w in (5, 10, 20, 30) for k in (2, 4, 6, 10)])
+best_emb = tune(lambda d, win, th: embedding_seg(d["emb"], win, th), [(win, th) for win in (1, 2, 3, 5, 7, 10) for th in (0.05, 0.1, 0.15, 0.2, 0.3)])
+best_emb_n = tune(lambda d, win: embedding_seg(d["emb"], win, n_boundaries=n_ref(d)), [(win,) for win in (1, 2, 3, 5, 7, 10)])
+print("TextTiling (w, k):", best_tt, "/ 数を与えるとき", best_tt_n)
+print("文埋め込み (window, threshold):", best_emb, "/ 数を与えるとき window", best_emb_n)
+```
+
+```python
+def fixed_length(n, every=10):
+    return "".join("1" if (i + 1) % every == 0 and i < n - 1 else "0" for i in range(n))
+
+def random_seg(n, n_boundaries, rng):
+    chosen = set(rng.choice(n - 1, n_boundaries, replace=False))
+    return "".join("1" if i in chosen else "0" for i in range(n))
+
+rng = np.random.default_rng(0)   # ランダムな区切りの乱数（種を固定）
+methods = {
+    "切れ目なし": lambda d: "0" * len(d["ref"]),
+    "10 文ごとに機械的に区切る": lambda d: fixed_length(len(d["ref"])),
+    "ランダム（正解と同じ数）": lambda d: random_seg(len(d["ref"]), n_ref(d), rng),
+    "TextTiling": lambda d: texttiling(d["sents"], *best_tt),
+    "TextTiling（切れ目の数を与える）": lambda d: texttiling(d["sents"], *best_tt_n, n_boundaries=n_ref(d)),
+    "文埋め込みの谷": lambda d: embedding_seg(d["emb"], *best_emb),
+    "文埋め込みの谷（切れ目の数を与える）": lambda d: embedding_seg(d["emb"], *best_emb_n, n_boundaries=n_ref(d)),
+}
+res = pd.DataFrame({(cond, name): evaluate(docs, f) for name, f in methods.items()
+                    for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]}).T
+print("正解の切れ目の数: 1 文書に 3")
+
+# 2 つの方法を同じ文書で比べる: 文書ごとの Pk の差（TextTiling − 文埋め込み）の平均と標準誤差（どちらも切れ目の数を与える）
+for cond, docs in [("別カテゴリ", test_mixed), ("同じカテゴリ", test_same)]:
+    diff = []
+    for d in docs:
+        ref = d["ref"]
+        k = max(2, round(len(ref) / (ref.count("1") + 1) / 2))
+        diff.append(pk(ref, methods["TextTiling（切れ目の数を与える）"](d), k) - pk(ref, methods["文埋め込みの谷（切れ目の数を与える）"](d), k))
+    print(f"{cond}: Pk の差 {np.mean(diff):.3f} ± {pd.Series(diff).sem():.3f}（標準誤差）、文埋め込みのほうがよい文書 {sum(x > 0 for x in diff)} / 同じ {sum(x == 0 for x in diff)} / 悪い {sum(x < 0 for x in diff)}")
+res.unstack(0).reindex(methods).round(3)
+```
+
+```python
+# 会議の書き起こしに使う例（架空の短い会議）。発言を 1 単位にし、話題の数が分かっているとして切れ目の数を与える
+meeting = [
+    ("田中", "では定例会議を始めます。まず来月の展示会の準備状況からお願いします。"),
+    ("高橋", "ブースの場所は決まりました。入口に近い角の区画です。"),
+    ("鈴木", "展示用のパネルは来週中に印刷会社へ入稿します。"),
+    ("田中", "当日の説明員は何人必要ですか。"),
+    ("高橋", "午前と午後で 2 人ずつ、合計 4 人いれば回せます。"),
+    ("田中", "次に、新しい勤怠システムへの移行について。"),
+    ("佐藤", "来月 1 日から新システムに切り替えます。古いシステムの打刻データは今月末で締めます。"),
+    ("伊藤", "有給休暇の残日数は自動で引き継がれますか。"),
+    ("佐藤", "はい、残日数は移行されます。申請中の休暇だけは出し直してもらいます。"),
+    ("田中", "最後に、オフィスの引っ越しの件です。"),
+    ("鈴木", "新しいオフィスの内装工事が少し遅れていて、入居は 2 週間後ろにずれそうです。"),
+    ("伊藤", "それなら段ボールの配布も遅らせたほうがいいですね。"),
+    ("鈴木", "荷造りは入居日の 1 週間前から始めてもらう予定です。"),
+]
+emb = model.encode(["トピック: " + u for _, u in meeting], normalize_embeddings=True)
+hyp = embedding_seg(emb, window=2, n_boundaries=2, min_gap=2)
+for (who, u), b in zip(meeting, hyp):
+    print(f"{who}: {u}")
+    if b == "1":
+        print("―――― 話題の切れ目 ――――")
+```
+
+- 評価データは、livedoor ニュースコーパスの 5〜15 文の記事を 4 本ずつつなげ、記事の境界を正解の切れ目にして作った（隣り合う記事のカテゴリが違う 30 文書と、同じカテゴリの記事だけの 30 文書。1 文書は 4 区間で切れ目は 3 つ。前者は平均 47.1 文）。調整用の文書も両方の種類を 10 文書ずつにし、評価用とは記事が重ならないようにした。手軽に作れるが、記事の境界は話題の変わり目として分かりやすく、実際の文書や会議では切れ目がもっとあいまいなことがある。記事は CC BY-ND 2.1 JP（表示・改変禁止）なので、つなげた評価データは配布せず、手元で作り直す。
+- Pk は、k 文離れた 2 つの文が同じ区間に入るかどうかの判定を誤る割合、WindowDiff は、幅 k の窓の中の切れ目の数が正解と食い違う割合で、どちらも 0 が最良（Pk は Beeferman ら 1999、WindowDiff は Pevzner と Hearst 2002 の提案）。上の表では切れ目を 1 つも置かなくても Pk が 0.415〜0.419 になり、10 文ごとに機械的に区切ると、かえって悪くなる (0.464〜0.516)。必ずこうしたベースラインと並べる。
+- NLTK の `TextTilingTokenizer`（Hearst 1997 の TextTiling の実装）は、a-z 以外の文字を消してから単語を数えるので、日本語をそのまま渡すと単語が 1 つも残らない。ここでは形態素解析で内容語の原形を取り出し、英小文字だけの記号に置き換えて渡した。また、切れ目を段落の位置に戻す処理では、最初のギャップ以外の切れ目が w 語分前にずれる（nltk 3.9.1 のソースで確認）ので、`demo_mode=True` で各ギャップの判定と谷の深さを受け取り、文の位置への対応づけは自分で行った。
+- 結果: 切れ目の数を自動で決める設定では、文埋め込みの谷（Pk 0.102 / 0.193、隣り合うカテゴリが違う / 同じカテゴリ）が TextTiling (0.300 / 0.303) より大幅によかった。切れ目の数を与えると TextTiling は 0.213 / 0.217 まで改善するが、文埋め込み (0.106 / 0.146) との差は残り、同じ文書どうしで比べた Pk の差は 0.107 ± 0.029 / 0.071 ± 0.026（平均 ± 標準誤差）で、30 文書中 23 / 19 文書で文埋め込みのほうがよかった。文埋め込みは同じカテゴリの文書で悪くなるが、TextTiling はどちらでもほとんど変わらない。
+- 文埋め込みの方法は、前後の window 文の平均ベクトルの類似度が落ち込む「谷」を切れ目にする。単語が重ならない言い換えでも話題の近さを捉えられる。窓の大きさとしきい値は文書の種類で変わるので調整用の文書で選んだ（window は自動の設定で 7、数を与える設定で 5。TextTiling の (w, k) は (30, 4) と (10, 10) で、どちらも調べた範囲の端なので、範囲を広げるとよくなる余地がある）。自動の設定では切れ目がやや多め（平均 4.1 / 3.7 個。正解は 3 個）になった。話題の数（議題の数など）が分かっているなら、深い谷から順にその数だけ選べばしきい値は要らない。
+- 最後の架空の会議では、発言を 1 単位にし、切れ目の数 (2) を与えると、議題が変わる 2 か所で区切れた。ただし 1 例だけの確認である。発言は短く、窓に入る情報が少ないので、実際の書き起こしでは切れ目が前後にずれることがある前提で、区切った結果を人が確かめる。
+- LangChain の `langchain-experimental` の `SemanticChunker` も、隣り合う文（前後 `buffer_size` 文を含めたもの）の埋め込みの距離が大きいところで切る同じ考え方の実装である。既定の文の区切りは英語の句読点 (`(?<=[.?!])\s+`) なので、日本語では `sentence_split_regex` を変える。`number_of_chunks` でチャンクの数の目安を与えることもできるが、距離のパーセンタイルに換算してしきい値にするので、ちょうどその数になるとは限らない（0.4.2 のソースで確認）。
+- 議事録を作るときは、話題ごとに分けてから要約すると、長い書き起こしをそのまま渡すより論点が混ざりにくい（この章の「会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す）」「長い文書を分割して要約する」を参照）。RAG のチャンク分割でも、文字数で切る代わりに話題の切れ目で切れば、1 つのチャンクに別の話題が混ざりにくくなる（RAG の章の「長い文書をチャンクに分割する」を参照）。
+
 ## 要約が原文と食い違っていないか検査する {summary_faithfulness}
 
 生成した要約に、原文にないことや、原文と矛盾することが書かれていないかを自動で確かめたい。
@@ -428,6 +692,318 @@ for label, summary in summaries.items():
 - NLI は桁違いの数値（6 億と 60 億）のような誤りを見逃すことがある。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
 - 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
 - 忠実であることと、良い要約であることは別。重要な内容を落としていないか（網羅性）は、参照要約との比較や人手で確かめる。
+
+## 大量の口コミから観点ごとの賛否をまとめる（意見の要約） {opinion_summarization gpu}
+
+1 つのホテルについての数百件の口コミから、「立地は 9 割が高評価、部屋の狭さへの不満が多い」のように、観点ごとの賛否の割合と代表的な意見をまとめた要約を作りたい。要約が多数派の意見を正しく伝えているか、少数の強い苦情を誇張していないかも確かめたい。
+
+```python
+import numpy as np
+import pandas as pd
+
+# 架空のビジネスホテルの口コミ（このレシピのために作ったもの）。観点ごとに言及する確率と肯定の確率を決めて文を組み合わせるので、正解の割合がわかる
+ASPECTS = {   # 値は、言及する確率と、言及したときに肯定である確率
+    "立地": (0.5, 0.9), "部屋の広さ": (0.4, 0.2), "清潔さ": (0.35, 0.93), "朝食": (0.4, 0.7), "接客": (0.35, 0.55), "価格": (0.3, 0.75)}
+PHRASES = {
+    ("立地", "肯定"): ["駅から歩いて 3 分ほどで、とても便利でした。", "駅前なので、雨の日でも移動が楽でした。", "近くにコンビニや飲食店が多く、立地は申し分ありません。",
+                      "空港バスの乗り場が目の前で助かりました。", "観光の拠点にちょうどよい場所です。", "繁華街まで歩いて行けるのがよかったです。"],
+    ("立地", "否定"): ["駅から少し歩くうえ、坂道がきつかったです。", "周りに食事ができる店が少なく、不便でした。", "入口がわかりにくく、地図を見ても迷いました。"],
+    ("部屋の広さ", "肯定"): ["部屋は思ったより広く、スーツケースも広げられました。", "部屋がゆったりしていて、くつろげました。", "ビジネスホテルにしては部屋が広めでした。"],
+    ("部屋の広さ", "否定"): ["部屋が狭く、スーツケースを広げる場所がありませんでした。", "ベッドと机だけでいっぱいの、かなり狭い部屋でした。", "二人で泊まるには部屋が窮屈でした。",
+                          "部屋は狭めで、荷物の置き場に困りました。", "写真で見るより部屋が小さく感じました。", "部屋が狭いうえに窓も小さく、圧迫感がありました。"],
+    ("清潔さ", "肯定"): ["部屋は清潔で、掃除が行き届いていました。", "水回りもきれいで、気持ちよく使えました。", "シーツもタオルも清潔でした。",
+                        "古い建物ですが、清掃はしっかりしていました。", "ほこり一つなく、きれいな部屋でした。"],
+    ("清潔さ", "否定"): ["夜中に部屋でゴキブリが出ました。本当に最悪で、二度と泊まりません。", "浴室にカビがあり、とても不潔でした。信じられません。",
+                        "ベッドに前の客の髪の毛が残っていて、ぞっとしました。"],   # 少数だが強い言葉の苦情
+    ("朝食", "肯定"): ["朝食のバイキングは品数が多く、満足しました。", "朝食の焼きたてのパンがおいしかったです。", "地元の食材を使った朝食がよかったです。",
+                      "朝食は無料なのに品数が多く、得をした気分でした。"],
+    ("朝食", "否定"): ["朝食は品数が少なく、少し残念でした。", "朝食会場が混んでいて、30 分ほど待たされました。", "朝食の料理が冷めていました。"],
+    ("接客", "肯定"): ["フロントの方の対応がとても丁寧でした。", "チェックインのとき、スタッフが笑顔で迎えてくれました。", "荷物を早めに預かってもらえて助かりました。",
+                      "周辺のおすすめの店を親切に教えてくれました。"],
+    ("接客", "否定"): ["フロントの対応がそっけなく、感じがよくありませんでした。", "チェックインに 20 分以上かかり、説明も不十分でした。",
+                      "電話で問い合わせたら、たらい回しにされました。", "スタッフの言葉づかいが少し気になりました。"],
+    ("価格", "肯定"): ["料金が手ごろで、コストパフォーマンスがよいです。", "平日は安く泊まれるので、出張で毎回使っています。", "値段のわりに設備が整っていました。"],
+    ("価格", "否定"): ["週末は料金が高く、割高に感じました。", "駐車場が有料で、思ったより高くつきました。", "この内容でこの料金は、少し高いと思います。"],
+}
+OPENERS = ["出張で 1 泊しました。", "家族旅行で利用しました。", "友人と 2 泊しました。", "", "", ""]
+
+def make_reviews(n, seed=0):
+    rng = np.random.default_rng(seed)
+    reviews, gold = [], []
+    while len(reviews) < n:
+        labels = {a: ("肯定" if rng.random() < p_pos else "否定") for a, (p_mention, p_pos) in ASPECTS.items() if rng.random() < p_mention}
+        if not labels:
+            continue
+        body = "".join(rng.choice(PHRASES[(a, labels[a])]) for a in rng.permutation(list(labels)))
+        pos = sum(v == "肯定" for v in labels.values())
+        closer = "また利用したいです。" if pos > len(labels) / 2 else "次は別のホテルにします。" if pos < len(labels) / 2 else ""
+        reviews.append(rng.choice(OPENERS) + body + closer)
+        gold.append(labels)
+    return reviews, gold
+
+reviews, gold = make_reviews(200)
+gold_df = pd.DataFrame([{"review": i, "aspect": a, "polarity": p} for i, g in enumerate(gold) for a, p in g.items()])
+truth = gold_df.groupby("aspect")["polarity"].value_counts().unstack(fill_value=0).reindex(list(ASPECTS))
+truth["肯定率"] = (truth["肯定"] / (truth["肯定"] + truth["否定"])).round(3)
+print(len(reviews), "件、", sum(map(len, reviews)), "字")
+print(truth)
+for r in reviews[:3]:
+    print("-", r)
+```
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # この章のほかのレシピと同じ 3B の日本語モデル（MIT ライセンス）。初回はダウンロード（約 6.4GB）を含めて数分
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tokenizer.padding_side = "left"      # 複数の入力をまとめて生成するときは左に詰める
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+def chat_batch(messages_list, max_new_tokens=400):
+    texts = [tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in messages_list]
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
+    with torch.no_grad():
+        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return [tokenizer.decode(o[inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip() for o in out]
+
+chat = lambda prompt, max_new_tokens=400: chat_batch([[{"role": "user", "content": prompt}]], max_new_tokens)[0]
+print("文脈長の上限:", llm.config.max_position_embeddings, "トークン")
+```
+
+
+```python
+# 方法 1: 全部の口コミを 1 回で LLM に渡し、割合と代表的な意見を書かせる。指示は長い入力の後ろに置く
+FORMAT = "\n".join(f"- {a}: 肯定 ○%、否定 ○%。代表的な意見" for a in ASPECTS) + "\nまとめ: 全体の評価を 1〜2 文で"
+def one_shot_prompt(revs):
+    joined = "\n".join(f"[{i}] {r}" for i, r in enumerate(revs, 1))
+    return (f"次は、あるビジネスホテルの口コミ {len(revs)} 件です。\n\n{joined}\n\n上の口コミ {len(revs)} 件を要約してください。"
+            f"観点ごとに、その観点に触れた口コミのうち肯定的なものと否定的なものの割合と、代表的な意見を書いてください。次の形式で、○ には数字を入れてください。\n{FORMAT}")
+
+for n in [200, 300]:
+    print(f"口コミ {n} 件のプロンプト:", len(tokenizer(one_shot_prompt(make_reviews(n)[0]))["input_ids"]), "トークン")
+
+# 口コミの並び順だけを変えて 3 回作る。T4 で 1 回 30 秒〜1 分ほど
+one_shot = {}
+for seed in [0, 1, 2]:
+    order = np.random.default_rng(seed).permutation(len(reviews)) if seed else np.arange(len(reviews))
+    one_shot[f"一括（順序 {seed}）"] = out = chat(one_shot_prompt([reviews[i] for i in order]))
+    print(f"--- 一括（順序 {seed}）\n{out}")
+```
+
+```python
+import json
+import re
+
+# 方法 2 の段階 1: 口コミを 1 件ずつ LLM に読ませ、観点・評価・根拠の文を JSON で抜き出す
+INSTRUCTION = (f"次のホテルの口コミが、観点（{'、'.join(ASPECTS)}）のどれについて、肯定と否定のどちらの評価をしているかを JSON のリストで答えてください。"
+               "触れていない観点は含めないでください。根拠には口コミの文をそのまま抜き出してください。JSON 以外は出力しないでください。")
+EXAMPLE_IN = "駅から近くて便利でした。ただ、部屋は清掃が行き届いていませんでした。朝食はまあまあです。"
+EXAMPLE_OUT = json.dumps([{"観点": "立地", "評価": "肯定", "根拠": "駅から近くて便利でした。"},
+                          {"観点": "清潔さ", "評価": "否定", "根拠": "部屋は清掃が行き届いていませんでした。"}], ensure_ascii=False)
+
+def messages(review):
+    return [{"role": "user", "content": f"{INSTRUCTION}\n\n口コミ: {EXAMPLE_IN}"}, {"role": "assistant", "content": EXAMPLE_OUT},
+            {"role": "user", "content": f"{INSTRUCTION}\n\n口コミ: {review}"}]
+
+def validate(output, review):
+    """観点と評価が決められた値の項目だけを残す。根拠が口コミにそのまま出てくるかを ok に記録する。JSON が読めなければ None"""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", output.strip(), flags=re.MULTILINE)
+    try:
+        items, _ = json.JSONDecoder().raw_decode(text[text.index("["):])
+    except ValueError:
+        return None
+    items = [x for x in items if isinstance(x, dict) and x.get("観点") in ASPECTS and x.get("評価") in ("肯定", "否定")]
+    for x in items:
+        ev = str(x.get("根拠", "")).strip().rstrip("。．.")
+        x["ok"] = len(ev) >= 5 and ev in review
+    return items
+
+# 16 件ずつまとめて生成する。T4 で 200 件に 3〜5 分ほど
+outputs = []
+for i in range(0, len(reviews), 16):
+    outputs += chat_batch([messages(r) for r in reviews[i:i + 16]], max_new_tokens=300)
+extracted = [validate(o, r) for o, r in zip(outputs, reviews)]
+failed = [i for i, e in enumerate(extracted) if e is None]
+print("JSON が読めなかった口コミ:", len(failed), "例:", [outputs[i][:120] for i in failed[:2]])
+# 読めなかったものは、誤りを伝えて 1 回だけ出し直させる
+retry = chat_batch([messages(reviews[i]) + [{"role": "assistant", "content": outputs[i]},
+                    {"role": "user", "content": "出力が JSON として読めません。例と同じ形の JSON だけを出力し直してください。"}] for i in failed], max_new_tokens=300) if failed else []
+for i, o in zip(failed, retry):
+    extracted[i] = validate(o, reviews[i])
+print("出し直しても読めなかった口コミ:", sum(e is None for e in extracted))
+
+pred_df = pd.DataFrame([{"review": i, "aspect": x["観点"], "polarity": x["評価"], "evidence": str(x.get("根拠", "")).strip(), "ok": x["ok"]}
+                        for i, e in enumerate(extracted) for x in (e or [])]).drop_duplicates(["review", "aspect"])
+print("根拠が口コミにそのまま出てこない項目:", int((~pred_df["ok"]).sum()), "/", len(pred_df))
+
+# 正解と比べる（実際の口コミでは、数十件に人が正解を付けて確かめる）
+m = gold_df.merge(pred_df, on=["review", "aspect"], how="outer", suffixes=("_gold", "_pred"), indicator=True)
+both = m[m["_merge"] == "both"]
+print(f"観点の検出: 再現率 {len(both) / len(gold_df):.3f}  適合率 {len(both) / len(pred_df):.3f}  "
+      f"| 検出できた観点の極性の正解率 {(both['polarity_gold'] == both['polarity_pred']).mean():.3f}")
+errors = m[(m["_merge"] != "both") | (m["polarity_gold"] != m["polarity_pred"])]
+print(errors["_merge"].map({"left_only": "見落とし", "right_only": "余分", "both": "極性の誤り"}).value_counts().to_dict(),
+      "見落とした観点:", errors[errors["_merge"] == "left_only"].groupby("aspect")["polarity_gold"].value_counts().to_dict())
+```
+
+```python
+from sklearn.feature_extraction.text import TfidfVectorizer
+from statsmodels.stats.proportion import proportion_confint
+
+# 段階 2: 集計はコードで行う。割合には 95% の信頼区間（下限〜上限）を付け、代表的な意見は、根拠の文のうちグループの中心に近いものを選ぶ
+def representative(texts):
+    if len(texts) <= 1:
+        return texts[0] if texts else "なし"
+    X = TfidfVectorizer(analyzer="char", ngram_range=(2, 3)).fit_transform(texts)
+    return texts[int(np.argmax(X @ np.asarray(X.mean(axis=0)).T))]
+
+rows = []
+for a in ASPECTS:
+    d = pred_df[pred_df["aspect"] == a]
+    pos, n = int((d["polarity"] == "肯定").sum()), len(d)
+    lo, hi = proportion_confint(pos, n, method="wilson")
+    ev = d[d["ok"]]      # 代表的な意見には、口コミにそのまま出てくる根拠だけを使う
+    rows.append({"観点": a, "言及": n, "肯定": pos, "否定": n - pos, "肯定率": round(pos / n, 3), "下限": round(lo, 2), "上限": round(hi, 2),
+                 "肯定の例": representative(ev[ev["polarity"] == "肯定"]["evidence"].tolist()),
+                 "否定の例": representative(ev[ev["polarity"] == "否定"]["evidence"].tolist())})
+table = pd.DataFrame(rows).set_index("観点")
+print(table[["言及", "肯定", "否定", "肯定率", "下限", "上限"]])
+print(table[["肯定の例", "否定の例"]].to_string())
+
+# 段階 3: 集計表だけを LLM に渡して文章にする。数字はコードが計算したものを使わせ、件数も添える
+# 多数派かどうかもコードで判定して渡す。信頼区間が 0.5 をまたぐなら「賛否が分かれる」とする
+verdict = lambda r: "肯定が多数" if r["下限"] > 0.5 else "否定が多数" if r["上限"] < 0.5 else "賛否が分かれる"
+digest = "\n".join(f"- {a}: 言及 {r['言及']} 件、肯定 {r['肯定']} 件 ({r['肯定率']:.0%})、否定 {r['否定']} 件 ({1 - r['肯定率']:.0%})、{verdict(r)}。"
+                   f"肯定の例「{r['肯定の例']}」 否定の例「{r['否定の例']}」" for a, r in table.iterrows())
+staged_prompt = (f"次は、あるビジネスホテルの口コミ {len(reviews)} 件を観点ごとに集計した結果です。\n\n{digest}\n\n"
+                 "この集計だけをもとに、口コミの要約を書いてください。割合は集計の値をそのまま使ってください。"
+                 "件数の少ない意見は「一部」「少数」などと書き、多数派の意見のように書かないでください。まとめでは、各観点の「肯定が多数」「否定が多数」「賛否が分かれる」の判定に従ってください。"
+                 f"次の形式で、○ には数字を入れてください。\n{FORMAT}")
+staged = chat(staged_prompt)
+print(f"--- 段階的\n{staged}")
+```
+
+```python
+# 要約の主張を検査する: 「立地については」のような観点の書き出しから次の観点までを 1 区切りとし、その中で最初に肯定か否定の語と同じ句にある割合を読み取る
+MARK = r"(立地|部屋の広さ|広さ|清潔さ|朝食|接客|価格)(?:に関しては|については|は|[:：])"
+PCT, POS, NEG = r"(\d+(?:\.\d+)?)\s*[%％]", "肯定|満足|好意|好評|高く評価|良い|よい", "否定|不満|苦情"
+
+def claims(summary):
+    found, marks = {}, list(re.finditer(MARK, summary))
+    for k, mk in enumerate(marks):
+        a = "部屋の広さ" if mk.group(1) == "広さ" else mk.group(1)
+        segment = summary[mk.start():marks[k + 1].start() if k + 1 < len(marks) else len(summary)]
+        for clause in re.split(r"[。、\n]", segment):     # 「肯定 ○%、否定 ○%」のように並ぶので、読点でも区切る
+            if a in found:
+                break
+            for words, sign in [(POS, 1), (NEG, -1)]:   # 「肯定 ○%」「○% の口コミが満足」など。否定の割合なら 1 から引く
+                if m := re.search(rf"(?:{words}).*?{PCT}", clause) or re.search(rf"{PCT}.*?(?:{words})", clause):
+                    v = float(m.group(1)) / 100
+                    found[a] = (v if sign > 0 else 1 - v, clause.strip())
+                    break
+    return found
+
+def side(p):   # 6 割以上を多数派とみなす
+    return "肯定が多数" if p >= 0.6 else "否定が多数" if p <= 0.4 else "賛否が分かれる"
+
+summaries = {**one_shot, "段階的": staged}
+parsed = {k: claims(s) for k, s in summaries.items()}
+check = pd.DataFrame({"正解": truth["肯定率"], "段階 1 の集計": table["肯定率"],
+                      **{k: pd.Series({a: v for a, (v, _) in c.items()}, dtype=float) for k, c in parsed.items()}}).reindex(list(ASPECTS))
+print("要約が主張する肯定率（NaN は割合を読み取れなかった観点）")
+print(check.round(2))
+for k in check.columns[1:]:
+    ok = check[k].notna()
+    print(f"{k:12} 読み取れた観点 {ok.sum()}  正解との差の平均 {(check[k] - check['正解'])[ok].abs().mean():.3f}  "
+          f"多数派の向きが合う観点 {sum(side(p) == side(t) for p, t in zip(check[k][ok], check['正解'][ok]))}")
+print("\n読み取った句（一括（順序 0））:")
+for a, (v, s) in parsed["一括（順序 0）"].items():
+    print(f"  {a}: {v:.0%} ← {s}")
+
+# 少数の強い苦情（清潔さの否定）に、要約がどう触れているか
+complaint = re.compile(r"ゴキブリ|カビ|髪の毛|不潔|害虫")
+print(f"\n清潔さの否定は正解で {1 - truth.loc['清潔さ', '肯定率']:.0%}")
+for k, s in summaries.items():
+    print(f"{k}: {[l.strip()[:80] for l in re.split(r'(?<=。)|\n', s) if complaint.search(l)]}")
+```
+
+```python
+# 割合の数字が正しくても、まとめの文で多数派を言い違えることがある。「まとめ」「総じて」「全体」で始まる最初の文から最後までをまとめの部分とし、
+# 観点と評価の言葉が同じ句にあれば、その観点についての主張とみなして検査する
+TOPIC = {"立地": "立地", "部屋の広さ": "部屋|広さ", "清潔さ": "清潔", "朝食": "朝食", "接客": "接客|スタッフ", "価格": "価格|料金"}
+STANCE = [("賛否が分かれる", "賛否|両論|分かれ|半々|ばらつき"), ("否定が多数", "否定的な意見が多|不満を持つ声が多|不満が多|改善の余地|不評"),
+          ("肯定が多数", "肯定的|好評|高評価|評価が高|評価は高|満足")]
+
+def overall_claims(summary):
+    found, in_summary = [], False
+    for sent in re.split(r"(?<=。)|\n", summary):
+        in_summary = in_summary or bool(re.match(r"\s*(?:まとめ|総じて|全体)", sent))
+        if not in_summary:
+            continue
+        for clause in re.split(r"おり、|ですが、|ものの、|一方、?|が、", sent):
+            stance = next((label for label, pat in STANCE if re.search(pat, clause)), None)
+            for a, key in TOPIC.items():   # 「価格を除けば」「価格以外は」の観点は除く
+                if stance and re.search(key, clause) and not re.search(rf"(?:{key})(?:を除|以外)", clause):
+                    found.append({"観点": a, "主張": stance, "正解": side(truth.loc[a, "肯定率"]), "句": clause.strip()[:30]})
+    return pd.DataFrame(found, columns=["観点", "主張", "正解", "句"])
+
+for k, s in summaries.items():
+    c = overall_claims(s)
+    print(f"--- {k}: 合う {int((c['主張'] == c['正解']).sum())} / 主張 {len(c)}")
+    if (c["主張"] != c["正解"]).any():
+        print(c[c["主張"] != c["正解"]].to_string(index=False))
+
+# 段階的な方法では、集計の判定と食い違う主張を伝えて、1 回だけ書き直させる
+# 多数派の基準は 2 つある。上の検査は、正解の肯定率と 6 割の基準（side）で採点する（要約が書く割合には件数がなく、区間を作れないため）。
+# 書き直しの指示は、LLM に渡した集計の信頼区間（verdict）で判定する。実際の口コミには正解がないので、使えるのは verdict のほうである
+c = overall_claims(staged)
+wrong = [f"「{r.観点}」を「{r.主張}」と書いていますが、集計では「{verdict(table.loc[r.観点])}」です。" for r in c.itertuples() if r.主張 != verdict(table.loc[r.観点])]
+if wrong:
+    staged = chat_batch([[{"role": "user", "content": staged_prompt}, {"role": "assistant", "content": staged},
+                          {"role": "user", "content": "まとめに集計と合わない記述があります。" + "".join(wrong) + "形式はそのままで、全体を書き直してください。"}]])[0]
+    c = overall_claims(staged)
+    print(f"\n--- 書き直した段階的な要約: 合う {int((c['主張'] == c['正解']).sum())} / 主張 {len(c)}、割合 {[f'{a} {v:.0%}' for a, (v, _) in claims(staged).items()]}")
+    print(staged.splitlines()[-1])
+    print(c[c["主張"] != c["正解"]].to_string(index=False))
+print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+from transformers import AutoModelForSequenceClassification, PreTrainedTokenizerFast
+
+# 参考: この章の「要約が原文と食い違っていないか検査する」の NLI で、割合の主張を確かめられるか試す
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+# transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
+nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
+nli = AutoModelForSequenceClassification.from_pretrained(nli_name).eval()
+pairs = [("接客は肯定的な意見と否定的な意見がほぼ半々である。", "接客は肯定的な意見が多い。"),
+         ("接客は肯定的な意見と否定的な意見がほぼ半々である。", "接客は賛否が分かれる。"),
+         ("清潔さは肯定的な意見が大多数である。", "清潔さには不満が多い。"),
+         ("清潔さは肯定的な意見が大多数である。", "清潔さについては改善の余地があると感じる宿泊客もいる。")]
+with torch.no_grad():
+    for premise, hypothesis in pairs:
+        p = nli(**nli_tok(premise, hypothesis, return_tensors="pt")).logits.softmax(-1)[0]
+        print(f"含意 {p[0]:.2f} 中立 {p[1]:.2f} 矛盾 {p[2]:.2f} | {premise} → {hypothesis}")
+```
+
+- 全部を 1 回で渡す方法は、口コミ 200 件（13,508 字）で 7,045 トークンになり、このモデルの文脈長 8,192 トークンに出力の分を残して入るぎりぎりである（300 件では 10,623 トークンで入らない）。出てきた割合は「約 60%」のような 10% 刻みの値で、数えた値とは考えにくい。並び順だけを変えた 3 回で、立地は 3 回とも 60%（正解 89%）、価格は 30〜40%（正解 67%）、接客は 70% と 50%（正解 50%）で、正解との差の平均は 0.15〜0.20 だった。順序 0 では「部屋の清潔さや広さ」と 2 つの観点をまとめて書き、清潔さの割合は読み取れなかった。
+- 少数の強い苦情（清潔さの否定は正解で 10%）について、一括の 3 回のどれもが苦情の中身（ゴキブリ、カビなど）には触れなかった。そのかわり順序 0 は、清潔さを部屋の広さとまとめて「否定的な意見が約 70%」とし、まとめでは肯定が 9 割の清潔さや 7 割の朝食まで「改善の余地がある」とした。順序 1 は肯定が 7 割近い価格を「不満を持つ声が多かった」とし、順序 2 は賛否が半々の接客を「概ね好評」とした。少数意見の中身を落とすことと、全体の評価をゆがめることの両方が起きる。
+- 段階的な方法の抽出は、観点の再現率 0.920、適合率 1.000、極性の正解率 1.000 で（JSON が読めなかった 18 件は、出し直しで 3 件に減った）、集計した肯定率と正解の差は平均 0.022 だった。ただし、件数は少ないが見落としは偏っていて、立地の否定は 11 件中 5 件を見落とした（肯定は 90 件中 11 件）ため、立地の肯定率は 0.89 が 0.93 になった。口コミは定型の文を組み合わせた架空のものなので、皮肉や比較、暗黙の評価を含む実際の口コミでは精度はこれより下がると考えられる。数十件に人が正解を付けて、見落としの偏りも確かめる。
+- 段階的な方法の要約は、集計表の割合と代表的な意見（表の「肯定の例」「否定の例」）をそのまま写し、ゴキブリの苦情は「少数」と書いた。しかし、まとめの文では、集計で否定が多数の部屋の広さと肯定が多数の価格を「賛否両論」とし、「価格を除けば概ね高評価」と集計と逆のことも書いた（「〜を除けば」の観点は検査で除外しているので、この誤りは検出されていない）。誤りを伝えて書き直させると、部屋の広さは「否定的な意見が majority を占め」と直ったが（英単語が混ざり、検査の語に合わないので数に入っていない）、価格は直らなかった。さらに、書き足した「ただし」の文で、賛否が分かれる接客について「改善の余地があるかもしれません」と、新しい言い過ぎを加えた（合う 5 / 主張 7）。書き直させるたびに検査し直す。重要な用途では、観点ごとの行と多数派の判定はコードのテンプレートで作り、LLM には代表的な意見の言い換えだけを任せる。
+- 割合には件数と信頼区間を添える。接客の肯定率 0.46 は 95% 区間が 0.35〜0.58 で 0.5 をまたぐので、「否定が多い」ではなく「賛否が分かれる」と書くのが正しい。口コミが数十件しかない店や商品では、区間はさらに広がる。
+- 要約の検査は、割合の表現と評価の語を正規表現で読み取る簡単なもので、「約 40% の口コミでは部屋が狭く」のような書き方は読み取れない（表の NaN）。この章の「要約が原文と食い違っていないか検査する」の NLI は、4 組のうち 3 組（「賛否が分かれる」は含意、「不満が多い」は矛盾、「改善の余地があると感じる宿泊客もいる」は中立）は妥当に判定したが、「ほぼ半々」から「肯定的な意見が多い」を含意 0.98 と判定し、この例では割合の言い違いを見分けられなかった。割合の主張は、数えた結果と突き合わせて確かめる。
+- 段階的な方法は、この章の「長い文書を分割して要約する」の map-reduce と同じ形だが、まとめる段階を LLM ではなくコードの集計にしている。部分要約を LLM にまとめさせると件数の情報が失われるので、割合を伝える要約では、数える部分をコードに任せる。
+- 正解の割合がわかるように、口コミはこのレシピのために作った（テキスト分類の章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」の chABSA は有価証券報告書の文なので使っていない）。実際の口コミでは、楽天トラベルのレビューや、その約 7 万文に 7 項目の観点と極性を付けたコーパスがあるが、国立情報学研究所の IDR を通じて、国内の大学と公的研究機関の研究者に学術研究の目的に限って提供されている。Amazon の多言語レビューコーパス (MARC) は配布が終了し、ライセンスも非商用の学術研究に限られていた。モデルは sarashina2.2-3b-instruct（SB Intuitions、MIT ライセンス）と mDeBERTa-v3-base-mnli-xnli（MIT ライセンス）。数値は A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 8.9 GB だった。トークナイザーの修正については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
 ## 会議の書き起こしから議事録を作る（決定事項・ToDo を JSON で抜き出す） {meeting_minutes gpu}
 
