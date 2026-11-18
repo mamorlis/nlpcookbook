@@ -987,14 +987,14 @@ for dpi in [50, 72, 100, 150, 200]:
 請求書やレシートの画像から、取引先・日付・明細・小計・消費税・合計を JSON で取り出して、会計のデータとして扱いたい。正解が分かるように PIL で書類の画像を作り、視覚言語モデル (VLM) に画像から直接 JSON を出させる方法と、OCR (Tesseract) で読んだテキストを LLM で JSON にする方法を、項目ごとの正解率で比べる。明細の合計と小計が合うかのような検算で、誤りをどこまで見つけられるかも確かめる。
 
 ```python
-# 所要時間の目安: T4 の Colab で 15〜20 分程度と見込む (T4 では未測定。モデルのダウンロード約 9GB を含む。RTX A5000 では全体で約 3 分)
-# Tesseract 本体 (Colab には入っている) と日本語のモデル、日本語フォント (Noto CJK)
+# 所要時間の目安: T4 の Colab で 10〜15 分程度と見込む（モデルのダウンロード約 9GB を含む。T4 では未測定で、検証の GPU での時間の 2〜3 倍として見積もった）
+# Tesseract 本体（Colab には入っている）と日本語のモデル、日本語フォント (Noto CJK)
 !apt-get install -y -q tesseract-ocr tesseract-ocr-jpn fonts-noto-cjk > /dev/null
 !pip install -q pytesseract
 ```
 
 ```python
-# 正解の分かる請求書とレシートの画像を PIL で作る (会社名・店名・住所・電話番号はすべて架空)
+# 正解の分かる請求書とレシートの画像を PIL で作る（会社名・店名・住所・電話番号はすべて架空）
 import random
 from datetime import date, timedelta
 import numpy as np
@@ -1006,7 +1006,7 @@ font = lambda size, bold=False: ImageFont.truetype(BOLD if bold else SANS, size)
 
 VENDORS = {"invoice": ["株式会社クックブック商事", "合同会社ことば工房", "有限会社みなと印刷", "株式会社さくらシステム"],
            "receipt": ["ひまわり文具店", "青空ベーカリー", "やまびこ青果", "喫茶こもれび"]}
-CUSTOMERS = ["株式会社テスト物産", "架空市立図書館", "合同会社サンプル企画", "株式会社れい電機"]   # 請求書の宛先 (取引先と紛らわしい)
+CUSTOMERS = ["株式会社テスト物産", "架空市立図書館", "合同会社サンプル企画", "株式会社れい電機"]   # 請求書の宛先（取引先と紛らわしい）
 GOODS = {"invoice": [("A4コピー用紙(500枚)", 450, 800), ("ボールペン(黒)10本", 600, 1200), ("名刺印刷(100枚)", 1500, 3500),
                      ("Webサイト保守(月額)", 20000, 50000), ("翻訳料(和文英訳)", 8000, 30000), ("チラシ印刷(1000部)", 9000, 18000),
                      ("ノートPCスタンド", 2500, 6000), ("会議用ホワイトボード", 12000, 25000), ("ソフトウェア利用料", 3000, 9000)],
@@ -1028,7 +1028,7 @@ def make_truth(rng, kind):
         qty, unit = rng.randint(1, 3 if kind == "receipt" else 10), rng.randrange(lo, hi, 10)
         items.append({"name": name, "quantity": qty, "unit_price": unit, "amount": qty * unit})
     subtotal = sum(it["amount"] for it in items)
-    tax = subtotal // 10                                          # 消費税 10% (1 円未満は切り捨て)
+    tax = subtotal // 10                                          # 消費税 10%（1 円未満は切り捨て）
     return {"vendor": rng.choice(VENDORS[kind]), "date": d.isoformat(), "items": items,
             "subtotal": subtotal, "tax": tax, "total": subtotal + tax}
 
@@ -1047,7 +1047,7 @@ def draw_invoice(t, rng, style):
     d.text((W - 60, 290), f"TEL 000-{rng.randint(100, 999)}-{rng.randint(1000, 9999)}", font=font(18), fill="black", anchor="ra")
     d.rectangle([60, 340, 560, 400], outline="black", width=2)
     d.text((80, 352), f"ご請求金額  ¥{t['total']:,}-", font=font(30, True), fill="black")
-    cols, y = [60, 520, 640, 790, W - 60], 450                    # 明細の表 (品名・数量・単価・金額)
+    cols, y = [60, 520, 640, 790, W - 60], 450                    # 明細の表（品名・数量・単価・金額）
     d.rectangle([cols[0], y, cols[-1], y + 40], fill=(220, 220, 220), outline="black")
     for x0, x1, h in zip(cols, cols[1:], ["品名", "数量", "単価", "金額"]):
         d.text(((x0 + x1) // 2, y + 8), h, font=font(20, True), fill="black", anchor="ma")
@@ -1118,7 +1118,7 @@ display(docs[0]["image"].resize((500, docs[0]["image"].height // 2)), docs[12]["
 
 ```python
 # VLM: Qwen3-VL-4B-Instruct (Apache-2.0)。画像なしでテキストだけを渡せば LLM としても使えるので、両方の方法で同じモデルを使う
-# 初回はモデル (約 9GB) のダウンロードに数分かかる
+# 初回はモデル（約 9GB）のダウンロードに数分かかる
 import time
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -1140,7 +1140,7 @@ PROMPT = """{source}から、次の項目を取り出して JSON で出力して
 {{"vendor": "...", "date_text": "...", "date": "YYYY-MM-DD", "items": [{{"name": "...", "quantity": 1, "unit_price": 100, "amount": 100}}], "subtotal": 100, "tax": 10, "total": 110}}"""
 
 def generate(conversations, max_new_tokens=600, batch_size=8):
-    """会話 (メッセージのリスト) の一覧をバッチでまとめて生成する"""
+    """会話（メッセージのリスト）の一覧をバッチでまとめて生成する"""
     outs = []
     for i in range(0, len(conversations), batch_size):
         inputs = processor.apply_chat_template(conversations[i:i + batch_size], add_generation_prompt=True, tokenize=True,
@@ -1153,7 +1153,7 @@ def generate(conversations, max_new_tokens=600, batch_size=8):
 def ask_image(doc):    # (A) 画像から直接
     return [{"role": "user", "content": [{"type": "image", "image": doc["image"]}, {"type": "text", "text": PROMPT.format(source="この画像の書類")}]}]
 
-# (A) VLM に画像から直接 JSON を出させる (RTX A5000 で約 1 分。T4 では数分かかる見込み)
+# (A) VLM に画像から直接 JSON を出させる（T4 では 3 分前後かかる見込み）
 torch.cuda.reset_peak_memory_stats(); t = time.perf_counter()
 raw = {"VLM (画像→JSON)": generate([ask_image(d) for d in docs])}
 print(f"{time.perf_counter() - t:.0f} 秒, 最大メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
@@ -1175,7 +1175,7 @@ print(ocr_texts[13])   # 劣化させたレシート
 ```
 
 ```python
-# OCR のテキストを同じモデルに (画像なしで) 渡して JSON にする (RTX A5000 で約 40 秒。T4 では数分かかる見込み)
+# OCR のテキストを同じモデルに（画像なしで）渡して JSON にする（T4 では 1〜2 分かかる見込み）
 def ask_text(text):    # (B) OCR のテキストから
     return [{"role": "user", "content": [{"type": "text", "text": PROMPT.format(source="次の OCR のテキスト (書類の画像から読み取ったもの) ") + "\n\nOCR のテキスト:\n" + text}]}]
 
@@ -1222,8 +1222,8 @@ def parse(out, schema=Receipt):
         return None
 
 def to_iso(s):
-    """書かれたとおりの日付 (2025年3月4日、2025/03/04、令和7年3月4日) を、和暦の変換も含めてコードで YYYY-MM-DD に直す。
-    令和か 4 桁の西暦のときだけ受け付け、それ以外 (OCR が「令和」を「信和」と読んだものなど) やありえない日付は None"""
+    """書かれたとおりの日付（2025年3月4日、2025/03/04、令和7年3月4日）を、和暦の変換も含めてコードで YYYY-MM-DD に直す。
+    令和か 4 桁の西暦のときだけ受け付け、それ以外（OCR が「令和」を「信和」と読んだものなど）やありえない日付は None"""
     m = re.search(r"(?:令和\s*(\d+|元)|(\d{4}))\s*[年/.-]\s*(\d{1,2})\s*[月/.-]\s*(\d{1,2})", unicodedata.normalize("NFKC", s))
     if not m:
         return None
@@ -1266,7 +1266,7 @@ for m, ps in parsed.items():
 ```
 
 ```python
-# 比較: 書かれたとおりの日付 (date_text) を出させずに、いきなり YYYY-MM-DD を出させる (令和で書いた 8 枚。RTX A5000 で約 20 秒)
+# 比較: 書かれたとおりの日付 (date_text) を出させずに、いきなり YYYY-MM-DD を出させる（令和で書いた 8 枚。T4 では 1 分前後かかる見込み）
 class ReceiptNoDateText(Receipt):
     date_text: str = ""                      # このプロンプトでは出させないので、なくてもよいことにする
 
@@ -1282,8 +1282,8 @@ for i, o in zip(reiwa, outs):
 ```
 
 ```python
-# 検算: 数量×単価=金額、数量・金額が正、明細の合計=小計、小計の 10% = 消費税 (端数の扱いの違いで ±1 円は許す)、小計+消費税=合計、
-# 日付をコードで読めるか (令和か 4 桁の西暦か)、年が 2000 年から今年までか
+# 検算: 数量×単価=金額、数量・金額が正、明細の合計=小計、小計の 10% = 消費税（端数の扱いの違いで ±1 円は許す）、小計+消費税=合計、
+# 日付をコードで読めるか（令和か 4 桁の西暦か）、年が 2000 年から今年までか
 def check(p):
     if p is None:
         return ["JSON として読めない"]
@@ -1319,8 +1319,8 @@ for m, ps in parsed.items():
 ```
 
 ```python
-# 検算で不整合が見つかった書類だけ、どこが合わないかを伝えて読み直させる (RTX A5000 で約 20 秒)
-def show(q):   # 明細の (数量, 単価, 金額) と、小計・消費税・合計
+# 検算で不整合が見つかった書類だけ、どこが合わないかを伝えて読み直させる（T4 では 1〜2 分かかる見込み）
+def show(q):   # 明細の（数量, 単価, 金額）と、小計・消費税・合計
     return [(it["quantity"], it["unit_price"], it["amount"]) for it in q["items"]] + [q["subtotal"], q["tax"], q["total"]]
 
 retry = {}
@@ -1335,7 +1335,7 @@ for m, ps in parsed.items():
         before, after = score(parsed[m][i], docs[i]["truth"]), score(p, docs[i]["truth"])
         print(f"{m} #{i} {docs[i]['group']}: 検算 {'OK' if not check(p) else 'NG'}, "
               f"書類全体 {before['書類全体']} → {after['書類全体']}, 明細の行 {before['明細の行']:.2f} → {after['明細の行']:.2f}")
-        if m.startswith("VLM") and p is not None:   # 何が変わったか (正解、1 回目、読み直し後の明細)
+        if m.startswith("VLM") and p is not None:   # 何が変わったか（正解、1 回目、読み直し後の明細）
             print(f"    正解 {show(docs[i]['truth'])}\n    1 回目 {show(parsed[m][i])}\n    読み直し {show(p)}")
 
 # 読み直したあとの、検算の結果と正誤の対応
@@ -1351,7 +1351,7 @@ print(pd.crosstab([df["方法"], df["検算 (読み直し後)"]], df["正誤 (�
 - 検算（数量×単価=金額、数量・金額が正、明細の合計=小計、消費税=小計の 10%、小計+消費税=合計、日付をコードで読めて年が 2000 年から今年まで）で NG になった書類は、VLM の 3 枚、OCR→LLM の 9 枚とも実際に誤りがあった（「信和」の 2 枚は日付の確認で NG になった）。一方、検算を通っても誤りのある書類が VLM で 1 枚（「満しゴム」）、OCR→LLM で 2 枚（宛先を取引先とした #3、品名を「ボールペン（上黒）」とした #6）あった。品名・取引先の誤りは検算では分からず、日付も形式と年の範囲しか見ないので、日の誤読（OCR→LLM の #23 は 3 月 24 日を 3 月 4 日とした）は通る。読み落とした行の数字どうしがたまたま合う場合も通る。検算は「NG なら確実に人が見る」ための仕組みで、「OK なら正しい」とは言えない。消費税の端数の扱い（切り捨て・四捨五入）は事業者で違うので ±1 円を許した。
 - 検算で NG になった書類に、合わない箇所を伝えて読み直させると、VLM は 3 枚中 1 枚（単価に金額を入れていたもの）が直った。残りの 2 枚では、誤読した単価 170 をそのままにして正しかった消費税 209 を 203 に書き換えて検算を合わせたり、金額を数量倍して書類にない合計 9900 を作ったりした。OCR→LLM は 9 枚とも直らず、3 枚が検算に合う数字に書き換えて通ったので、検算を通るのに誤りがある書類が 2 枚から 5 枚に増えた（VLM でも 1 枚から 2 枚に増えた）。テキストにない数字は読み直しても取り戻せず、検算に合う数字を作ってしまう。読み直しは試してよいが、検算を通ったことを正しさの根拠にせず、NG の書類は人が確かめる流れにする。
 - ここでは出力の形式を例で示し、`extract_json` と pydantic で検証した（大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」）。最初の 48 回の出力で JSON として読めなかったものはなかったが、形式を保証したいなら制約付きデコードや API の構造化出力を使う（LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」「Claude に決まった形式（JSON スキーマ）で出力させる」）。形式が保証されても、中の値が正しいとは限らないのは上のとおりである。実際の請求書やレシートには取引先や個人の情報が含まれるので、外部の API に送るかどうかは扱いの規程を確かめる（この手元のモデルなら外に出ない）。
-- 時間とメモリ（RTX A5000、float16 での値。T4 では測っていない）: VLM で 24 枚を 8 枚ずつのバッチで処理するのに 54 秒（共有の GPU なので実行ごとに 53〜88 秒と変わった）、OCR のテキストからの JSON 化に 38 秒。GPU メモリの最大使用量は 11.4GB（`torch.cuda.max_memory_allocated` の値で、CUDA の管理領域などは含まない）なので、T4 (16GB) に収まる見込みである。Tesseract は 1 枚 0.32 秒（検証の 32 コアの CPU）。Qwen3-VL-4B-Instruct は Apache-2.0、Tesseract と日本語のモデル (tesseract-ocr-jpn) は Apache-2.0、Noto CJK フォントは SIL Open Font License 1.1。画像はすべてこのコードで作った架空のもの。
+- 時間とメモリ（検証の GPU で float16 で実行した値。T4 では測っていない）: VLM で 24 枚を 8 枚ずつのバッチで処理するのに 60 秒、OCR のテキストからの JSON 化に 82 秒（共有の GPU なので実行ごとに、前者は 53〜88 秒、後者は 38〜82 秒と変わった）。T4 ではこの 2〜3 倍かかると見込む。GPU メモリの最大使用量は 11.4GB（`torch.cuda.max_memory_allocated` の値で、CUDA の管理領域などは含まない）なので、T4 (16GB) に収まる見込みである。Tesseract は 1 枚 0.32 秒（検証の CPU での値。Colab の CPU ではこれより遅くなりうる）。Qwen3-VL-4B-Instruct は Apache-2.0、Tesseract と日本語のモデル (tesseract-ocr-jpn) は Apache-2.0、Noto CJK フォントは SIL Open Font License 1.1。画像はすべてこのコードで作った架空のもの。
 
 ## PDF のページを画像のまま検索して VLM に答えさせる（マルチモーダル RAG） {multimodal_rag gpu}
 

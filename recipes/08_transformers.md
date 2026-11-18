@@ -312,7 +312,7 @@ print(clf.model.config.id2label)
 ```python
 from huggingface_hub import hf_hub_download, scan_cache_dir, snapshot_download
 
-# 1 ファイルだけダウンロード (戻り値はキャッシュ内のパス)
+# 1 ファイルだけダウンロード（戻り値はキャッシュ内のパス）
 path = hf_hub_download("intfloat/multilingual-e5-small", "config.json")
 print(path)
 

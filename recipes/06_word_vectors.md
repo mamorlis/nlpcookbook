@@ -333,7 +333,8 @@ from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 
 ids = reuters.fileids()[:3000]
 docs = [TaggedDocument([w.lower() for w in reuters.words(i) if w.isalpha()], [n]) for n, i in enumerate(ids)]
-model = Doc2Vec(docs, vector_size=100, window=5, min_count=3, epochs=20, dm=1, workers=2, seed=0)
+# workers=1 にすると、seed を固定したときに毎回同じ結果になる（スレッドが 2 つ以上だと処理の順番で結果が変わる）
+model = Doc2Vec(docs, vector_size=100, window=5, min_count=3, epochs=20, dm=0, workers=1, seed=0)
 ```
 
 ```python
@@ -350,5 +351,5 @@ for n, sim in model.dv.most_similar([vec], topn=3):
     print(f"{sim:.2f}", reuters.categories(ids[n]), " ".join(docs[n].words[:15]))
 ```
 
-- `dm=1` が PV-DM（文脈語 + 文書ベクトルで予測）、`dm=0` が PV-DBOW（文書ベクトルだけで単語を予測）。
+- `dm=1` が PV-DM（文脈語 + 文書ベクトルで予測）、`dm=0` が PV-DBOW（文書ベクトルだけで単語を予測）。ここでは `dm=0` を使った。このデータでは `dm=1` にすると、上の推論の例で石油 (crude) の記事が上位に来なかった。
 - 現在は事前学習済みの文埋め込みモデルのほうが手軽で高精度なことが多い。ドメイン特化の大量文書がある場合の選択肢。

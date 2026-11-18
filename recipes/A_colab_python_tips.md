@@ -146,10 +146,9 @@ Colab のプリインストールライブラリは予告なく更新される�
 
 ```python
 import importlib.metadata as md
-import platform
 import sys
 
-print("Python", sys.version.split()[0], "/", platform.platform())
+print("Python", sys.version.split()[0])
 for pkg in ["torch", "transformers", "datasets", "tokenizers", "sentence-transformers", "scikit-learn", "numpy", "pandas", "spacy", "nltk"]:
     try:
         print(f"{pkg:24}{md.version(pkg)}")
@@ -158,14 +157,14 @@ for pkg in ["torch", "transformers", "datasets", "tokenizers", "sentence-transfo
 ```
 
 ```python
-# 実験したときの環境を丸ごと記録しておく (論文の再現や、後日の自分のため)
+# 実験したときの環境を丸ごと記録しておく（論文の再現や、後日の自分のため）
 !pip freeze > requirements-lock.txt
 !wc -l requirements-lock.txt && grep -i -E "^(torch|transformers|numpy)==" requirements-lock.txt
 ```
 
 ```python
-# バージョンを指定して入れる例 (実際に入れ替える場合はコメントを外す)
-# !pip install -q "transformers==4.57.1" "tokenizers>=0.22,<0.23"
+# バージョンを指定して入れる例（実際に入れ替える場合はコメントを外す）
+# !pip install -q "transformers==5.22.1" "tokenizers>=0.23,<0.24"
 # !pip install -q -r requirements-lock.txt
 
 # コードの中でバージョンによって分岐する
@@ -175,6 +174,7 @@ import transformers
 print("v5 以降:", Version(transformers.__version__) >= Version("5.0.0"))
 ```
 
+- 出力のバージョンは、検証したときの Colab のもの。Colab の更新で変わるので、自分の環境の出力と違っていてよい。
 - すでに import 済みのライブラリを `pip install` で入れ替えた場合は、ランタイムの再起動（ランタイム → セッションを再起動）が必要。
 - NumPy や PyTorch のような土台のライブラリを入れ替えると、他のプリインストールライブラリが壊れやすい。必要最小限にとどめる。
 - 「前は動いたのに」というときは、まずエラーメッセージとライブラリのバージョンの変更履歴（リリースノート、移行ガイド）を確認する。
@@ -293,13 +293,15 @@ from tqdm.auto import tqdm   # ノートブックでもスクリプトでも適�
 
 texts = [f"文 {i}" for i in range(200)]
 results = []
-for text in tqdm(texts, desc="処理中"):
+pbar = tqdm(texts, desc="処理中")
+for text in pbar:
     time.sleep(0.005)
     results.append(len(text))
+print(pbar)   # 終わったときのバーの状態を文字で表示する
 ```
 
 ```python
-# バッチ処理: 件数ベースで進める / 途中経過 (損失など) を右側に表示する
+# バッチ処理: 件数ベースで進める / 途中経過（損失など）を右側に表示する
 batch_size = 32
 with tqdm(total=len(texts), desc="推論", unit="文") as pbar:
     for i in range(0, len(texts), batch_size):
@@ -307,6 +309,7 @@ with tqdm(total=len(texts), desc="推論", unit="文") as pbar:
         time.sleep(0.02)
         pbar.update(len(batch))
         pbar.set_postfix(loss=f"{1 / (i + 1):.4f}")
+print(pbar)
 ```
 
 ```python
@@ -316,6 +319,7 @@ import pandas as pd
 tqdm.pandas(desc="apply")
 df = pd.DataFrame({"text": texts})
 df["length"] = df["text"].progress_apply(len)
+print(df.tail(3))
 
 # ジェネレータなど長さの分からないものは total を渡す。並列処理は tqdm.contrib.concurrent が便利
 from tqdm.contrib.concurrent import thread_map
@@ -325,6 +329,7 @@ print(sum(lengths))
 ```
 
 - `tqdm.auto` を使うと、Colab ではウィジェットの進捗バー、端末ではテキストの進捗バーになる。
+- `print(pbar)` で、バーの今の状態（件数・経過時間・速さ）を文字で表示できる。ログに残したいときに便利。
 - ループの中で `print` するとバーが崩れる。代わりに `tqdm.write("...")` を使う。
 - API 呼び出しのような待ち時間の長い処理は、`thread_map` でスレッド並列にすると大幅に速くなる（レート制限に注意）。
 

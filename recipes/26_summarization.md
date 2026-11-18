@@ -1966,8 +1966,8 @@ for s in [sentence, "医師は患者に対し、速やかに治療を開始す�
 ```
 
 ```python
-# 例文はこのレシピのために作ったもの。常体と敬体の対 30 組 (両方向の変換の正解として使う) と、くだけた文 12 文と敬語の言い換えの一例
-PAIRS = [  # (だ・である調, です・ます調)
+# 例文はこのレシピのために作ったもの。常体と敬体の対 30 組（両方向の変換の正解として使う）と、くだけた文 12 文と敬語の言い換えの一例
+PAIRS = [  # （だ・である調, です・ます調）
     ("明日は雨が降る。", "明日は雨が降ります。"),
     ("昨日は図書館で本を読んだ。", "昨日は図書館で本を読みました。"),
     ("彼はまだ駅に着いていない。", "彼はまだ駅に着いていません。"),
@@ -1999,7 +1999,7 @@ PAIRS = [  # (だ・である調, です・ます調)
     ("明日、もう一度来る。", "明日、もう一度来ます。"),
     ("その映画はまだ見ていないが、評判は聞いている。", "その映画はまだ見ていませんが、評判は聞いています。"),
 ]
-CASUAL = [  # (くだけた文, 敬語の言い換えの一例。正解は 1 つではない)
+CASUAL = [  # （くだけた文, 敬語の言い換えの一例。正解は 1 つではない）
     ("ちょっと遅れるかも。", "少し遅れるかもしれません。"),
     ("この資料、もう見た？", "この資料はもうご覧になりましたか。"),
     ("明日の会議、出られる？", "明日の会議に出席できますか。"),
@@ -2024,7 +2024,7 @@ def split_sents(text):
 CASUAL_LEMMAS = {"てる", "でる", "ちゃう", "じゃう", "とく", "どく", "じゃん"}
 
 def ending_style(sentence):
-    """文末の文体の判定器: 文末の述語の部分 (最後の自立語から後ろ) に「です」「ます」があれば敬体"""
+    """文末の文体の判定器: 文末の述語の部分（最後の自立語から後ろ）に「です」「ます」があれば敬体"""
     ws = [w for w in tagger(sentence) if w.feature.pos1 != "補助記号" and w.surface not in ("「", "」")]
     while ws and ws[-1].feature.pos2 == "終助詞":
         ws.pop()
@@ -2040,7 +2040,7 @@ def ending_style(sentence):
     return "体言止め" if ws and ws[-1].feature.pos1 in ("名詞", "代名詞") else "常体"
 
 def has_polite(text):
-    """「」の外に「です」「ます」が 1 つでもあるか (常体にしたい文章に、文中も含めて敬体が残っていないかを見る)"""
+    """「」の外に「です」「ます」が 1 つでもあるか（常体にしたい文章に、文中も含めて敬体が残っていないかを見る）"""
     depth, found = 0, False
     for w in tagger(text):
         depth += (w.surface == "「") - (w.surface == "」")
@@ -2048,7 +2048,7 @@ def has_polite(text):
     return found
 
 def is_casual(text):
-    """くだけた表現 (縮約形、「じゃん」「けど」、疑問の「？」) が残っているか"""
+    """くだけた表現（縮約形、「じゃん」「けど」、疑問の「？」）が残っているか"""
     ws = list(tagger(text))
     return any(w.feature.lemma in CASUAL_LEMMAS or w.surface in ("じゃ", "けど", "？") for w in ws)
 
@@ -2065,7 +2065,7 @@ ROW = {"カ": "かきくけこ", "ガ": "がぎぐげご", "サ": "さしすせ�
 TA = {"カ": "いた", "ガ": "いだ", "サ": "した", "タ": "った", "ラ": "った", "ワ": "った", "ナ": "んだ", "バ": "んだ", "マ": "んだ"}
 
 def conj(w, form):
-    """動詞 (と「れる・られる」などの助動詞) の基本形と活用型から、ます形・ない形・意志形・た形の語幹を作る"""
+    """動詞（と「れる・られる」などの助動詞）の基本形と活用型から、ます形・ない形・意志形・た形の語幹を作る"""
     base, ctype = w.feature.orthBase, w.feature.cType
     stem = base[:-1]
     if ctype.startswith("五段"):
@@ -2091,7 +2091,7 @@ def verbish(w):
     return pos(w, "動詞") or pos(w, "助動詞") and w.feature.cType in ("助動詞-レル", "助動詞-ラレル", "助動詞-セル", "助動詞-サセル")   # 「出られる」の「られる」
 
 def to_polite_end(t):
-    """述語の末尾の語の列 t を常体 → 敬体に。(置き換える末尾の語数, 新しい文字列) を返す。0 語なら後ろに足す"""
+    """述語の末尾の語の列 t を常体 → 敬体に。（置き換える末尾の語数, 新しい文字列）を返す。0 語なら後ろに足す"""
     L, P, f = t[-1], (t[-2] if len(t) > 1 else None), t[-1].feature
     if pos(L, "助動詞", "だ"):
         return {"終止形-一般": (1, "です"), "意志推量形": (1, "でしょう")}.get(f.cForm)
@@ -2133,7 +2133,7 @@ def to_plain_end(t):
         return t[-k - 1] if len(t) > k and verbish(t[-k - 1]) else None
     if s[-4:] == ["ます", "ず", "です", "た"] and (v := verb(4)):          # ませんでした
         return (5, "なかった") if v.feature.orthBase == "ある" else (5, conj(v, "mizen") + "なかった")
-    if s[-2:] == ["ます", "ず"] and (v := verb(2)):                       # ません (ありません → ない)
+    if s[-2:] == ["ます", "ず"] and (v := verb(2)):                       # ません（ありません → ない）
         return (3, "ない") if v.feature.orthBase == "ある" else (3, conj(v, "mizen") + "ない")
     if s[-2:] == ["ます", "た"] and (v := verb(2)):                       # ました
         return 3, conj(v, "ta")
@@ -2153,7 +2153,7 @@ def to_plain_end(t):
     return None
 
 def convert(text, target):
-    """target="polite" (です・ます調) か "plain" (だ・である調) へ。文末と「が・けど」の前 (常体へは接続助詞の前すべて) を変える。「」の中は変えない"""
+    """target="polite"（です・ます調）か "plain"（だ・である調）へ。文末と「が・けど」の前（常体へは接続助詞の前すべて）を変える。「」の中は変えない"""
     words = list(tagger(text))
     pieces = [w.white_space + w.surface for w in words]
     depth, ends = 0, []
@@ -2199,7 +2199,7 @@ def casual_to_polite(text):
             if out and out[-1].strip() == "だ":
                 out[-1] = out[-1].replace("だ", "な")                # 雨だから → 雨なので
         elif s == "悪い" and i + 1 < len(ws) and ws[i + 1].surface in ("けど", "けれど"):
-            s = "申し訳ない"                                         # 「悪いけど」に限る (「天気が悪い」は変えない)
+            s = "申し訳ない"                                         # 「悪いけど」に限る（「天気が悪い」は変えない）
         elif s == "も" and i >= 1 and ws[i - 1].surface == "か" and (i + 1 == len(ws) or ws[i + 1].feature.pos1 == "補助記号"):
             s = "もしれない"                                         # 遅れるかも → 遅れるかもしれない
         s = LEX.get(s, s)
@@ -2218,9 +2218,9 @@ for k in rule:
 ```
 
 ```python
-# 2. 規則を作るときに見ていない文でも試す: 青空文庫の 2 作品 (どちらも著作権の保護期間が終わっている)
-# 新美南吉「ごん狐」(です・ます調で語られる) の敬体の文 → 常体、芥川龍之介「羅生門」(だ・である調) の常体の文 → 敬体
-# 「」を含む文は除く (何文もある台詞の途中の文は残る。羅生門の老婆の台詞など)
+# 2. 規則を作るときに見ていない文でも試す: 青空文庫の 2 作品（どちらも著作権の保護期間が終わっている）
+# 新美南吉「ごん狐」（です・ます調で語られる）の敬体の文 → 常体、芥川龍之介「羅生門」（だ・である調）の常体の文 → 敬体
+# 「」を含む文は除く（何文もある台詞の途中の文は残る。羅生門の老婆の台詞など）
 import io, random, urllib.request, zipfile
 
 def aozora(url):
@@ -2244,7 +2244,7 @@ rule["羅生門→敬体"] = [convert(s, "polite") for s in rasho]
 ```
 
 ```python
-# 3. LLM による変換 (この章の「LLM で文章を要約する (長さと観点を指定する)」と同じモデル)。読み込みを含めて T4 で 3〜5 分ほど
+# 3. LLM による変換（この章の「LLM で文章を要約する（長さと観点を指定する）」と同じモデル）。読み込みを含めて T4 で 3〜5 分ほど
 import sentencepiece as spm
 import torch
 from huggingface_hub import hf_hub_download
@@ -2254,8 +2254,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 set_seed(0)
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (大規模言語モデルの章の「オープンな LLM とチャットする (チャットテンプレート)」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -2298,7 +2298,7 @@ import pandas as pd
 STOP = {"有る", "居る", "為る", "成る", "無い", "下さる", "仕舞う", "置く", "事", "物", "の", "良い"}
 
 def content(text):
-    """内容語の語彙素 (表記の揺れ「分かる/わかる」は同じ語彙素になる)。補助的な動詞や形式名詞は除く"""
+    """内容語の語彙素（表記の揺れ「分かる/わかる」は同じ語彙素になる）。補助的な動詞や形式名詞は除く"""
     return {w.feature.lemma for w in tagger(text) if w.feature.pos1 in ("名詞", "動詞", "形容詞", "副詞", "形状詞") and w.feature.lemma not in STOP}
 
 def edit_distance(a, b):
@@ -2309,14 +2309,14 @@ def edit_distance(a, b):
             prev, d[j] = d[j], min(d[j] + 1, d[j - 1] + 1, prev + (ca != cb))
     return d[-1]
 
-TASKS = {  # 課題: (入力, 正解 (なければ None), 目標の文体)
+TASKS = {  # 課題: （入力, 正解（なければ None）, 目標の文体）
     "→敬体": ([p for p, _ in PAIRS], [[q] for _, q in PAIRS], "敬体"),
     "→常体": ([q for _, q in PAIRS], [[p, p.replace("である", "だ")] for p, _ in PAIRS], "常体"),   # 「である」「だ」どちらも正解
     "くだけ→敬語": ([c for c, _ in CASUAL], None, "敬体"),
     "ごん狐→常体": (gon, None, "常体"),
     "羅生門→敬体": (rasho, None, "敬体"),
 }
-# 尊敬語・謙譲語の目印 (簡単な正規表現で、すべては拾えない)。「申し訳」と「〜ておく」(ておいた、でおく) の「お」は除く
+# 尊敬語・謙譲語の目印（簡単な正規表現で、すべては拾えない）。「申し訳」と「〜ておく」（ておいた、でおく）の「お」は除く
 KEIGO = re.compile(r"ご覧|いらっしゃ|おっしゃ|なさ|いただ|申し(?!訳)|伺|参り|存じ|おり(ま|ませ)|いたし"
                    r"|(?<![てで])お[^\s。、]{1,4}(し|にな|ください)|(?<=[てで])お(?![いかきくけこ])[^\s。、]{1,4}(し|にな|ください)"
                    r"|ご[一-龥]{1,3}(し|にな|さ|ください)")
@@ -2356,7 +2356,11 @@ print(llm_d[~llm_d.成功][["課題", "入力", "出力"]].head(10).to_string(in
 changed = llm_d[llm_d.成功 & ((llm_d.保持 < 1) | (llm_d.追加 > 0))]
 print(f"\n■ LLM: 文体は変わったが、内容語を足した・落とした文 ({len(changed)} 件のうち先頭 6 件)")
 print(changed[["課題", "入力", "出力"]].head(6).to_string(index=False))
-print("\n■ くだけた文 → 敬語")
+```
+
+```python
+# 6. くだけた文 → 敬語の全 12 文を、規則・LLM・言い換えの一例で並べる
+print("■ くだけた文 → 敬語")
 for (c, ref), r_out, l_out in zip(CASUAL, rule["くだけ→敬語"], llm_out["くだけ→敬語"]):
     print(f"{c}\n   規則: {r_out}\n   LLM : {l_out}\n   例  : {ref}")
 ```

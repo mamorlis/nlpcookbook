@@ -459,14 +459,14 @@ print("銀河鉄道の夜に特徴的:", [(w, a, b) for _, w, a, b in rows[:15]]
 Web から集めたコーパスに混じった、文章になっていない段落（キーワードの羅列、外国語、記号の繰り返しなど）を、きれいな文章で学習した言語モデルのパープレキシティで見つけて除きたい。
 
 ```python
-# KenLM をビルドする。版をそろえるためにコミットを固定する (Colab で 3〜5 分)
+# KenLM をビルドする。版をそろえるためにコミットを固定する（Colab で 3〜5 分）
 !apt-get install -y -q libboost-program-options-dev libboost-system-dev libboost-thread-dev libboost-test-dev > /dev/null 2>&1
 !git clone -q https://github.com/kpu/kenlm && cd kenlm && git checkout -q 4cb443e
 # ビルドの出力は build.log に書き、失敗したときだけ末尾を表示する
 !mkdir -p kenlm/build && cd kenlm/build && (cmake .. > build.log 2>&1 && make -j4 lmplz build_binary >> build.log 2>&1 || tail -n 20 build.log)
 !ls kenlm/build/bin
-# Python から使うモジュール。同梱の kenlm.cpp は古い Cython で生成されていて Python 3.13 ではビルドできないので、作り直してから入れる
-!pip install -q cython==3.1.4 && cd kenlm && python -m cython -3 --cplus python/kenlm.pyx -o python/kenlm.cpp && pip install -q .
+# Python から使うモジュール。同梱の kenlm.cpp は古い Cython で生成されていて Python 3.13 ではビルドできないので、作り直してから入れる（pip の出力は pip.log に書く）
+!cd kenlm && (pip install -q cython==3.1.4 > pip.log 2>&1 && python -m cython -3 --cplus python/kenlm.pyx -o python/kenlm.cpp && pip install -q . >> pip.log 2>&1 || tail -n 20 pip.log)
 ```
 
 ```python
@@ -488,8 +488,8 @@ def tokenize(s):
 def sentences(text):
     return [s.strip() for s in re.split(r"(?<=[。！？!?])|\n", text) if s.strip()]
 
-# 「きれいな文章」の見本として日本語 Wikipedia (wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL) の先頭 3,000 記事を使う
-# 100 記事に 1 つは学習に使わず、パープレキシティの基準をとるために残す (Colab で 1〜2 分)
+# 「きれいな文章」の見本として日本語 Wikipedia（wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL）の先頭 3,000 記事を使う
+# 100 記事に 1 つは学習に使わず、パープレキシティの基準をとるために残す（Colab で 1〜2 分）
 wiki = load_dataset("wikimedia/wikipedia", "20231101.ja", split="train", streaming=True)
 with open("wiki.txt", "w") as f_train, open("wiki_dev.txt", "w") as f_dev:
     for i, article in enumerate(itertools.islice(wiki, 3000)):
@@ -502,10 +502,10 @@ with open("wiki.txt", "w") as f_train, open("wiki_dev.txt", "w") as f_dev:
 ```
 
 ```python
-# 5-gram の言語モデルを学習する (修正 Kneser-Ney 平滑化)。-S は使うメモリの上限、--prune 0 1 1 1 は 2-gram 以上で 1 回しか出ないものを捨てる
+# 5-gram の言語モデルを学習する（修正 Kneser-Ney 平滑化）。-S は使うメモリの上限、--prune 0 1 1 1 は 2-gram 以上で 1 回しか出ないものを捨てる
 !kenlm/build/bin/lmplz -o 5 -S 2G --prune 0 1 1 1 < wiki.txt > wiki.arpa 2> lmplz.log
 !kenlm/build/bin/build_binary wiki.arpa wiki.bin > /dev/null 2>&1
-!ls -lh wiki.arpa wiki.bin
+!du -h wiki.arpa wiki.bin
 !sed -n 1,8p wiki.arpa
 ```
 
@@ -537,10 +537,10 @@ for s in ["推しのアクスタを買ったけど草", "그렇게 많은 오늘
 ```python
 import pandas as pd
 
-# 採点する Web コーパス: mC4 の日本語 (allenai/c4 の multilingual、ODC-BY。Common Crawl の利用規約にも従う) の検証用の 1 ファイル (約 40MB)
+# 採点する Web コーパス: mC4 の日本語（allenai/c4 の multilingual、ODC-BY。Common Crawl の利用規約にも従う）の検証用の 1 ファイル（約 40MB）
 web = load_dataset("allenai/c4", data_files="multilingual/c4-ja-validation.tfrecord-00000-of-00008.json.gz", split="train")
 
-# CCNet と同じく段落 (改行で区切られた行) ごとにパープレキシティを計算する (Colab で 1 分ほど)
+# CCNet と同じく段落（改行で区切られた行）ごとにパープレキシティを計算する（Colab で 1 分ほど）
 rows = []
 for doc_id, doc in enumerate(web.select(range(3000))):
     for para in doc["text"].split("\n"):
@@ -566,7 +566,7 @@ print("PPL が最も低い段落"); display(d.nsmallest(8, "ppl")[["ppl", "text"
 ```
 
 ```python
-# CCNet のように、PPL の三分位で head (Wikipedia に近い)・middle・tail に分け、無作為に 6 段落ずつ見る
+# CCNet のように、PPL の三分位で head（Wikipedia に近い）・middle・tail に分け、無作為に 6 段落ずつ見る
 q1, q2 = d["ppl"].quantile([1 / 3, 2 / 3])
 d = d.assign(bucket=pd.cut(d["ppl"], [0, q1, q2, np.inf], labels=["head", "middle", "tail"]))
 print(f"三分位の境界: {q1:.0f}, {q2:.0f}")
@@ -577,7 +577,7 @@ for b, g in d.groupby("bucket", observed=True):
 ```
 
 ```python
-# 除く: 上位 10% (PPL が高い側) を捨てる。境界のすぐ内側と外側を目で確かめてから閾値を決める
+# 除く: 上位 10%（PPL が高い側）を捨てる。境界のすぐ内側と外側を目で確かめてから閾値を決める
 th = d["ppl"].quantile(0.9)
 removed = d["ppl"] > th
 print(f"閾値 PPL = {th:.0f}、除く段落 {removed.sum()} / {len(d)}")
