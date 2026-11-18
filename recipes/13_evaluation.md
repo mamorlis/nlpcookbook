@@ -7,7 +7,8 @@
 問い合わせの自動振り分けの結果を、クラスごとの適合率・再現率・F1 と micro / macro 平均で正しく集計したい。固有表現や関係の抽出のように、予測と正解が「集合」になる出力も同じ道具で評価したい。
 
 ```python
-# scikit-learn は Colab に最初から入っている (BSD-3-Clause)。版をそろえるなら !pip install -q scikit-learn==1.6.1
+# scikit-learn は Colab に最初から入っている (BSD-3-Clause)。検証に使った版は下の出力の 1 行目にある。
+# 版をそろえるなら、このセルの前に別のセルを作って pip install でその版を指定して入れ、ランタイムを再起動する
 import sklearn
 from collections import Counter
 from sklearn.metrics import (accuracy_score, classification_report, multilabel_confusion_matrix,
@@ -15,7 +16,7 @@ from sklearn.metrics import (accuracy_score, classification_report, multilabel_c
 
 print("scikit-learn", sklearn.__version__)
 
-# (正解, 予測) の組と件数。「個人情報」は 3 件しかなく、一度も正しく予測されていない
+# （正解, 予測）の組と件数。「個人情報」は 3 件しかなく、一度も正しく予測されていない
 pairs = {("料金", "料金"): 40, ("料金", "その他"): 5, ("解約", "解約"): 12, ("解約", "料金"): 3,
          ("故障", "故障"): 6, ("故障", "その他"): 4, ("個人情報", "その他"): 2, ("個人情報", "解約"): 1,
          ("その他", "その他"): 25, ("その他", "料金"): 3}
@@ -51,7 +52,7 @@ for zd in [0, np.nan]:
     p, r, f, _ = precision_recall_fscore_support(gold, pred, labels=targets, average="macro", zero_division=zd)
     print(f"zero_division={zd}: macro P = {p:.3f}  macro F1 = {f:.3f}")
 
-# 「macro-F1」の 2 つの流儀: クラスごとの F1 の平均 (scikit-learn の macro) と、macro P と macro R の調和平均
+# 「macro-F1」の 2 つの流儀: クラスごとの F1 の平均（scikit-learn の macro）と、macro P と macro R の調和平均
 p, r, f, _ = precision_recall_fscore_support(gold, pred, labels=targets, average="macro", zero_division=0)
 print(f"F1 の平均 = {f:.3f}   macro P と macro R の調和平均 = {2 * p * r / (p + r):.3f}")
 ```
@@ -59,7 +60,7 @@ print(f"F1 の平均 = {f:.3f}   macro P と macro R の調和平均 = {2 * p * 
 ```python
 from sklearn.preprocessing import MultiLabelBinarizer
 
-# 抽出の評価: 文書ごとに (文字列, 種類) の集合を比べる。LLM で抜き出した固有表現や、(主語, 関係, 目的語) の 3 つ組でも同じ
+# 抽出の評価: 文書ごとに（文字列, 種類）の集合を比べる。LLM で抜き出した固有表現や、（主語, 関係, 目的語）の 3 つ組でも同じ
 gold_docs = [{("山田", "PER"), ("京都", "LOC"), ("ソニー", "ORG")},
              {("田中", "PER"), ("大阪", "LOC")},
              {("トヨタ", "ORG")},
@@ -80,10 +81,10 @@ def set_prf(gold_docs, pred_docs, average="micro", zero_division=0):
 
 print("完全一致 (micro)         :", set_prf(gold_docs, pred_docs))
 # 文書ごとの F1 の平均。正解も予測も空の文書を 0 点 (zero_division=0) と 1 点 (=1) のどちらにするかで値が変わる
-# (片方だけ空の文書は F1 が 0 のままで、zero_division で変わるのは P・R だけ)
+# （片方だけ空の文書は F1 が 0 のままで、zero_division で変わるのは P・R だけ）
 print("文書ごとの平均 (samples, 空は 0):", set_prf(gold_docs, pred_docs, average="samples"))
 print("文書ごとの平均 (samples, 空は 1):", set_prf(gold_docs, pred_docs, average="samples", zero_division=1))
-# 種類を無視して文字列だけで比べる (緩い一致)
+# 種類を無視して文字列だけで比べる（緩い一致）
 print("種類を無視 (micro)       :", set_prf([{s for s, _ in d} for d in gold_docs],
                                           [{s for s, _ in d} for d in pred_docs]))
 # 種類ごとの内訳: その種類の要素だけを残して集計する

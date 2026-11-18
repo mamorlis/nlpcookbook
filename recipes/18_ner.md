@@ -197,10 +197,13 @@ for match_id, start, end in matcher(doc):
 ```
 
 ```python
-# 日本語: 「〜ことができる」(可能表現) と「サ変名詞 + する」
+# 日本語: 「〜ことができる」（可能表現）と「サ変名詞 + する」
 nlp_ja = spacy.load("ja_ginza")
 m = Matcher(nlp_ja.vocab)
-m.add("KOTO_GA_DEKIRU", [[{"POS": "VERB"}, {"ORTH": "こと"}, {"ORTH": {"IN": ["が", "も", "は"]}}, {"LEMMA": "できる"}]])
+# GiNZA では「要約する」の「する」は POS が AUX になるので、POS ではなく TAG（動詞-…）で動詞を指定する
+# サ変名詞（「要約」など）があれば含める ("OP": "?")。重なる候補からは最長のものを残す
+m.add("KOTO_GA_DEKIRU", [[{"TAG": {"REGEX": "サ変可能"}, "OP": "?"}, {"TAG": {"REGEX": "^動詞"}}, {"ORTH": "こと"},
+                          {"ORTH": {"IN": ["が", "も", "は"]}}, {"LEMMA": "できる"}]], greedy="LONGEST")
 m.add("SAHEN", [[{"POS": {"IN": ["NOUN", "VERB"]}, "TAG": {"REGEX": "サ変可能"}}, {"LEMMA": "する"}]])
 
 doc = nlp_ja("このモデルは長い文章を要約することができる。日本語を翻訳することもできるし、質問に回答する。")

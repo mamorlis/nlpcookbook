@@ -448,7 +448,7 @@ import jaconv
 from fugashi import Tagger
 from rapidfuzz import fuzz, process
 
-# 候補の語と人気度 (検索回数など)
+# 候補の語と人気度（検索回数など）
 terms = {"自然言語処理": 950, "自然言語理解": 120, "自然言語生成": 200, "機械翻訳": 800, "機械学習": 990, "形態素解析": 400, "係り受け解析": 150,
          "固有表現抽出": 300, "感情分析": 350, "質問応答": 280, "文法誤り訂正": 180, "大規模言語モデル": 700, "検索拡張生成": 260, "言語モデル": 500}
 
@@ -461,14 +461,16 @@ entries = sorted([(t, t) for t in terms] + [(reading(t), t) for t in terms])
 keys = [k for k, _ in entries]
 
 def suggest(prefix, k=5):
-    """前方一致する候補を、人気度の高い順に返す (二分探索なので、候補が数百万あっても速い)"""
-    prefix = jaconv.kata2hira(prefix)
-    lo = bisect.bisect_left(keys, prefix)
-    hi = bisect.bisect_right(keys, prefix + "￿")
-    found = {t for _, t in entries[lo:hi]}
+    """前方一致する候補を、人気度の高い順に返す（二分探索なので、候補が数百万あっても速い）"""
+    found = set()
+    # 入力そのもの（表記）と、カタカナをひらがなにしたもの（読み）の両方で引く
+    for p in {prefix, jaconv.kata2hira(prefix)}:
+        lo = bisect.bisect_left(keys, p)
+        hi = bisect.bisect_right(keys, p + "￿")
+        found |= {t for _, t in entries[lo:hi]}
     return sorted(found, key=lambda t: -terms[t])[:k]
 
-for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう"]:
+for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう", "大規模言語モ"]:
     print(prefix, "→", suggest(prefix))
 ```
 
