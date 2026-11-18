@@ -325,20 +325,24 @@ print(f"A = {correct_a.mean():.3f}  B = {correct_b.mean():.3f}  差 = {correct_a
 
 ```python
 def paired_bootstrap(a, b, n_boot=10000):
-    """対応のあるブートストラップ検定: 同じ事例を両システムについてリサンプリングし、A が B を上回らない割合を p 値とする"""
-    idx = rng.integers(0, len(a), (n_boot, len(a)))
-    diffs = a[idx].mean(axis=1) - b[idx].mean(axis=1)
-    return (diffs <= 0).mean()
+    """対応のあるブートストラップで、A の正解率が B より高いという片側検定の p 値を近似する"""
+    diff = a.astype(np.int8) - b.astype(np.int8)
+    observed = diff.sum()
+    idx = rng.integers(0, len(diff), (n_boot, len(diff)))
+    null_diffs = diff[idx].sum(axis=1) - observed  # 観測差を引き、差が 0 という帰無仮説の下の分布を近似
+    return (null_diffs >= observed).mean()
 
 def approximate_randomization(a, b, n_perm=10000):
-    """近似並べ替え検定: 事例ごとに A と B の結果をランダムに入れ替え、観測された差以上の差が出る割合を p 値とする (両側)"""
-    observed = abs(a.mean() - b.mean())
-    swap = rng.random((n_perm, len(a))) < 0.5
-    diffs = np.abs(np.where(swap, b, a).mean(axis=1) - np.where(swap, a, b).mean(axis=1))
-    return (diffs >= observed).mean()
+    """事例ごとに A と B の結果をランダムに入れ替え、差の絶対値で両側の p 値を求める"""
+    diff = a.astype(np.int8) - b.astype(np.int8)
+    observed = abs(diff.sum())
+    swap = rng.random((n_perm, len(diff))) < 0.5
+    diffs = np.abs(np.where(swap, -diff, diff).sum(axis=1))
+    # 元の配置も 1 回分として数える。ランダムな並べ替えで該当が 0 回でも p 値は 0 にならない
+    return (np.count_nonzero(diffs >= observed) + 1) / (n_perm + 1)
 
-print("対応のあるブートストラップ (片側) p =", paired_bootstrap(correct_a, correct_b))
-print("近似並べ替え検定 (両側) p =", approximate_randomization(correct_a, correct_b))
+print(f"対応のあるブートストラップ（片側） p ≈ {paired_bootstrap(correct_a, correct_b):.4f}")
+print(f"近似並べ替え検定（両側） p ≈ {approximate_randomization(correct_a, correct_b):.4f}")
 ```
 
 ```python
@@ -347,11 +351,13 @@ from statsmodels.stats.contingency_tables import mcnemar
 
 table = [[(correct_a & correct_b).sum(), (correct_a & ~correct_b).sum()],
          [(~correct_a & correct_b).sum(), (~correct_a & ~correct_b).sum()]]
-print("A だけ正解:", table[0][1], " B だけ正解:", table[1][0], " McNemar p =", round(mcnemar(table, exact=True).pvalue, 4))
+print(f"A だけ正解: {table[0][1]}  B だけ正解: {table[1][0]}  McNemar（両側） p = {mcnemar(table, exact=True).pvalue:.4f}")
 ```
 
 - 同じテストセットで 2 つのシステムを比べるときは、事例ごとの対応を使う「対応のある」検定にする。対応を無視すると検出力が大きく落ちる。
-- p < 0.05 は「差がない場合にこの結果が出る確率が 5% 未満」という意味で、差の大きさや重要さは示さない。効果量と信頼区間も併せて報告する。
+- p 値は、帰無仮説（ここでは両システムの正解率に差がない）の下で、観測値と同じかそれ以上に極端な検定統計量が得られる確率。A のほうが良いかを調べる片側検定では A − B が観測差以上の場合を数え、方向を問わず差を調べる両側検定では差の絶対値が観測差の絶対値以上の場合を数える。片側か両側かは結果を見る前に決める。
+- ここでのブートストラップは事例の組を復元抽出し、観測差を引いて帰無分布を近似する。近似並べ替え検定は各事例の A と B を入れ替えて帰無分布を近似する。正誤の比較では一方だけが正解した事例だけが差に効くため、この両側の並べ替えをすべて列挙した p 値は McNemar の正確検定と一致する。
+- 5% を有意水準に決めていたなら、p < 0.05 で帰無仮説を棄却する。差の大きさは、正解率の差とその信頼区間を併せて報告する。
 - たくさんのシステムや設定を比べると、偶然「有意」になるものが出てくる（多重比較）。Bonferroni 補正などを検討する。
 
 ## 乱数シードによるばらつきを考慮して結果を報告する {seed_variance}

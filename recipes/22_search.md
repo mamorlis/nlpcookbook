@@ -979,6 +979,9 @@ rel = doc_emb @ q
 
 def mmr(rel, doc_emb, k=4, lam=0.7):
     """lam × クエリとの関連度 − (1 − lam) × 選択済みの文書との最大類似度 が最大のものを 1 つずつ選ぶ"""
+    k = min(k, len(rel))
+    if k <= 0:
+        return []
     selected = [int(rel.argmax())]
     while len(selected) < k:
         rest = [i for i in range(len(rel)) if i not in selected]
@@ -998,6 +1001,8 @@ for lam in [0.7, 0.5]:
 ```python
 # 選ばれた文書同士の類似度の平均 (低いほど多様)
 def redundancy(ids):
+    if len(ids) < 2:
+        return float("nan")
     sims = doc_emb[ids] @ doc_emb[ids].T
     return float((sims.sum() - len(ids)) / (len(ids) * (len(ids) - 1)))
 
@@ -1006,6 +1011,7 @@ print("関連度順:", round(redundancy(top), 3), " MMR:", round(redundancy(mmr(
 ```
 
 - MMR (Maximal Marginal Relevance) は、「クエリに近い」と「すでに選んだものと違う」の両方を満たす文書を順に選ぶ。λ が 1 なら関連度順、小さいほど多様性を重視する。
+- `k` が候補数を超える場合は候補数まで選ぶ。候補がない場合や `k <= 0` の場合は空リストを返す。選んだ文書が 2 件未満なら、文書間の平均類似度は定義できないので `nan` とする。
 - RAG では、同じ内容のチャンクを何個も渡しても情報が増えない。MMR で多様にすると、限られた件数で広い範囲の情報を渡せる。
 - 多様にしすぎると関連の薄い文書が入る。λ は 0.5〜0.8 あたりから試す。
 - 完全に同じ内容の文書は、検索より前に重複除去しておく（データの収集と入出力の章の MinHash のレシピを参照）。

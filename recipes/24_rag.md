@@ -502,18 +502,30 @@ print(len(eval_set), "問を保存 (うち答えなし", sum(not e["answerable"]
 ```
 
 ```python
-# 3. 評価セットの性質を確かめる: 質問と正解段落の語の重なりが大きいと、キーワード検索に有利な「易しい」評価になる
-import re
+# 3. 評価セットの性質を確かめる: 質問の文字 2-gram が正解段落にどれだけ現れるかを見る
 import numpy as np
 
-chars = lambda s: set(re.findall(r"[一-龥ァ-ヶー]{2,}", s))
-overlap = [len(chars(e["question"]) & chars(passages[e["gold_passage"]]["text"])) / max(1, len(chars(e["question"]))) for e in eval_set if e["answerable"]]
-print(f"質問の語のうち正解段落にも出てくる割合: 平均 {np.mean(overlap):.2f}")
+def char_bigrams(text):
+    # 空白や句読点をまたがず、隣り合う文字・数字を 2 つずつ取る
+    return {a + b for a, b in zip(text, text[1:]) if a.isalnum() and b.isalnum()}
+
+def bigram_overlap(question, passage):
+    query_bigrams = char_bigrams(question)
+    if not query_bigrams:
+        return 0.0
+    return len(query_bigrams & char_bigrams(passage)) / len(query_bigrams)
+
+overlap = [
+    bigram_overlap(e["question"], passages[e["gold_passage"]]["text"])
+    for e in eval_set if e["answerable"]
+]
+print(f"質問の文字 2-gram のうち正解段落にも出てくる割合: 平均 {np.mean(overlap):.2f}")
 print("答えの長さ (文字):", np.percentile([len(e["answers"][0]) for e in eval_set if e["answerable"]], [25, 50, 75]))
 ```
 
 - 評価セットに必要なのは 3 つ: 質問、正解（言い方の違う複数の正解があるとよい）、正解が書かれた文書の ID。文書 ID があると、検索の失敗と生成の失敗を分けて調べられる。
 - 既存の読解データセットの質問は、段落を見ながら作られているので、段落と同じ語を使いがち。実際のユーザーの質問より検索が易しい点に注意する。
+- 文字 2-gram は表記の重なりを見る目安。「自然言語」と「自然言語処理」のような部分一致を拾う。ひらがなの定型句も数えるので、この値だけで検索の難しさは判断できない。質問に文字 2-gram がない場合は 0 とする。
 - 自分の文書で作るなら、(1) 実際の問い合わせログから集める、(2) 人が文書を読んで質問を書く、(3) LLM に文書から質問を作らせて人が確認する（質問応答の章の質問生成を参照）、の順に質が高い。
 - 答えのない質問を 1〜2 割入れる。入れないと「何を聞かれても答える」システムが高評価になってしまう。
 - 50〜100 問でも、設定の良し悪しの比較には使える。差が小さいときは問数を増やすか、信頼区間を付ける。
