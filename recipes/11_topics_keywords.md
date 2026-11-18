@@ -263,12 +263,24 @@ pd.crosstab(df["label"], df["topic"])
 LDA より速く、短い文書でも安定しやすい方法でトピックを抽出したい。TF-IDF 行列を非負値行列因子分解する。
 
 ```python
+from collections import Counter
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.decomposition import NMF
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-data = fetch_20newsgroups(subset="train", remove=("headers", "footers", "quotes"))
-docs = [d for d in data.data if len(d) > 200]
+names = fetch_20newsgroups(subset="train").target_names
+cats = [c for c in names if not c.startswith("talk.politics")]   # 政治の話題のグループは除く
+data = fetch_20newsgroups(subset="train", categories=cats, remove=("headers", "footers", "quotes"))
+
+# 署名のように、5 件以上の投稿に同じ形で現れる行を除く
+def lines(d):
+    return {l.strip() for l in d.split("\n") if len(l.strip()) > 10}
+count = Counter(l for d in data.data for l in lines(d))
+repeated = {l for l, n in count.items() if n >= 5}
+def clean(d):
+    return "\n".join(l for l in d.split("\n") if l.strip() not in repeated)
+
+docs = [c for c in map(clean, data.data) if len(c) > 200]
 vec = TfidfVectorizer(stop_words="english", min_df=5, max_df=0.5, max_features=20000, token_pattern=r"(?u)\b[a-zA-Z]{3,}\b")
 X = vec.fit_transform(docs)
 
@@ -282,7 +294,7 @@ for k, row in enumerate(H):
 
 ```python
 # 各トピックを最もよく代表する文書
-for k in [0, 1, 2]:
+for k in [3, 5, 8]:
     i = W[:, k].argmax()
     print(k, "|", " ".join(docs[i].split())[:110])
 ```
@@ -290,6 +302,7 @@ for k in [0, 1, 2]:
 - TF-IDF 行列 X を、非負の 2 つの行列の積 W × H で近似する。非負なので「足し算だけ」で文書が表現され、解釈しやすい。
 - 確率モデルではないので、LDA のような確率的な解釈はできないが、決定的 (`init="nndsvd"`) で再現性が高い。
 - ツイートやタイトルのような短文には、LDA より NMF のほうが良い結果になることが多い。
+- 署名や定型文のように同じ文字列を繰り返す投稿者がいると、その語だけのトピックができてしまう。`remove=("headers", "footers", "quotes")` でも署名は取り切れないので、多くの投稿に出てくる行を除いた。
 
 ## 文埋め込みとクラスタリングでトピックを作る（BERTopic 方式） {embedding_topics}
 

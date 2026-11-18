@@ -231,7 +231,7 @@ import pandas as pd
 from datasets import load_dataset
 from scipy.stats import kendalltau, spearmanr
 
-# WMT 2022 の人手評価 (原文、機械訳、参照訳、人が付けた品質スコア)。英日翻訳の部分を使う
+# WMT 2022 の人手評価（原文、機械訳、参照訳、人が付けた品質スコア）。英日翻訳の部分を使う
 df = load_dataset("RicardoRei/wmt-sqm-human-evaluation", split="train").to_pandas()
 df = df[(df["lp"] == "en-ja") & (df["src"].str.len().between(20, 200))].sample(600, random_state=0).reset_index(drop=True)
 print(len(df), "件 / システム数", df["system"].nunique(), "/ スコアの分布", df["score"].describe().round(2).to_dict())
@@ -248,7 +248,7 @@ e_src = embedder.encode(["query: " + s for s in df["src"]], normalize_embeddings
 e_mt = embedder.encode(["query: " + s for s in df["mt"]], normalize_embeddings=True, batch_size=32)
 df["埋め込みの類似度"] = (e_src * e_mt).sum(axis=1)
 
-# 方法 2: 長さの比 (極端に短い・長い訳は怪しい、という素朴なベースライン)
+# 方法 2: 長さの比（極端に短い・長い訳は怪しい、という素朴なベースライン）
 ratio = df["mt"].str.len() / df["src"].str.len()
 df["長さの比"] = -np.abs(np.log(ratio / ratio.median()))
 ```
@@ -263,8 +263,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # 方法 3: LLM に「正確で自然な訳か」を尋ね、「はい」と答える確率をスコアにする
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデル (LLM) の章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -280,7 +280,7 @@ def p_good(src, mt):
     ids = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].to(llm.device)
     return float(llm(ids).logits[0, -1, YES_NO].float().softmax(-1)[0])
 
-sub = df.head(150).copy()                      # LLM の判定は 150 件で比べる (T4 なら 1 件あたり 0.1 秒ほど、モデルの読み込みを含めて 1〜2 分)
+sub = df.head(150).copy()                      # LLM の判定は 150 件で比べる（T4 なら 1 件あたり 0.1 秒ほど、モデルの読み込みを含めて 1〜2 分）
 sub["LLM (はいの確率)"] = sub["llm"] = [p_good(s, m) for s, m in zip(sub["src"], sub["mt"])]
 ```
 
@@ -317,7 +317,7 @@ for label, corrupted in [("別の文の訳にすり替え", swapped), ("後半�
 ```
 
 - 品質推定 (quality estimation, QE) は、参照訳を使わずに原文と訳文だけから品質を予測する。翻訳結果をそのまま公開してよいか、人が後編集すべきかを振り分けるのに使われる。
-- この評価データは、最近の高品質な翻訳システムの出力で、ほとんどが 80 点以上。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった（150 件での Spearman は LLM が 0.15、長さの比が 0.08、埋め込みの類似度は −0.10。LLM は T4 と同じ float16 で実行した値）。LLM がほぼ確実に「はい」と答えたのに、人が 24 点を付けた訳もある。
+- この評価データは、最近の高品質な翻訳システムの出力で、点数は高めに偏っている（600 件の中央値は 85 点、4 分の 3 が 79 点以上）。その中の細かい優劣を当てるのは非常に難しく、ここで試した 3 つの方法は、どれも人の評価とほとんど相関しなかった（150 件での Spearman は LLM が 0.15、長さの比が 0.08、埋め込みの類似度は −0.10。LLM は T4 と同じ float16 で実行した値）。LLM がほぼ確実に「はい」と答えたのに、人が 24 点を付けた訳もある。
 - 一方、別の文の訳や訳抜けのような、はっきり壊れた訳は区別できる（AUC は、すり替えで埋め込み 1.00 / LLM 0.99、後半の切り落としで 0.85 / 0.78。訳抜けのほうが見つけにくい）。簡易な方法は「明らかな失敗をはじく」用途に使い、細かい品質の順位付けには使わない。
 - 大きな LLM を使った判定は、専用の品質推定モデルに匹敵することが報告されている。小さなモデルで同じ結果は期待できない。
 - 専用のモデルとしては、人手評価で学習された CometKiwi が代表的（利用にはライセンスへの同意が必要）。大量の文を安定して評価するなら、まずこれを検討する。
@@ -565,7 +565,7 @@ for (ja, en), hyp in list(zip(test, hyps))[:6]:
 ```
 
 - 流れは「対訳データの掃除 → サブワード分割 → モデルの定義 → 学習 → ビームサーチで翻訳 → BLEU で評価」。事前学習済みモデルを使わなくても、十数万文対の短い文なら翻訳らしいものが出てくる。
-- モデルは約 1,150 万パラメータの小さな Transformer。RTX A5000 で 12 エポックが約 6 分（T4 ならその 2〜3 倍）。
+- モデルは約 1,150 万パラメータの小さな Transformer。検証の GPU で 12 エポックが約 6 分（T4 ならその 2〜3 倍）。
 - 重複を除かずにランダムに分けると、学習データと同じ文がテストに入り、BLEU が約 21 と高めに出た。Tatoeba には同じ文や言い換えの対が多いので、分割の前に重複を除く。
 - データの質が結果を大きく左右する。田中コーパスは短く対訳のずれが少ない文が多く、BLEU は 12 エポックで約 18 だった。同じモデルを、字幕のような会話文が多い opus-100（29 万文対）で学習すると、BLEU は 3〜5 にとどまった。
 - EDRDG 版は Tatoeba から定期的に更新されるので、実行する日によってデータの件数や BLEU の値が少し変わる。固定の分割で比べたいなら、田中コーパスから 5 万文対を抜き出した [small_parallel_enja](https://github.com/odashi/small_parallel_enja) を使う（英語は小文字化・トークン化済み）。
@@ -652,7 +652,7 @@ for ja, en, b, a in list(zip(test["ja"], test["en"], before, after))[:6]:
 model.save_pretrained("mt-finetuned"); tokenizer.save_pretrained("mt-finetuned")
 ```
 
-- ゼロから学習するよりはるかに少ないデータと時間で、特定の分野の文体や用語に合わせられる。RTX A5000 で 3 万文対・1 エポックが 1 分弱（T4 ならその 2〜3 倍）。
+- ゼロから学習するよりはるかに少ないデータと時間で、特定の分野の文体や用語に合わせられる。検証の GPU で 3 万文対・1 エポックが 1 分弱（T4 ならその 2〜3 倍）。
 - 実測の BLEU は 39.9 → 43.8。「I've」→「I have」のように短縮形を避けるなど、田中コーパスの英訳の文体に寄る。2 エポックにしても、全 13.8 万文対で学習しても 43.3〜43.6 で、それ以上は上がらなかった。
 - 微調整前から BLEU が高いのは、`opus-mt-ja-en` が Tatoeba を含む OPUS のデータで学習されていて、テスト文をすでに見ている可能性があるため。分野が元のモデルの学習データと重なっていると、微調整の効果は出にくい（字幕が多い opus-100 で同じことをすると、BLEU は 17.6 → 17.5 で上がらなかった）。微調整の前に、元のモデルがその分野をどれだけ訳せるかを必ず測る。
 - 学習率は小さめ (1e-5〜5e-5) にする。大きすぎると、元のモデルが持っていた一般的な翻訳能力が壊れる（破滅的忘却）。
@@ -1063,7 +1063,7 @@ for name_, kwargs in methods.items():
 
 ## 古文を現代語に訳す {classical_to_modern gpu}
 
-古文を現代語に訳したい。LLM に訳させ、品詞分解の情報を与えると訳が良くなるかも試す。
+古文を現代語に訳したい。LLM に訳させ、訳の例を示したり、誤訳しやすい語の語釈を与えたりすると訳が良くなるかも試す。
 
 ```python
 !pip install -q sacrebleu
@@ -1078,8 +1078,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -1092,7 +1092,7 @@ def chat(prompt, max_new_tokens=160):
     out = llm.generate(**ids, max_new_tokens=max_new_tokens, do_sample=False, repetition_penalty=1.1, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
 
-# (古文, 参考にする現代語訳) の組
+# （古文, 参考にする現代語訳）の組
 data = [
     ("今は昔、竹取の翁といふ者ありけり。", "今となっては昔のことだが、竹取の翁という者がいた。"),
     ("野山にまじりて竹を取りつつ、よろづのことに使ひけり。", "野山に分け入って竹を取っては、いろいろなことに使っていた。"),
@@ -1106,7 +1106,7 @@ data = [
 PLAIN = "次の古文を、意味を変えずに現代語に訳してください。訳文だけを 1 行で出力してください。\n\n古文: {}"
 FEWSHOT = ("古文を現代語に訳します。訳文だけを 1 行で出力してください。\n\n古文: いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに\n現代語訳: どの帝の御代であったか、女御や更衣が大勢お仕えしていらっしゃった中に\n\n"
            "古文: 月日は百代の過客にして、行きかふ年もまた旅人なり。\n現代語訳: 月日は永遠の旅人であり、過ぎ去ってはやって来る年もまた旅人である。\n\n古文: {}\n現代語訳:")
-for src, ref in data:                          # 6 文 × 2 通りの訳 (T4 ならモデルの読み込みを含めて 1〜2 分)
+for src, ref in data:                          # 6 文 × 2 通りの訳（T4 ならモデルの読み込みを含めて 1〜2 分）
     print(f"{src}\n   訳 (指示のみ): {chat(PLAIN.format(src))}\n   訳 (例を示す): {chat(FEWSHOT.format(src))}\n   参考: {ref}")
 ```
 
@@ -1120,7 +1120,7 @@ print("訳さずにそのまま出した場合 chrF =", round(sacrebleu.corpus_c
 ```
 
 ```python
-# 誤訳しやすい語 (古今異義語) の語釈を与えてから訳させる
+# 誤訳しやすい語（古今異義語）の語釈を与えてから訳させる
 GLOSSARY = {"あやし": "不思議だ、妙だ (現代語の「怪しい」とは違う)", "ものぐるほし": "気持ちが高ぶる、正気を失ったようだ", "つれづれなり": "することがなく退屈だ",
             "よしなしごと": "とりとめのないこと", "すなる": "する + 伝聞の「なり」= するという", "やうやう": "だんだん、しだいに"}
 src = data[3][0]

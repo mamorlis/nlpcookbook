@@ -843,7 +843,7 @@ for text, row in zip(texts, sims):
 
 ラベル付きデータが各クラス 10 件しかない。学習データを機械的に言い換えて水増しすれば分類の精度が上がるのか、同義語の置換 (EDA)、逆翻訳、LLM による言い換えを比べて確かめたい。
 
-（T4 の GPU ランタイムで、全体で 10 分程度かかる。）
+（T4 の GPU ランタイムで、全体で 10〜15 分程度かかる。）
 
 ```python
 !pip install -q fugashi unidic-lite
@@ -856,7 +856,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 def load_livedoor():
-    """livedoor ニュースコーパス (CC BY-ND 2.1 JP。改変禁止なので、言い換えたデータは手元の実験だけに使い、配布しない)"""
+    """livedoor ニュースコーパス（CC BY-ND 2.1 JP。改変禁止なので、言い換えたデータは手元の実験だけに使い、配布しない）"""
     url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
     with urllib.request.urlopen(url) as r:
         tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
@@ -870,10 +870,10 @@ def load_livedoor():
 
 df = load_livedoor()
 pool, test = train_test_split(df, test_size=0.2, stratify=df["label"], random_state=0)
-# タイトルだけで 9 クラスに分類する。学習データの選び方 (乱数の種) を 5 通り変えて、結果のばらつきも見る
+# タイトルだけで 9 クラスに分類する。学習データの選び方（乱数の種）を 5 通り変えて、結果のばらつきも見る
 SEEDS, N = range(5), 10
-real3x = {s: pool.groupby("label").sample(3 * N, random_state=s) for s in SEEDS}   # 比較用: 本物のデータを 3 倍 (各クラス 30 件) 集めた場合
-small = {s: d.groupby("label").head(N) for s, d in real3x.items()}                  # 各クラス 10 件 (計 90 件) の学習データ
+real3x = {s: pool.groupby("label").sample(3 * N, random_state=s) for s in SEEDS}   # 比較用: 本物のデータを 3 倍（各クラス 30 件）集めた場合
+small = {s: d.groupby("label").head(N) for s, d in real3x.items()}                  # 各クラス 10 件（計 90 件）の学習データ
 used = sorted(set().union(*[set(d.index) for d in small.values()]))                 # 5 通りのどれかで使う文 = 言い換える対象
 print("学習データ:", len(small[0]), "件 × 5 通り / 言い換える文:", len(used), "件 / テスト:", len(test), "件")
 augs = {}   # 手法名 → {文の番号: [言い換え 1, 言い換え 2]}
@@ -899,7 +899,7 @@ def eda_once(title, rng, alpha):
     n = max(1, round(alpha * len(words)))
     op = rng.choice(["置換", "挿入", "入替", "削除"])
     w = words[:]
-    if op == "置換":       # 名詞を WordNet の同義語に置き換える (活用する語は形が崩れるので名詞だけ)
+    if op == "置換":       # 名詞を WordNet の同義語に置き換える（活用する語は形が崩れるので名詞だけ）
         for i in rng.sample(nouns, min(n, len(nouns))):
             w[i] = rng.choice(synonyms(w[i]))
     elif op == "挿入":     # どれかの名詞の同義語を、ランダムな位置に入れる
@@ -928,14 +928,14 @@ for i in used[:6]:
 ```
 
 ```python
-# (2) 逆翻訳: 日本語 → 英語 → 日本語と往復させる (翻訳の章の「逆翻訳で擬似対訳データを作る」と同じ考え方)
+# (2) 逆翻訳: 日本語 → 英語 → 日本語と往復させる（機械翻訳の章の「逆翻訳で擬似対訳データを作る」と同じ考え方）
 # Colab の T4 で 3 分程度
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # T4 は bf16 が使えないので float16
 DTYPE = torch.bfloat16 if BF16 else torch.float16
-name = "facebook/nllb-200-distilled-600M"              # Meta の NLLB (CC BY-NC 4.0、非商用)
+name = "facebook/nllb-200-distilled-600M"              # Meta の NLLB（CC BY-NC 4.0、非商用）
 mt_tok = AutoTokenizer.from_pretrained(name)
 mt = AutoModelForSeq2SeqLM.from_pretrained(name, dtype=DTYPE).to("cuda").eval()
 
@@ -967,11 +967,11 @@ from huggingface_hub import hf_hub_download
 from tokenizers import models
 from transformers import AutoModelForCausalLM
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"    # SB Intuitions (MIT ライセンス)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"    # SB Intuitions（MIT ライセンス）
 tok = AutoTokenizer.from_pretrained(name)
 print("差し替える前:", tok.tokenize("みのもんた引退、新卒初任給"))
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tok.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -1007,7 +1007,7 @@ del lm; torch.cuda.empty_cache()
 ```
 
 ```python
-# 拡張なし・各拡張・本物 3 倍で学習し、同じテストデータで正解率を比べる (分類器は TF-IDF + LR と、文埋め込み + LR)
+# 拡張なし・各拡張・本物 3 倍で学習し、同じテストデータで正解率を比べる（分類器は TF-IDF + LR と、文埋め込み + LR）
 # 5 通り × 5 条件 × 2 分類器 = 50 回の学習を CPU で行うので、Colab で 3 分程度
 from scipy import stats
 from sentence_transformers import SentenceTransformer
@@ -1041,7 +1041,7 @@ for method in ["拡張なし", *augs, "本物 3 倍"]:
     acc, base = np.array([res[method, s] for s in SEEDS]), np.array([res["拡張なし", s] for s in SEEDS])
     row = {"手法": method}
     for j, clf_name in enumerate(["TF-IDF", "埋め込み"]):
-        diff = acc[:, j] - base[:, j]                                   # 同じ種どうしの差 (対応のある比較)
+        diff = acc[:, j] - base[:, j]                                   # 同じ種どうしの差（対応のある比較）
         half = stats.t.ppf(0.975, len(diff) - 1) * diff.std(ddof=1) / np.sqrt(len(diff))
         row[f"{clf_name} 正解率"] = f"{acc[:, j].mean():.3f} ± {acc[:, j].std(ddof=1):.3f}"
         row[f"{clf_name} 差 [95%CI]"] = f"{diff.mean():+.3f} [{diff.mean() - half:+.3f}, {diff.mean() + half:+.3f}]"
@@ -1051,9 +1051,9 @@ print(pd.DataFrame(rows).to_string(index=False))
 ```
 
 ```python
-# 拡張でラベルが変わっていないか: 学習用プールのうち言い換えの対象でない文 (約 5500 件) で学習した分類器を「審判」にして、
+# 拡張でラベルが変わっていないか: 学習用プールのうち言い換えの対象でない文（約 5500 件）で学習した分類器を「審判」にして、
 # 元の文と言い換えた文の予測ラベルを調べる。元の文を審判の学習に入れると、答えを覚えているので比較にならない
-# (この審判は分析のためだけのもの。実際に少量のデータしかない場面では使えない)
+# （この審判は分析のためだけのもの。実際に少量のデータしかない場面では使えない）
 rest = pool.drop(used)
 judge = LogisticRegression(C=10, max_iter=1000).fit(embed(rest["title"]), rest["label"])
 gold = np.array([pool.label[i] for i in used])
@@ -1691,14 +1691,14 @@ df["wakati"] = [tagger.parse(t[:2000]).strip() for t in df["text"]]   # Colab �
 names = sorted(df["label"].unique())
 train, test = train_test_split(df, test_size=0.2, stratify=df["label"], random_state=0)
 train = train.reset_index(drop=True)
-y_true = train["label"].map(names.index).to_numpy()   # 元のラベル (整数 ID)
+y_true = train["label"].map(names.index).to_numpy()   # 元のラベル（整数 ID）
 y_test = test["label"].map(names.index).to_numpy()
 print(f"学習 {len(train)} 件 / テスト {len(test)} 件")
 ```
 
 ```python
-# まず、同じタイトルの記事が別のラベルで二重に入っていないかを確かめる (矛盾するラベルの典型)
-# 記事: livedoor ニュースの各配信元。収集・配布: 株式会社ロンウイット (livedoor ニュースコーパス、CC BY-ND 2.1 JP)
+# まず、同じタイトルの記事が別のラベルで二重に入っていないかを確かめる（矛盾するラベルの典型）
+# 記事: livedoor ニュースの各配信元。収集・配布: 株式会社ロンウイット（livedoor ニュースコーパス、CC BY-ND 2.1 JP）
 df[df.groupby("title")["label"].transform("nunique") > 1][["label", "title"]]
 ```
 
@@ -1714,7 +1714,7 @@ def make_clf():
                          LogisticRegression(C=10, max_iter=1000))
 
 cv = StratifiedKFold(5, shuffle=True, random_state=0)
-# 付け替え先を決めるため、誤りを入れる前のラベルで交差検証し、各クラスで最も取り違えやすいクラスを求める (Colab の CPU で 2 分程度)
+# 付け替え先を決めるため、誤りを入れる前のラベルで交差検証し、各クラスで最も取り違えやすいクラスを求める（Colab の CPU で 2 分程度）
 proba_orig = cross_val_predict(make_clf(), train["wakati"], y_true, cv=cv, method="predict_proba", n_jobs=-1)   # 最後のセルでも使う
 cm = confusion_matrix(y_true, proba_orig.argmax(axis=1))
 np.fill_diagonal(cm, 0)
@@ -1723,7 +1723,7 @@ print({names[i]: names[j] for i, j in enumerate(swap)})
 
 NOISE_RATE = 0.2   # 誤りの割合。0.1 や 0.4 に変えて試すとよい
 rng = np.random.default_rng(0)
-flip = rng.random(len(train)) < NOISE_RATE   # 誤りを入れる事例 (テストデータには入れない)
+flip = rng.random(len(train)) < NOISE_RATE   # 誤りを入れる事例（テストデータには入れない）
 noisy = {
     "系統的": np.where(flip, swap[y_true], y_true),   # 取り違えやすいクラスに付け替える
     "ランダム": np.where(flip, (y_true + rng.integers(1, len(names), len(train))) % len(names), y_true),   # ばらばらなクラスに付け替える
@@ -1736,17 +1736,17 @@ from cleanlab.filter import find_label_issues
 
 rows, proba, issues = [], {}, {}
 for kind, y in noisy.items():
-    # 交差検証で、すべての事例について「その事例を学習に使っていないモデル」の予測確率を得る (1 回 2 分程度)
+    # 交差検証で、すべての事例について「その事例を学習に使っていないモデル」の予測確率を得る（1 回 2 分程度）
     p = proba[kind] = cross_val_predict(make_clf(), train["wakati"], y, cv=cv, method="predict_proba", n_jobs=-1)
-    # (1) 予測と付いたラベルが食い違うものをすべて候補にする (論文の C_confusion。この章の「エラー分析」のやり方)
+    # (1) 予測と付いたラベルが食い違うものをすべて候補にする（論文の C_confusion。この章の「モデルが自信満々に間違えた事例を調べる（エラー分析）」のやり方）
     c_confusion = np.flatnonzero(p.argmax(axis=1) != y)
     # (2) confident joint の非対角を自分で実装: クラス j のしきい値 = ラベル j が付いた事例での p(j) の平均。
-    #     しきい値を超えたクラスのうち確率最大のものが付いたラベルと違えば候補 (filter_by="confident_learning" と同じ考え方)
+    #     しきい値を超えたクラスのうち確率最大のものが付いたラベルと違えば候補（filter_by="confident_learning" と同じ考え方）
     thr = np.array([p[y == j, j].mean() for j in range(len(names))])
     over = p >= thr
     cj_offdiag = np.flatnonzero(over.any(axis=1) & (np.where(over, p, -1).argmax(axis=1) != y))
     # (3) cleanlab の既定 (prune by noise rate): confident joint から (付いたラベル, 本当のラベル) の組ごとの誤りの件数を推定し、
-    #     組ごとに margin (p(本当のラベル) - p(付いたラベル)) の大きい順にその件数を選ぶ。結果は自信度の低い順に並べる
+    #     組ごとに margin（p(本当のラベル) - p(付いたラベル)）の大きい順にその件数を選ぶ。結果は自信度の低い順に並べる
     issues[kind] = find_label_issues(y, p, filter_by="prune_by_noise_rate", return_indices_ranked_by="self_confidence")
     for method, idx in [("予測 ≠ 付いたラベル (C_confusion)", c_confusion), ("confident joint の非対角 (自作)", cj_offdiag),
                         ("prune by noise rate (cleanlab)", issues[kind])]:
@@ -1758,7 +1758,7 @@ pd.DataFrame(rows).round(3)
 ```python
 boot_rng = np.random.default_rng(0)
 def boot_ci(a, b, n=1000):
-    """正解の 0/1 の差のブートストラップ 95% 区間。テスト事例の選び方によるばらつきだけを表す (学習の乱数などは含まない)"""
+    """正解の 0/1 の差のブートストラップ 95% 区間。テスト事例の選び方によるばらつきだけを表す（学習の乱数などは含まない）"""
     d = a.astype(float) - b
     s = [d[boot_rng.integers(0, len(d), len(d))].mean() for _ in range(n)]
     return f"{d.mean():+.3f} (95% 区間 {np.percentile(s, 2.5):+.3f} 〜 {np.percentile(s, 97.5):+.3f})"
@@ -1766,7 +1766,7 @@ def boot_ci(a, b, n=1000):
 def fit_eval(idx, y):
     return make_clf().fit(train["wakati"].iloc[idx], y[idx]).predict(test["wakati"]) == y_test
 
-# 5 通り学習してテストする (Colab の CPU で 3〜4 分)
+# 5 通り学習してテストする（Colab の CPU で 3〜4 分）
 all_idx = np.arange(len(train))
 ideal = fit_eval(all_idx, y_true)
 print(f"誤りを入れる前: テスト正解率 {ideal.mean():.3f}")
@@ -1781,8 +1781,8 @@ print("誤りを含んだままの差 (ランダム − 系統的):", boot_ci(re
 ```
 
 ```python
-# わざと入れた誤りとは別に、元のデータにもともとある「怪しい」事例を探す (誤りを入れる前のラベルとその交差検証の確率を使う)
-# 記事: livedoor ニュースの各配信元。収集・配布: 株式会社ロンウイット (livedoor ニュースコーパス、CC BY-ND 2.1 JP)
+# わざと入れた誤りとは別に、元のデータにもともとある「怪しい」事例を探す（誤りを入れる前のラベルとその交差検証の確率を使う）
+# 記事: livedoor ニュースの各配信元。収集・配布: 株式会社ロンウイット（livedoor ニュースコーパス、CC BY-ND 2.1 JP）
 pd.set_option("display.max_colwidth", 70)
 idx = find_label_issues(y_true, proba_orig, filter_by="prune_by_noise_rate", return_indices_ranked_by="self_confidence")
 cand = pd.DataFrame({"title": train["title"], "付いたラベル": [names[i] for i in y_true], "予測": [names[i] for i in proba_orig.argmax(axis=1)],
@@ -1805,7 +1805,7 @@ cand.head(10)
 ラベル付きの文書がごく少ししかないとき、ラベルのない大量の文書も使って、scikit-learn の半教師あり学習で分類の精度を上げたい。
 
 ```python
-!pip install -q fugashi unidic-lite   # scikit-learn は Colab に入っている (1.6.1 で確認)
+!pip install -q fugashi unidic-lite   # scikit-learn は Colab に入っている（1.6.1 で確認）
 ```
 
 ```python
@@ -1816,7 +1816,7 @@ from fugashi import Tagger
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 def load_livedoor():
-    """livedoor ニュースコーパス (株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP: 改変禁止) を DataFrame にする"""
+    """livedoor ニュースコーパス（株式会社ロンウイット配布、記事は CC BY-ND 2.1 JP: 改変禁止）を DataFrame にする"""
     url = "https://www.rondhuit.com/download/ldcc-20140209.tar.gz"
     with urllib.request.urlopen(url) as r:
         tar = tarfile.open(fileobj=io.BytesIO(r.read()), mode="r:gz")
@@ -1841,15 +1841,15 @@ from sklearn.neighbors import NearestNeighbors
 
 def knn_kernel(k, mutual=False, weighted=True):
     """LabelSpreading の kernel に渡す関数を作る。グラフは対称にする。
-    weighted=True なら辺の重みはコサイン類似度、False なら重みなし (すべて 1)。
-    mutual=True なら、互いに k 近傍に入っている組だけを結ぶ (相互 k 近傍グラフ)"""
+    weighted=True なら辺の重みはコサイン類似度、False なら重みなし（すべて 1）。
+    mutual=True なら、互いに k 近傍に入っている組だけを結ぶ（相互 k 近傍グラフ）"""
     def graph(nn, B=None):
         G = nn.kneighbors_graph(B, mode="distance" if weighted else "connectivity")
         if weighted: G.data = 1 - G.data       # コサイン距離をコサイン類似度にする
         return G
     def kernel(A, B):
         nn = NearestNeighbors(n_neighbors=k, metric="cosine").fit(A)
-        if B is not A:                         # predict のとき: 新しい文書 B から学習済みの文書 A への k 近傍 (A の数 × B の数)
+        if B is not A:                         # predict のとき: 新しい文書 B から学習済みの文書 A への k 近傍（A の数 × B の数）
             return graph(nn, B).T.tocsr()
         G = graph(nn)                          # fit のとき: 自分自身を除いた k 近傍
         return (G.minimum(G.T) if mutual else G.maximum(G.T)).tocsr()
@@ -1901,7 +1901,7 @@ summary.mean().round(3)
 ```
 
 ```python
-# 伝播したラベルの確信度 (label_distributions_ の最大値) は使えるか。500 件を「あとから来る新しい文書」として取っておく
+# 伝播したラベルの確信度（label_distributions_ の最大値）は使えるか。500 件を「あとから来る新しい文書」として取っておく
 rng = np.random.default_rng(1)
 new = rng.choice(len(y), 500, replace=False)
 pool = np.setdiff1d(np.arange(len(y)), new)
@@ -2018,12 +2018,21 @@ print(trainer.evaluate())
 ```
 
 ```python
-# 保存して pipeline で推論
+# 保存して pipeline で推論する。学習と同じく（タイトル, 本文）の組で渡す
 from transformers import pipeline
 
 trainer.save_model("livedoor-bert"); tokenizer.save_pretrained("livedoor-bert")
 clf = pipeline("text-classification", model="livedoor-bert", device=0)
-print(clf("新型スマートフォンは有機 EL ディスプレイと高性能カメラを搭載し、来月発売される。"))
+articles = [
+    {"text": "人気アニメの劇場版、今夏公開が決定、予告編も解禁",
+     "text_pair": "人気アニメの劇場版が今年の夏に全国の映画館で公開されることが決まった。"
+                  "あわせて予告編が公開され、主人公の声を担当する声優のコメントも届いた。"},
+    {"text": "日本代表が逆転勝ち、決勝トーナメント進出を決める",
+     "text_pair": "サッカー日本代表は後半に 2 点を奪って逆転勝ちし、決勝トーナメントへの進出を決めた。"
+                  "監督は試合後「選手が最後まで走り切ってくれた」と話した。"},
+]
+for a, pred in zip(articles, clf(articles)):
+    print(f"{pred['label']:15s} {pred['score']:.3f}  {a['text']}")
 ```
 
 - T4 GPU で 1 エポック約 2 分。正解率は 95〜97% 程度になる。
@@ -2252,15 +2261,15 @@ for title in ["新型スマートフォン、有機 EL と高性能カメラを�
 import csv, io, urllib.request, zipfile
 import pandas as pd
 
-LABELS = ["entailment", "neutral", "contradiction"]   # 3 つのデータで共通のラベル (含意・中立・矛盾)
-N_TRAIN = 12000                                       # 各設定の学習件数 (1 エポック)
+LABELS = ["entailment", "neutral", "contradiction"]   # 3 つのデータで共通のラベル（含意・中立・矛盾）
+N_TRAIN = 12000                                       # 各設定の学習件数（1 エポック）
 
-# 英語: SNLI (Bowman et al. 2015、CC BY-SA 4.0)。画像キャプションを前提文にして、仮説文をクラウドソーシングで書いたもの
+# 英語: SNLI（Bowman et al. 2015、CC BY-SA 4.0）。画像キャプションを前提文にして、仮説文をクラウドソーシングで書いたもの
 hf = "https://huggingface.co/datasets/stanfordnlp/snli/resolve/main/plain_text/"
 snli, snli_dev = [d[d["label"] >= 0].assign(label=lambda d: d["label"].map(dict(enumerate(LABELS))))   # -1 はラベルが割れたもの
                   for d in (pd.read_parquet(hf + f"{s}-00000-of-00001.parquet") for s in ["train", "validation"])]
 
-# 英語を機械翻訳した日本語: JSNLI v1.1 (京都大学 黒橋研、CC BY-SA 4.0)。SNLI を機械翻訳したもの。dev はクラウドソーシングで翻訳の質とラベルを確かめてある
+# 英語を機械翻訳した日本語: JSNLI v1.1（京都大学 黒橋研、CC BY-SA 4.0）。SNLI を機械翻訳したもの。dev はクラウドソーシングで翻訳の質とラベルを確かめてある
 url = "https://nlp.ist.i.kyoto-u.ac.jp/DLcounter/lime.cgi?down=https://nlp.ist.i.kyoto-u.ac.jp/nl-resource/JSNLI/jsnli_1.1.zip&name=JSNLI.zip"
 with urllib.request.urlopen(url) as r:
     z = zipfile.ZipFile(io.BytesIO(r.read()))
@@ -2269,7 +2278,7 @@ def read_jsnli(name):
     return d.assign(premise=d["premise"].str.replace(" ", ""), hypothesis=d["hypothesis"].str.replace(" ", ""))   # 分かち書きの空白を除く
 jsnli, jsnli_dev = read_jsnli("train_w_filtering.tsv"), read_jsnli("dev.tsv")
 
-# 日本語: JGLUE の JNLI v1.3 (ヤフーと早稲田大学、CC BY-SA 4.0)。日本語の画像キャプション (YJ Captions) から、SNLI とは独立に作ったもの
+# 日本語: JGLUE の JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）。日本語の画像キャプション (YJ Captions) から、SNLI とは独立に作ったもの
 gh = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jnli-v1.3/"
 jnli, jnli_test = [pd.read_json(gh + f"{s}-v1.3.json", lines=True).rename(columns={"sentence1": "premise", "sentence2": "hypothesis"})
                   for s in ["train", "test"]]
@@ -2286,15 +2295,15 @@ import torch
 from datasets import Dataset
 from sklearn.metrics import accuracy_score, f1_score
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
-                          Trainer, TrainingArguments, set_seed)
+                          PrinterCallback, Trainer, TrainingArguments, set_seed)
 from tokenizers import normalizers
 from transformers.utils import logging
 
 logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
 
-MODEL = "microsoft/mdeberta-v3-base"   # DeBERTaV3 の多言語版。XLM-R と同じ CC100 で事前学習 (MIT ライセンス)
+MODEL = "microsoft/mdeberta-v3-base"   # DeBERTaV3 の多言語版。XLM-R と同じ CC100 で事前学習（MIT ライセンス）
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
-# transformers 5 系の DebertaV2Tokenizer は、sentencepiece の NFKC 正規化を落とし、全角の記号や英数字 (（、ＡＢＣ、１２３ など) を
+# transformers 5 系の DebertaV2Tokenizer は、sentencepiece の NFKC 正規化を落とし、全角の記号や英数字（（、ＡＢＣ、１２３ など）を
 # [UNK] にしてしまう (issue #49622)。このモデルには tokenizer.json がないので、正規化の先頭に NFKC を足して元の spm.model の分割にそろえる
 tokenizer.backend_tokenizer.normalizer = normalizers.Sequence([normalizers.NFKC(), tokenizer.backend_tokenizer.normalizer])
 print(tokenizer.tokenize("Ｔシャツを着た２人の子ども（左）"))   # [UNK] が出ないことを確かめる
@@ -2309,8 +2318,8 @@ def encode(df):
 def train(df, init=MODEL, epochs=1, lr=3e-5):
     set_seed(0)
     model = AutoModelForSequenceClassification.from_pretrained(
-        # 重みが float16 で保存されていて (212 個中 210 個)、既定では float16 のまま読まれるので、float32 で読む
-        # (fp16 の混合精度の学習には float32 の重みが必要)
+        # 重みが float16 で保存されていて（212 個中 210 個）、既定では float16 のまま読まれるので、float32 で読む
+        #（fp16 の混合精度の学習には float32 の重みが必要）
         init, dtype=torch.float32, num_labels=3,
         id2label=dict(enumerate(LABELS)), label2id={l: i for i, l in enumerate(LABELS)})
     args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=lr, weight_decay=0.01,
@@ -2318,13 +2327,16 @@ def train(df, init=MODEL, epochs=1, lr=3e-5):
                              per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
                              logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
     trainer = Trainer(model=model, args=args, train_dataset=encode(df), data_collator=DataCollatorWithPadding(tokenizer))
+    # ログの水準を error にすると、進み具合のバーの代わりに PrinterCallback が付き、
+    # 学習の終わりに train_runtime などの辞書を print する。それを外す
+    trainer.remove_callback(PrinterCallback)
     trainer.train()
     return trainer
 
 EVAL = {"SNLI dev (英語)": snli_dev.sample(2000, random_state=0), "JSNLI dev (SNLI の翻訳)": jsnli_dev, "JNLI test (日本語)": jnli_test}
 EVAL_DS = {k: encode(d) for k, d in EVAL.items()}
 
-JNLI_PRED = {}   # 設定ごとの JNLI test の予測 (後でブートストラップと混同行列に使う)
+JNLI_PRED = {}   # 設定ごとの JNLI test の予測（後でブートストラップと混同行列に使う）
 
 def evaluate(trainer, setting=None):
     row, preds = {}, {}
@@ -2342,7 +2354,7 @@ print("JNLI test の多数派 (中立) を答え続けたときの正解率:", r
 ```
 
 ```python
-# 3 つの設定で学習して比べる (Colab の T4 で合計 6〜8 分の見込み)
+# 3 つの設定で学習して比べる（Colab の T4 で合計 6〜8 分の見込み）
 results = {}
 trainer_en = train(snli.sample(N_TRAIN, random_state=0))
 results["英語 (SNLI) で学習 = ゼロショット転移"] = evaluate(trainer_en, "zero-shot")
@@ -2358,24 +2370,24 @@ pd.DataFrame(results).T
 gold = np.array(EVAL_DS["JNLI test (日本語)"]["label"])
 c_zs, c_tt = [(JNLI_PRED[k] == gold).astype(float) for k in ["zero-shot", "translate-train"]]   # 正解なら 1
 rng = np.random.default_rng(0)
-idx = rng.integers(0, len(gold), (1000, len(gold)))   # 2 つの設定で同じ組を引き直す (対応のあるブートストラップ)
+idx = rng.integers(0, len(gold), (1000, len(gold)))   # 2 つの設定で同じ組を引き直す（対応のあるブートストラップ）
 lo, hi = np.percentile(c_zs[idx].mean(1), [2.5, 97.5])
 print(f"ゼロショット転移の JNLI 正解率 {c_zs.mean():.3f} (95% 信頼区間 {lo:.3f}〜{hi:.3f})")
 lo, hi = np.percentile((c_tt[idx] - c_zs[idx]).mean(1), [2.5, 97.5])
 print(f"translate-train − ゼロショット転移 = {c_tt.mean() - c_zs.mean():+.3f} (95% 信頼区間 {lo:+.3f}〜{hi:+.3f})")
 
-# どのラベルを取り違えているか (行が正解、列が予測)
+# どのラベルを取り違えているか（行が正解、列が予測）
 from sklearn.metrics import confusion_matrix
 print(pd.DataFrame(confusion_matrix(gold, JNLI_PRED["zero-shot"]), index=LABELS, columns=LABELS))
 ```
 
 ```python
-# few-shot: 英語で学習したモデルに、日本語の学習データを少しだけ足して続けて学習する (Colab の T4 で 2〜3 分の見込み)
+# few-shot: 英語で学習したモデルに、日本語の学習データを少しだけ足して続けて学習する（Colab の T4 で 2〜3 分の見込み）
 for k in [100, 1000]:
     few = jnli.sample(k, random_state=1)
     epochs = 10 if k == 100 else 3
     r_cont = evaluate(train(few, init="mdeberta-snli", epochs=epochs))     # 英語 → 日本語 k 件
-    r_only = evaluate(train(few, epochs=epochs))                         # 日本語 k 件だけ (英語なし)
+    r_only = evaluate(train(few, epochs=epochs))                         # 日本語 k 件だけ（英語なし）
     print(f"JNLI {k:4} 件: 英語で学習してから追加 → 正解率 {r_cont['JNLI test (日本語)']:.3f} / macro-F1 {r_cont['JNLI macro-F1']:.3f}"
           f"   日本語だけで学習 → 正解率 {r_only['JNLI test (日本語)']:.3f} / macro-F1 {r_only['JNLI macro-F1']:.3f}")
 ```
@@ -2781,11 +2793,11 @@ import pandas as pd
 from datasets import load_dataset
 from sklearn.model_selection import GroupShuffleSplit
 
-# chABSA (TIS 株式会社 / chakki-works、CC BY 4.0、https://github.com/chakki-works/chABSA-dataset) を第三者が Hugging Face に複製したもの。
-# README の配布 URL はリンク切れのため、複製の版を固定して使う (複製が削除されると読めなくなる)
+# chABSA（TIS 株式会社 / chakki-works、CC BY 4.0、https://github.com/chakki-works/chABSA-dataset）を第三者が Hugging Face に複製したもの。
+# README の配布 URL はリンク切れのため、複製の版を固定して使う（複製が削除されると読めなくなる）
 ds = load_dataset("zenless-lab/chABSA", revision="254de3bf9771bcafb40812cecd33e6cdb234bb49")
 sents = pd.concat([ds["train"].to_pandas(), ds["test"].to_pandas()], ignore_index=True)
-# 1 行 = (文, 観点の語, 極性)。from / to は文中の文字位置
+# 1 行 =（文, 観点の語, 極性）。from / to は文中の文字位置
 df = pd.DataFrame([{"company": s.document_id, "sid": i, "sentence": s.sentence, "target": o["text"],
                     "start": o["from"], "end": o["to"], "label": o["polarity"]}
                    for i, s in enumerate(sents.itertuples()) for o in s.opinions])
@@ -2811,7 +2823,7 @@ def report(name, pred):
     print(f"{name:24} 正解率 {accuracy_score(y, p):.3f}  macro-F1 {f1_score(y, p, average='macro'):.3f}"
           f"  | 対比の文での正解率 {accuracy_score(y[m], p[m]):.3f}")
 
-# (1) 文全体の感情分析 (この章の「日本語の感情分析 (ポジネガ判定) をする」と同じモデル) の結果を、文中のすべての観点に配る
+# (1) 文全体の感情分析（この章の「日本語の感情分析（ポジネガ判定）をする」と同じモデル）の結果を、文中のすべての観点に配る
 sent_clf = pipeline("text-classification", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student")
 uniq = test.drop_duplicates("sid")
 out = sent_clf(list(uniq["sentence"]), top_k=None, truncation=True, batch_size=32)
@@ -2819,11 +2831,11 @@ sent_pred = {sid: max((r for r in rs if r["label"] != "neutral"), key=lambda r: 
              for sid, rs in zip(uniq["sid"], out)}
 report("文全体の感情分析", test["sid"].map(sent_pred))
 
-# 文ごとに 1 つのラベルしか出せない方法の上限: 各文で多数派の極性を (正解を見て) 全観点に付けた場合
+# 文ごとに 1 つのラベルしか出せない方法の上限: 各文で多数派の極性を（正解を見て）全観点に付けた場合
 majority = test.groupby("sid")["label"].agg(lambda s: s.mode()[0])
 report("文単位の上限 (正解の多数派)", test["sid"].map(majority))
 
-# 観点の語と文だけを見る方法の上限: 同じ文の同じ位置の語に、カテゴリ違い (例: business#sales と business#profit) で逆の極性が付いた行がある
+# 観点の語と文だけを見る方法の上限: 同じ文の同じ位置の語に、カテゴリ違い（例: business#sales と business#profit）で逆の極性が付いた行がある
 span = test.groupby(["sid", "start", "end"])["label"]
 print("同じ語に逆の極性が付いた行:", int((span.transform("nunique") > 1).sum()))
 report("語と文だけで判定する上限", span.transform(lambda s: s.mode()[0]))
@@ -2855,8 +2867,8 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding, Trainer, TrainingArguments, set_seed
 
-# (3) 「観点の語」と「観点に印を付けた文」を文ペアにして BERT を微調整する (T4 で 5 分程度)
-name = "tohoku-nlp/bert-base-japanese-v3"   # この章の「BERT をファインチューニングして文書分類する」と同じモデル (Apache 2.0)
+# (3) 「観点の語」と「観点に印を付けた文」を文ペアにして BERT を微調整する（T4 で 5 分程度）
+name = "tohoku-nlp/bert-base-japanese-v3"   # この章の「BERT をファインチューニングして文書分類する (Trainer)」と同じモデル (Apache 2.0)
 tok = AutoTokenizer.from_pretrained(name)
 
 def to_dataset(d):
@@ -2895,10 +2907,10 @@ print("文全体の感情分析:", sent_clf("国内の販売は低調だった�
 
 - 文全体の感情分析は 1 つの文に 1 つのラベルしか出せない。評価の 1,449 観点のうち 522 は対比の文（ポジとネガが同居）にあり、正解を見て文ごとに多数派を選んでも、対比の文の正解率は 0.625 が上限になる。
 - 同じデータで学習した TF-IDF でも、文全体が入力だと対比の文は 0.569 だが、観点の後ろの区間だけにすると 0.822 に上がる。入力に「どの観点か」を含めることが重要である。
-- 文ペア（観点, 観点に【】で印を付けた文）で BERT を微調整すると、全体 0.967、対比の文 0.937 になった。1 回の実行の値で、種を固定しても GPU の計算は完全には再現しない（set_seed を入れる前を含む検証の 3 回の実行では、全体で 0.967〜0.971 だった）。評価件数から見た 95% 区間はおよそ全体 ±0.009、対比の文 ±0.02 で、手法どうしの差はこれよりずっと大きい。
+- 文ペア（観点, 観点に【】で印を付けた文）で BERT を微調整すると、全体 0.968、対比の文 0.935 になった。1 回の実行の値で、種を固定しても GPU の計算は完全には再現しない（set_seed を入れる前を含む検証の 3 回の実行では、全体で 0.967〜0.971 だった）。評価件数から見た 95% 区間はおよそ全体 ±0.009、対比の文 ±0.02 で、手法どうしの差はこれよりずっと大きい。
 - 同じ文の同じ語に、カテゴリ違い（例: 「運輸業」の business#sales はポジ、business#profit はネガ）で逆の極性が付いた行が評価に 34 ある。語と文だけを入力にする方法では、正解率は全体 0.988、対比の文 0.967 が上限になる。カテゴリも区別したいなら、カテゴリを入力に加える。
 - 新しい決算の文 2 つ（観点 5 つ）では期待どおりに判定した（正解ラベルのない例）。学習データは有価証券報告書だけなので、分野外の文は当てにならない。検証では「料理は美味しいが接客が悪い」の「料理」の判定が、同じコードの実行ごとにポジとネガで変わった。
-- 数値は A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 4.7 GB だった。(1) と (2) は CPU だけで動く。この章の「ラベル付きデータなしで分類する（ゼロショット分類、NLI）」で「売上高は好調だ」という仮説の含意を判定させたり、LLM に観点ごとの極性を JSON で答えさせたりする方法もある。
+- 数値は検証の GPU で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 4.7 GB だった。(1) と (2) は CPU だけで動く。この章の「ラベル付きデータなしで分類する（ゼロショット分類、NLI）」で「売上高は好調だ」という仮説の含意を判定させたり、LLM に観点ごとの極性を JSON で答えさせたりする方法もある。
 - chABSA は TIS の久保・中山によるデータセットで、2016 年度の有価証券報告書 230 社分の「経営成績の概要」のうち、観点の付いた 3,215 文（全 6,119 文のうち）に観点の語、カテゴリ（company#sales など）、極性を付けたもの（CC BY 4.0、https://github.com/chakki-works/chABSA-dataset）。ここでは Hugging Face 上の第三者による複製を使った（文数・観点数は論文と一致する。複製にはライセンスの記載がないので、元データの CC BY 4.0 に従う）。
 - 観点の語は与えられている前提で、極性だけを判定した。文から観点の語を見つけるのは系列ラベリングの問題になる（固有表現抽出の章の「文字位置のアノテーションを BIO タグ列に変換する」「BERT をファインチューニングして日本語の固有表現抽出器を作る」）。
 

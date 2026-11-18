@@ -623,18 +623,21 @@ print(list(t.tokenize(text, wakati=True)))
 単語の区切りと品詞に加えて、「りんご/林檎/リンゴ」をまとめる代表表記や、「人」「場所」のような意味カテゴリも欲しい。京都大学の研究室が開発した、RNN 言語モデルで単語列のもっともらしさを評価する形態素解析器 Juman++ を使う。
 
 ```python
-# ダウンロード (約 300MB)・展開・ビルドで、Colab (2 コア) では 10 分ほどかかる見込み
+# ダウンロード（約 300MB）・展開・ビルドで、Colab（2 コア）では 10 分ほどかかる見込み
 !wget -q https://github.com/ku-nlp/jumanpp/releases/download/v2.0.0-rc4/jumanpp-2.0.0-rc4.tar.xz
 !tar xf jumanpp-2.0.0-rc4.tar.xz
-!cd jumanpp-2.0.0-rc4 && mkdir -p bld && cd bld && cmake .. -DCMAKE_BUILD_TYPE=Release -DJPP_ENABLE_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local > /dev/null && make install -j2 > /dev/null 2>&1
-!pip install -q rhoknp fugashi unidic-lite
+!cd jumanpp-2.0.0-rc4 && mkdir -p bld && cd bld && cmake .. -DCMAKE_BUILD_TYPE=Release -DJPP_ENABLE_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local > /dev/null 2>&1 && make install -j2 > /dev/null 2>&1
 !jumanpp --version
+```
+
+```python
+!pip install -q rhoknp==1.8.2 fugashi unidic-lite
 ```
 
 ```python
 import subprocess
 
-# 生の出力 (JUMAN 形式): 表層形 読み 原形 品詞 品詞ID 細分類 ID 活用型 ID 活用形 ID 意味情報
+# 生の出力（JUMAN 形式）: 表層形 読み 原形 品詞 品詞ID 細分類 ID 活用型 ID 活用形 ID 意味情報
 r = subprocess.run(["jumanpp"], input="外国人参政権について話し合った。\n", capture_output=True, text=True)
 print(r.stdout)
 ```
@@ -642,7 +645,7 @@ print(r.stdout)
 ```python
 from rhoknp import Jumanpp
 
-# skip_sanity_check=True: 起動時の確認 (空の文を送る) を省く (下の注意書きを参照)
+# skip_sanity_check=True: 起動時の確認（空の文を送る）を省く（下の注意書きを参照）
 # 別の場所に入れたときは Jumanpp("/path/to/bin/jumanpp", skip_sanity_check=True)。options=["--beam", "10"] でオプションも渡せる
 jumanpp = Jumanpp(skip_sanity_check=True)
 
@@ -656,14 +659,14 @@ print()
 analyze("スマホでググった。", keys=None)   # 意味情報をすべて表示
 print()
 
-# 生の出力の @ 行 (同形異義語) は homographs に入る
+# 生の出力の @ 行（同形異義語）は homographs に入る
 for m in jumanpp.apply_to_sentence("外国人参政権について話し合った。").morphemes:
     if m.homographs:
         print(m.text, m.canon, [h.canon for h in m.homographs])
 ```
 
 ```python
-# 代表表記 (canon) で表記ゆれをまとめる。代表表記がない語 (自動獲得語など) は canon が None なので表層形で代用する
+# 代表表記 (canon) で表記ゆれをまとめる。代表表記がない語（自動獲得語など）は canon が None なので表層形で代用する
 from collections import Counter
 
 texts = ["りんごを食べた。", "林檎を食べた。", "リンゴを食べた。", "子どもと子供とこどもが遊ぶ。"]
@@ -678,7 +681,7 @@ print("代表表記:", canon.most_common())
 ```
 
 ```python
-# MeCab + UniDic (fugashi) と、分割と品詞を比べる (例文は「解析器・辞書による分割の違いを比べる」と同じ)
+# MeCab + UniDic (fugashi) と、分割と品詞を比べる（例文はこの章の「解析器・辞書による分割の違いを比べる」と同じ）
 from fugashi import Tagger
 
 unidic = Tagger()
@@ -701,8 +704,11 @@ for s in ["外国人参政権について話し合った。", "東京都立大�
 
 ```python
 !pip install -q kytea fugashi unidic-lite
-# 学習済みの日本語モデル (gzip で約 38MB、展開後 約 120MB) はソースのリポジトリに同梱されている。pip のパッケージには含まれない
-!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz && ls -lh model.bin
+```
+
+```python
+# 学習済みの日本語モデル（gzip で約 38MB、展開後 約 120MB）はソースのリポジトリに同梱されている。pip のパッケージには含まれない
+!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz && du -h model.bin
 ```
 
 ```python
@@ -713,7 +719,7 @@ s = "太郎は図書館で借りた本を花子に渡した。"
 print(" ".join(kytea.getWS(s)))      # 単語分割だけ
 print(kytea.getTagsToString(s))      # 単語/品詞/読み
 
-# getTags は単語ごとに [品詞の候補, 読みの候補] を返す (各候補は (タグ, スコア))
+# getTags は単語ごとに [品詞の候補, 読みの候補] を返す（各候補は (タグ, スコア)）
 for w in kytea.getTags(s):
     (pos, pos_score), = w.tag[0]
     (yomi, yomi_score), = w.tag[1]
@@ -721,13 +727,13 @@ for w in kytea.getTags(s):
 ```
 
 ```python
-# getAllTags は 2 位以下の候補とスコアも返す (-tagmax で候補数を変えられる。既定は 3)。読みは文脈で変わる
+# getAllTags は 2 位以下の候補とスコアも返す（-tagmax で候補数を変えられる。既定は 3）。読みは文脈で変わる
 for s in ["日本語の本を今日読んだ。", "今日は日本語の本を読んだ。"]:
     for w in kytea.getAllTags(s):
         if w.surface == "日本":
             print(s, "日本 の読みの候補:", [(t, round(sc, 2)) for t, sc in w.tag[1]])
 
-# -notags は分割だけ、-notag 1 は 1 番目のタグ (品詞) を推定せず読みだけを付ける
+# -notags は分割だけ、-notag 1 は 1 番目のタグ（品詞）を推定せず読みだけを付ける
 print(Mykytea.Mykytea("-model model.bin -notags").getTagsToString("日本語の本を今日読んだ。"))
 print(Mykytea.Mykytea("-model model.bin -notag 1").getTagsToString("日本語の本を今日読んだ。"))
 ```
@@ -743,15 +749,15 @@ for s in ["食べさせられたくなかった。", "大規模言語モデル�
 ```
 
 ```python
-# UniDic (unidic-lite) で未知語になったり細かく分かれたりする語を含む文 (最後の文は「辞書にない未知語を見つける」と同じ)。
-# UniDic は未知語に読みを付けられないが、KyTea は自分の辞書にない語 (「鬼滅」「ジーピーティー」) も文字の並びから区切りと読みを推定する
+# UniDic (unidic-lite) で未知語になったり細かく分かれたりする語を含む文（最後の文はこの章の「辞書にない未知語を見つける」と同じ）。
+# UniDic は未知語に読みを付けられないが、KyTea は自分の辞書にない語（「鬼滅」「ジーピーティー」）も文字の並びから区切りと読みを推定する
 for s in ["鬼滅の刃の竈門炭治郎が好きだ。", "チャットジーピーティーに聞いた。", "彼はスマホをポチポチいじっていた。", "推し活でエモい写真をインスタにあげた。"]:
     print("KyTea  :", kytea.getTagsToString(s))
     print("UniDic :", " ".join(f"{w.surface}/{'(未知語)' if w.is_unk else w.feature.kana or w.surface}" for w in tagger(s)))
 ```
 
 ```python
-# 速度の比較 (10,000 文)
+# 速度の比較（10,000 文）
 import time
 
 texts = ["国境の長いトンネルを抜けると雪国であった。", "自然言語処理の小ネタを集めたクックブックを作りたい。"] * 5000
@@ -777,6 +783,9 @@ for name, f in [("KyTea (分割のみ)", Mykytea.Mykytea("-model model.bin -nota
 
 ```python
 !pip install -q kytea==0.2.0 conllu==6.1.1
+```
+
+```python
 # pip の kytea には学習ツールが入っていないので、KyTea 0.4.7 のリリース（約 39MB。学習済みの日本語モデルも入っている）をビルドする。
 # リリースは configure 済みなので autoreconf も apt-get も要らない。--disable-shared で静的にリンクし、make install せずに使う。
 # Colab（2 コア）では、ダウンロードとビルドで 3 分ほどの見込み
@@ -794,7 +803,7 @@ from conllu import parse
 
 TRAIN = "kytea-0.4.7/src/bin/train-kytea"
 
-# UD Japanese-GSD (CC BY-SA 4.0、https://github.com/UniversalDependencies/UD_Japanese-GSD)。人手で短単位に分割されている
+# UD Japanese-GSD（CC BY-SA 4.0、https://github.com/UniversalDependencies/UD_Japanese-GSD）。人手で短単位に分割されている
 # 数値を再現できるように、リリース r2.19 のタグに固定する（master は UD のリリースごとに変わる）
 base = "https://raw.githubusercontent.com/UniversalDependencies/UD_Japanese-GSD/r2.19/ja_gsd-ud-"
 def load(split):
@@ -1259,6 +1268,9 @@ df
 
 ```python
 !pip install -q fugashi unidic-lite
+```
+
+```python
 !wget -q https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-chuko-v202512.zip && unzip -q -o unidic-chuko-v202512.zip -d chuko
 !find chuko -name "dicrc" | head -n 1
 ```
@@ -1268,7 +1280,7 @@ import glob, os
 from fugashi import GenericTagger, Tagger
 
 dicdir = os.path.dirname(glob.glob("chuko/**/dicrc", recursive=True)[0])
-classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic (平安時代の仮名文学向け)
+classical = GenericTagger(f'-d "{dicdir}" -r "{dicdir}/dicrc"')      # 中古和文 UniDic（平安時代の仮名文学向け）
 modern = Tagger()                                                    # 現代語の UniDic (unidic-lite)
 
 text = "いづれの御時にか、女御、更衣あまたさぶらひたまひけるなかに、いとやむごとなき際にはあらぬが、すぐれて時めきたまふありけり。"
@@ -1277,7 +1289,7 @@ print("現代語 UniDic :", " | ".join(w.surface for w in modern(text)))
 ```
 
 ```python
-# 素性の並びを確認する (UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...)
+# 素性の並びを確認する（UniDic 共通の形式: 品詞 4 階層, 活用型, 活用形, 語彙素読み, 語彙素, ...）
 for w in classical("春はあけぼの。やうやう白くなりゆく山ぎは、少し明かりて、紫だちたる雲の細くたなびきたる。"):
     f = w.feature
     print(f"{w.surface}\t{f[0]}-{f[1]}\t{f[4]}\t{f[5]}\t語彙素: {f[7]} ({f[6]})")
@@ -1300,7 +1312,7 @@ s = "いづれの御時にか、女御、更衣あまたさぶらひたまひけ
 a, b = [w.surface for w in classical(s)], [w.surface for w in modern(s)]
 print("中古和文:", a); print("現代語  :", b)
 print("一致する単語の割合:", round(difflib.SequenceMatcher(None, a, b).ratio(), 2))
-# 区切りが同じでも、品詞や語彙素の判定が違うことがある (伝聞の「なる」を、現代語の辞書は断定の「なり」とする)
+# 区切りが同じでも、品詞や語彙素の判定が違うことがある（伝聞の「なる」を、現代語の辞書は断定の「なり」とする）
 s2 = "男もすなる日記といふものを"
 print("中古和文:", [(w.surface, w.feature[7]) for w in classical(s2)][:5])
 print("現代語  :", [(w.surface, w.feature.lemma) for w in modern(s2)][:5])

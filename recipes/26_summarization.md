@@ -185,10 +185,10 @@ from huggingface_hub import hf_hub_download
 from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。GPU (T4 など) で 1 要約あたり数秒〜10 秒ほど (VRAM 約 7GB)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。GPU（T4 など）で 1 要約あたり数秒〜10 秒ほど（VRAM 約 7GB）
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデル (LLM) の章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -379,8 +379,8 @@ def aozora(url):
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -393,7 +393,7 @@ def chat(prompt, max_new_tokens=160):
         out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
     return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
 
-text = aozora("https://www.aozora.gr.jp/cards/000035/files/1567_ruby_4948.zip")   # 走れメロス (約 1 万字)
+text = aozora("https://www.aozora.gr.jp/cards/000035/files/1567_ruby_4948.zip")   # 走れメロス（約 1 万字）
 sents = [s.strip() for s in re.split(r"(?<=[。！？」])(?![」。！？])|\n+", text) if s and s.strip()]
 
 def make_chunks(sents, max_chars=2500):
@@ -426,7 +426,7 @@ print(final)
 
 - 「分割して要約 → 要約を要約」は map-reduce 型と呼ばれる。分割ごとの処理は独立なので、並列化もできる。
 - 部分要約の段階で落とした情報は、最終要約には戻らない。固有名詞や数値を残すよう、部分要約のプロンプトで指示する。
-- 3B クラスのモデルでは、部分要約に話の取り違えや人名の誤りが混ざることがある（上の出力でも、短刀を持って王城に入り捕らえられたメロスが「王に短刀を差し出した」ことになり、最終要約では「短刀を差し出して抵抗する」に変わっている。妹の結婚式を翌日に繰り上げる場面は、部分要約の段階で「延期」と取り違え、最終要約にもそのまま残った）。誤りは最終要約にそのまま引き継がれるので、重要な用途ではより大きなモデルを使うか、次項の検査と組み合わせる。
+- 3B クラスのモデルでは、部分要約に話の取り違えや人名の誤りが混ざることがある（上の出力でも、短刀を持って王城に入り捕らえられたメロスが「王に短刀を差し出した」ことになり、最終要約では「短刀を差し出して抵抗する」に変わっている。妹の結婚式を翌日に繰り上げる場面は、部分要約の段階で「延期」と取り違え、最終要約にもそのまま残った）。誤りは最終要約にそのまま引き継がれるので、重要な用途ではより大きなモデルを使うか、この章の「要約が原文と食い違っていないか検査する」と組み合わせる。
 - 前の部分の要約を次の部分の入力に加えていく方法（逐次的な洗練）だと、話のつながりは保ちやすいが、並列化はできず、誤りが後ろに伝わる。
 - 長い入力をそのまま読めるモデルでも、文書が長くなるほど中ほどの内容を見落としやすい。分割は今でも有効な方法。
 
@@ -740,7 +740,7 @@ with torch.no_grad():
 - 割合には件数と信頼区間を添える。接客の肯定率 0.46 は 95% 区間が 0.35〜0.58 で 0.5 をまたぐので、「否定が多い」ではなく「賛否が分かれる」と書くのが正しい。口コミが数十件しかない店や商品では、区間はさらに広がる。
 - 要約の検査は、割合の表現と評価の語を正規表現で読み取る簡単なもので、「約 40% の口コミでは部屋が狭く」のような書き方は読み取れない（表の NaN）。この章の「要約が原文と食い違っていないか検査する」の NLI は、4 組のうち 3 組（「賛否が分かれる」は含意、「不満が多い」は矛盾、「改善の余地があると感じる宿泊客もいる」は中立）は妥当に判定したが、「ほぼ半々」から「肯定的な意見が多い」を含意 0.98 と判定し、この例では割合の言い違いを見分けられなかった。割合の主張は、数えた結果と突き合わせて確かめる。
 - 段階的な方法は、この章の「長い文書を分割して要約する」の map-reduce と同じ形だが、まとめる段階を LLM ではなくコードの集計にしている。部分要約を LLM にまとめさせると件数の情報が失われるので、割合を伝える要約では、数える部分をコードに任せる。
-- 正解の割合がわかるように、口コミはこのレシピのために作った（テキスト分類の章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」の chABSA は有価証券報告書の文なので使っていない）。実際の口コミでは、楽天トラベルのレビューや、その約 7 万文に 7 項目の観点と極性を付けたコーパスがあるが、国立情報学研究所の IDR を通じて、国内の大学と公的研究機関の研究者に学術研究の目的に限って提供されている。Amazon の多言語レビューコーパス (MARC) は配布が終了し、ライセンスも非商用の学術研究に限られていた。モデルは sarashina2.2-3b-instruct（SB Intuitions、MIT ライセンス）と mDeBERTa-v3-base-mnli-xnli（MIT ライセンス）。数値は A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 8.9 GB だった。トークナイザーの修正については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+- 正解の割合がわかるように、口コミはこのレシピのために作った（テキスト分類の章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」の chABSA は有価証券報告書の文なので使っていない）。実際の口コミでは、楽天トラベルのレビューや、その約 7 万文に 7 項目の観点と極性を付けたコーパスがあるが、国立情報学研究所の IDR を通じて、国内の大学と公的研究機関の研究者に学術研究の目的に限って提供されている。Amazon の多言語レビューコーパス (MARC) は配布が終了し、ライセンスも非商用の学術研究に限られていた。モデルは sarashina2.2-3b-instruct（SB Intuitions、MIT ライセンス）と mDeBERTa-v3-base-mnli-xnli（MIT ライセンス）。数値は 検証の GPU で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 8.9 GB だった。トークナイザーの修正については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
 ## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
 
@@ -1014,7 +1014,7 @@ for (who, u), b in zip(meeting, hyp):
 import re
 import unicodedata
 
-# 架空の会議の書き起こし (このレシピのために作ったもの)。実際には文字起こしの結果を (話者, 発言) の列にして使う
+# 架空の会議の書き起こし（このレシピのために作ったもの）。実際には文字起こしの結果を（話者, 発言）の列にして使う
 transcript = [
     ("田中", "それでは、学習アプリ「まなぶん」のリリース準備会議を始めます。今日は、リリース日、対応する端末、料金、残っている作業の分担を決めたいと思います。"),
     ("佐藤", "開発の状況から報告します。主な機能はほぼできていますが、パスワードを再設定するとまれにログインできなくなる不具合が残っています。"),
@@ -1082,10 +1082,10 @@ from pydantic import BaseModel, ValidationError, field_validator
 from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル (MIT ライセンス)。VRAM 約 7GB
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル（MIT ライセンス）。VRAM 約 7GB
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (大規模言語モデルの章の「オープンな LLM とチャットする (チャットテンプレート)」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -1140,7 +1140,7 @@ def extract_json(text):
     return obj
 
 def extract(chunk, max_retries=2):
-    """(抜き出した結果, 出し直した回数) を返す。出し直しを使い切っても検証を通らなければ (None, 回数) を返す"""
+    """（抜き出した結果, 出し直した回数）を返す。出し直しを使い切っても検証を通らなければ（None, 回数）を返す"""
     messages = [{"role": "user", "content": f"{INSTRUCTION}\n\n{EXAMPLE_IN}"}, {"role": "assistant", "content": EXAMPLE_OUT},
                 {"role": "user", "content": f"{INSTRUCTION}\n\n" + "\n".join(chunk)}]
     for retry in range(max_retries + 1):
@@ -1151,7 +1151,7 @@ def extract(chunk, max_retries=2):
             messages += [{"role": "assistant", "content": out}, {"role": "user", "content": f"出力が不正です: {str(e)[:200]}\n例と同じ形の JSON だけを出力し直してください。"}]
     return None, max_retries
 
-# 1. 分割ごとに抜き出す (map)。T4 なら、モデルのダウンロード (約 7GB) を除いて数分ほど
+# 1. 分割ごとに抜き出す (map)。T4 なら、モデルのダウンロード（約 7GB）を除いて数分ほど
 parts = []
 for k, chunk in enumerate(chunks, 1):
     m, retry = extract(chunk)
@@ -1194,7 +1194,7 @@ def check_todo(todo):
             problems.append("期限が根拠の発言にない")
     return problems
 
-# 検査が働くことを、わざと作った誤り (書き起こしにない期限、参加者でない担当者) で確かめる
+# 検査が働くことを、わざと作った誤り（書き起こしにない期限、参加者でない担当者）で確かめる
 fakes = [Todo(task="プレスリリースの文案を書く", owner="高橋", due="12 月 1 日", evidence=[30, 31]),
          Todo(task="法務に確認する", owner="山本", due="11 月 30 日", evidence=[35])]
 for t in fakes:
@@ -1206,11 +1206,11 @@ pd.DataFrame(rows)
 ```
 
 ```python
-# 4. 書き起こしを作った人 (ここではレシピの作者) が付けた正解と比べる。task に含まれる語で対応を取る
+# 4. 書き起こしを作った人（ここではレシピの作者）が付けた正解と比べる。task に含まれる語で対応を取る
 gold = [("不具合|パスワード", "佐藤", "11月28日"), ("テスト計画", "伊藤", "11月27日"), ("説明", "高橋", None), ("料金表", "高橋", None),
         ("アイコン", "鈴木", "来週の月曜"), ("法務|個人情報", "佐藤", "11月30日"), ("プレスリリース", None, None)]
 def same_due(a, b):
-    """期限が同じか。どちらも None なら同じ。文字列が同じか、含まれる数字の並びが同じ (「11/27」と「11月27日」) なら同じとみなす"""
+    """期限が同じか。どちらも None なら同じ。文字列が同じか、含まれる数字の並びが同じ（「11/27」と「11月27日」）なら同じとみなす"""
     if a is None or b is None:
         return a is None and b is None
     nums_a, nums_b = re.findall(r"\d+", norm(a)), re.findall(r"\d+", norm(b))
@@ -1265,7 +1265,7 @@ import re
 import unicodedata
 import pandas as pd
 
-# 説明のために作った架空の規約 (実在のサービスの規約ではない)。新版は条番号を全角で書いてある
+# 説明のために作った架空の規約（実在のサービスの規約ではない）。新版は条番号を全角で書いてある
 OLD = """サンプル会員サービス利用規約 (2025 年 4 月 1 日版)
 第1条（適用）
 本規約は、当社が提供するサンプル会員サービス（以下「本サービス」といいます。）の利用に関する条件を定めるものです。
@@ -1351,13 +1351,13 @@ def view(a):
 
 E_old = emb_model.encode(["query: " + view(a) for a in old], normalize_embeddings=True)
 E_new = emb_model.encode(["query: " + view(a) for a in new], normalize_embeddings=True)
-emb_sim = E_old @ E_new.T                       # 意味の近さ (言い換えや見出しの変更に強い)
+emb_sim = E_old @ E_new.T                       # 意味の近さ（言い換えや見出しの変更に強い）
 char_sim = np.array([[difflib.SequenceMatcher(None, view(a), view(b), autojunk=False).ratio() for b in new] for a in old])   # 文字列の重なり
 score = (emb_sim + char_sim) / 2
 
-# 割当問題として解き、スコアの合計が最大になる 1 対 1 の組を選ぶ (ハンガリアン法などで解ける問題)
+# 割当問題として解き、スコアの合計が最大になる 1 対 1 の組を選ぶ（ハンガリアン法などで解ける問題）
 rows, cols = linear_sum_assignment(-score)
-THRESHOLD = 0.75                                # これより低い組は対応なし (削除と新設) とみなす
+THRESHOLD = 0.75                                # これより低い組は対応なし（削除と新設）とみなす
 pairs = [(i, j) for i, j in zip(rows, cols) if score[i, j] >= THRESHOLD]
 # 対応した組と、それ以外の組の類似度の差を、3 つの尺度で比べる
 is_pair = np.zeros_like(score, dtype=bool)
@@ -1376,7 +1376,7 @@ tagger = Tagger()
 o2n = {old[i]["no"]: new[j]["no"] for i, j in pairs}
 
 def remap_refs(s):
-    """旧版の「第N条」を、対応する新版の条番号に読み替える (番号の繰り下げだけによる差分を消す)"""
+    """旧版の「第N条」を、対応する新版の条番号に読み替える（番号の繰り下げだけによる差分を消す）"""
     return re.sub(r"第(\d+)条", lambda m: f"第{o2n.get(int(m.group(1)), m.group(1))}条", s)
 
 def word_diff(a, b):
@@ -1437,10 +1437,10 @@ from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 torch.manual_seed(0)
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # SB Intuitions、MIT ライセンス。初回はダウンロード (約 6.4GB) を含めて数分。VRAM 約 7GB
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # SB Intuitions、MIT ライセンス。初回はダウンロード（約 6.4GB）を含めて数分。VRAM 約 7GB
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -1463,7 +1463,7 @@ def summarize_change(r):
                 f"旧版: {r['old_text']}\n新版: {r['new_text']}\n差分: {r['差分']}\n語句の変化: {r['要注意の語句'] or 'なし'}")
 
 changed = report[report["区分"] != "変更なし"].copy()
-changed["要点"] = [summarize_change(r) for _, r in changed.iterrows()]   # 6 条の生成はモデルの読み込みと合わせて A5000 で約 10 秒 (キャッシュ済み)。T4 ではこれより遅い
+changed["要点"] = [summarize_change(r) for _, r in changed.iterrows()]   # 6 条ぶんの生成。モデルの読み込みと合わせて、検証の GPU で約 15 秒（ダウンロード済みのとき）。T4 ではその 2〜3 倍が目安
 
 def no(x):
     return "-" if pd.isna(x) else x
@@ -1521,8 +1521,8 @@ df = df[df["label"].isin(["topic-news", "sports-watch"])].sample(12, random_stat
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)

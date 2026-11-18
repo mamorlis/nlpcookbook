@@ -400,7 +400,7 @@ df = pd.DataFrame({"質問": [q for _, q, _ in items], "正解": golds, "VLM": p
 df[~df["一致(正規化2)"]]   # 一致しなかったものを見る: 本当の誤りと、言い換え・表記ゆれが混ざっている
 ```
 
-- 以下の数値と出力は、A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもの。VLM の大まかな構成は「画像エンコーダ (ViT) → 射影 → LLM」で、画像を 16×16 画素のパッチに切って ViT で特徴にし、2×2 のパッチをまとめて射影（上の `merger`）で LLM の埋め込み（2560 次元）に写す。これは簡略化した説明で、Qwen3-VL は ViT の最終層だけでなく複数の層の特徴を使う（DeepStack、モデルカードによる）。パラメータは画像エンコーダ 0.42B、LLM 4.02B である。
+- 以下の数値と出力は、検証の GPU で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもの。VLM の大まかな構成は「画像エンコーダ (ViT) → 射影 → LLM」で、画像を 16×16 画素のパッチに切って ViT で特徴にし、2×2 のパッチをまとめて射影（上の `merger`）で LLM の埋め込み（2560 次元）に写す。これは簡略化した説明で、Qwen3-VL は ViT の最終層だけでなく複数の層の特徴を使う（DeepStack、モデルカードによる）。パラメータは画像エンコーダ 0.42B、LLM 4.02B である。
 - 呼び方はテキストの LLM（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」）とほぼ同じで、`content` を `{"type": "image"}` と `{"type": "text"}` のリストにするだけである。テンプレートの文字列では画像は `<|image_pad|>` 1 個だが、トークン化すると画像のトークン数だけ並ぶ。500×375 画素の料理の画像は 24×32 のパッチで 192 トークンになり、入力 207 トークンのほとんどを占めた。
 - 画像のトークン数はおよそ「画素数 ÷ (32×32)」で、`processor_kwargs={"size": {"shortest_edge": 最小画素数, "longest_edge": 最大画素数}}` で範囲を決める（以前の版の `min_pixels` / `max_pixels` に当たる）。3072×4080 の駅名標は既定の上限のままだと 12288 トークンになり、上の実行では 1 回の質問に 13.3 秒、最大メモリ 12.6GB だった。上限 1024 トークン（972 トークン）では 1.6 秒、9.2GB で同じ駅名を答えた。T4 では数倍かかる見込みである（未測定）。減らしすぎると、54 トークンでは隣の駅を「東寺公園」と作り、逆に 4015 トークンでは「浜」を簡体字の「滨」と書いた。トークン数を増やせば必ず良くなるわけではない。
 - 説明文は「一文で」（40 文字）と「詳しく」（400 トークンの上限で途中で打ち切られた）で長さが大きく違い、「詳しく」では「おそらくピーナッツまたはホワイトビーン」のような推測が増える。説明文では左下の器を「人参」と書いたのに、「人参は何本ありますか」には「0」と答えた。同じ画像でも聞き方で答えが食い違う。
@@ -802,7 +802,7 @@ for k, img in demo.items():
 
 - 表の値は、条件ごとに 1 枚ずつ計算した CER の平均。評価指標と統計的検定の章の「音声認識や OCR の誤り率 (WER / CER) を計算する」のように jiwer に文の一覧をまとめて渡すと、全体の文字数で割った CER になり、値が少し違う。1 条件は 3 枚（約 70 字）しかないので、1 字の誤りで CER が約 0.014 動く（基準の 0.008 と低解像度の 0.016 の差は 1 字ぶん）。小さな差で手法の優劣を決めない。
 - 正規化の影響: Tesseract は縦書きで字の間に空白を入れ、括弧を半角にする。manga-ocr はライブラリの後処理で空白を除き、英数字を全角にする。Qwen3-VL も「A I」のように空白を入れる。正規化しないと平均 CER は Tesseract 0.397、manga-ocr 0.253、Qwen3-VL 0.037 で、NFKC と空白の除去をすると 0.280、0.190、0.019 になった。ここでは記号の誤りも見たいので句読点は残した。正規化の方針で値が変わるので、そろえて明記する。
-- 従来型の OCR は、レイアウト解析（ブロックや行を見つける。`--psm` で指定する）と、行ごとの文字認識（Tesseract 4 以降は LSTM）を順に行う。内部で二値化（大津の方法）してから文字を探すので（公式ドキュメント「Improving the quality of the output」）、背景の模様（縞を N や S と読んだ）やノイズ（空の出力）で読めなくなり、小さい文字や傾きでも誤りが増えた。VLM は画像全体を見て、読み順も含めて文字列を生成する。そのぶん重く、1 枚あたり Tesseract は 0.18 秒 (CPU)、Qwen3-VL は 1.17 秒 (GPU) かかった（検証に使った 32 コアの CPU と RTX A5000 での値で、実行ごとに 2〜3 割変わる。Colab の T4 では確かめていない）。
+- 従来型の OCR は、レイアウト解析（ブロックや行を見つける。`--psm` で指定する）と、行ごとの文字認識（Tesseract 4 以降は LSTM）を順に行う。内部で二値化（大津の方法）してから文字を探すので（公式ドキュメント「Improving the quality of the output」）、背景の模様（縞を N や S と読んだ）やノイズ（空の出力）で読めなくなり、小さい文字や傾きでも誤りが増えた。VLM は画像全体を見て、読み順も含めて文字列を生成する。そのぶん重く、1 枚あたり Tesseract は 0.18 秒 (CPU)、Qwen3-VL は 1.17 秒 (GPU) かかった（検証に使った 32 コアの CPU と GPU での値で、実行ごとに 2〜3 割変わる。Colab の T4 では確かめていない）。
 - 誤りの種類（上の出力より）。似た字形: Tesseract は「ＡＩ」の I を T やエと読み、堂→登、意→斉と取り違えた。Qwen3-VL は意味のない並びの「力カ二ニ夕タ卜ト八ハ」で、漢字の力・二・夕・卜・八をカタカナにした（口ロ工エは区別できた）。記号: Tesseract は ¥ をバックスラッシュ (`\`) に、「9.5%」を「9.59%」に、「3,980」を「3,.980」や「3980」にした。異体字: 髙→高、﨑→崎は Tesseract と Qwen3-VL の両方が常用の字形に置き換えた（鷗は Qwen3-VL だけが正しく、Tesseract は「暗」）。NFKC の正規化では、これらは同じ字にならない。
 - 縦書きは、Tesseract では縦書き用のモデル `jpn_vert` と `--psm 5` を指定すると読み順も正しく読めた。横書きのモデル `jpn` で読むと、2 列を横に並べて読んでしまう（「営 ク / 業 ツ ...」）。manga-ocr と Qwen3-VL は、指定しなくても縦書きを右の列から読んだ。
 - VLM は、書かれていない文字をもっともらしく直すことがある。誤字の「ごさいました」を「ございました」に、「シュミレーション」を「シミュレーション」に直して出力した（Tesseract は書かれたとおり。manga-ocr も「ございました」に直した）。一方、「からから」の重複や、消した「回」は補わなかったので、いつ直すかは予測しにくい。誤字の検出や史料の翻刻のように、書かれたとおりに読みたい用途では、この書き換えが誤りになる。manga-ocr（kha-white/manga-ocr-base、Apache-2.0）は漫画の吹き出しを主な対象とするモデル。入力を 224×224 に縮小する (preprocessor_config) ので、横に長い 2 行の画像は不利だと考えられ、「人工知能」を「人工知識」と読むような、もっともらしい別の語を出す誤りが目立った。
@@ -978,7 +978,7 @@ for dpi in [50, 72, 100, 150, 200]:
 - 値を書き込んでいない折れ線グラフは、テキストには軸の目盛りしか残らない。テキストだけでは 2020 年度の一般書も 2023 年度の児童書も「300」と答えた（正解は 560、520）。画像を渡すと 550 と 520（bfloat16 では 570 と 520）になった。グラフ全体を表にさせると、15 個の値の誤差は 100 dpi で平均 2.5 千冊（bfloat16 では 4.2 千冊）、最大 10 千冊だった。グラフから読んだ値は目盛りの細かさに応じた誤差を含む推定値で、元のデータの代わりにはならない。
 - 画像を渡しても誤りはある。表 2 の「9～11 歳の男」には男女計の行の 296 を、「3～5 歳の割合」には 1 列左の 1.7 を答えた。Markdown に変換した表 2 も、2 段目の見出しが 7 列しかなく、9 列のデータとずれている。図 1 は `![図1](https://example.com/image.png)` という実在しない URL への参照に置き換わり、値を表にさせると値が列見出しに入った空の表になった。出力はもっともらしい形をしていても、元のページと突き合わせて確かめる。結合したセルのある表は、セルごとに質問するなどの工夫が要る。
 - この例では、「2019 年度より 2023 年度のほうが多い分類」（正解は児童書）に 50、100、200 dpi で「一般書」と答えた。1 つの値を読む質問より間違えやすかった。
-- 画像トークン数は画素数にほぼ比例する（約 32×32 画素で 1 トークン）。A4 のページで 50 dpi なら 234、100 dpi なら 962、200 dpi なら 3796 だった。正答は 50 dpi で 4/12、72 dpi で 7/12、100 dpi で 9/12、150 dpi と 200 dpi で 10/12。1 問あたりの時間は 0.20 秒から 1.30 秒に、VRAM の最大使用量は 9.0GB から 10.0GB に増えた（重みだけで約 8.9GB）。T4 (16GB) に収まる。時間は RTX A5000 で測ったもので、T4 では長くなると見込まれる（T4 では測っていない）。このページでは 100〜150 dpi が釣り合いがよい。bfloat16 では 150 dpi の正答が 9/12 だった。数値の精度が違うだけで 1 問変わるので、12 問での 1 問の差は誤差の範囲である。
+- 画像トークン数は画素数にほぼ比例する（約 32×32 画素で 1 トークン）。A4 のページで 50 dpi なら 234、100 dpi なら 962、200 dpi なら 3796 だった。正答は 50 dpi で 4/12、72 dpi で 7/12、100 dpi で 9/12、150 dpi と 200 dpi で 10/12。1 問あたりの時間は 0.20 秒から 1.30 秒に、VRAM の最大使用量は 9.0GB から 10.0GB に増えた（重みだけで約 8.9GB）。T4 (16GB) に収まる。時間は検証の GPU で測ったもので、T4 では長くなると見込まれる（T4 では測っていない）。このページでは 100〜150 dpi が釣り合いがよい。bfloat16 では 150 dpi の正答が 9/12 だった。数値の精度が違うだけで 1 問変わるので、12 問での 1 問の差は誤差の範囲である。
 - スキャンした PDF にはテキスト層がなく、`get_text()` は空文字列を返す（上の画像だけの PDF）。ページを画像にして VLM に渡すか、この章の「画像の中の日本語を読み取り (OCR)、文字誤り率で比べる」の方法を使う。長い文書はページごとに処理する。100 dpi でも 1 ページで約 1000 トークンになる。ページごとの Markdown を RAG の章の「長い文書をチャンクに分割する」で分割すれば、RAG に使える。ページの画像のまま検索する方法は、この章の「PDF のページを画像のまま検索して VLM に答えさせる（マルチモーダル RAG）」を参照。
 - Qwen3-VL-4B-Instruct のライセンスは Apache-2.0（モデルカード）。古い transformers では読み込めない（検証時の Colab の transformers 5.22.1 では動いた）。モデルカードはサンプリング（temperature=0.7 など）を推奨しているが、ここでは再現性のために貪欲法 (`do_sample=False`) にした。
 
@@ -1358,7 +1358,7 @@ print(pd.crosstab([df["方法"], df["検算 (読み直し後)"]], df["正誤 (�
 表やグラフの多い PDF について RAG をしたい。テキストを抽出して検索する方法と、ページの画像をそのまま埋め込んで検索する方法を比べ、検索したページの画像を視覚言語モデル (VLM) に読ませて出典付きで答えさせたい。
 
 ```python
-# 所要時間の目安: T4 の Colab で 10〜15 分 (大半はモデルのダウンロード。ColQwen2 と Qwen3-VL で計約 13.5GB)
+# 所要時間の目安: T4 の Colab で 10〜15 分（大半はモデルのダウンロード。ColQwen2 と Qwen3-VL で計約 13.5GB）
 !pip install -q pymupdf rank_bm25 fugashi unidic-lite
 ```
 
@@ -1369,11 +1369,11 @@ import pandas as pd
 import pymupdf
 from PIL import Image
 
-# 総務省統計局「家計調査報告（家計収支編）2025年（令和７年）平均結果の概要」(24 ページ、表とグラフが多い)
-# 公共データ利用規約 (PDL1.0、CC BY 4.0 互換)。出典: 総務省統計局ホームページ https://www.stat.go.jp/data/kakei/sokuhou/tsuki/index.html
+# 総務省統計局「家計調査報告（家計収支編）2025年（令和７年）平均結果の概要」（24 ページ、表とグラフが多い）
+# 公共データ利用規約（PDL1.0、CC BY 4.0 互換）。出典: 総務省統計局ホームページ https://www.stat.go.jp/data/kakei/sokuhou/tsuki/index.html
 urllib.request.urlretrieve("https://www.stat.go.jp/data/kakei/sokuhou/tsuki/pdf/fies_gaikyo2025.pdf", "kakei2025.pdf")
 doc = pymupdf.open("kakei2025.pdf")
-texts = [page.get_text() for page in doc]                                   # (A) 用: ページごとのテキスト (データの収集と入出力の章の「PDF からテキストを抽出する」)
+texts = [page.get_text() for page in doc]                                   # (A) 用: ページごとのテキスト（データの収集と入出力の章の「PDF からテキストを抽出する (PyMuPDF)」）
 pages = []                                                                  # (B) 用: ページごとの画像
 for page in doc:
     pix = page.get_pixmap(dpi=200)
@@ -1383,7 +1383,7 @@ print("9 ページ目 (棒グラフ) から抽出したテキスト:", " ".join(
 ```
 
 ```python
-# 評価セット: 質問と、答えが載っているページ番号 (PDF の 1 始まりのページ番号。印刷されたページ番号 + 3)
+# 評価セット: 質問と、答えが載っているページ番号（PDF の 1 始まりのページ番号。印刷されたページ番号 + 3）
 # 「本文」は文章に答えが書いてある質問、「図表」は表やグラフを見ないと答えられない質問
 eval_set = [
     ("本文", "2025年のエンゲル係数は何％でしたか。", [7]),
@@ -1407,7 +1407,7 @@ eval_set = [
 questions = [q for _, q, _ in eval_set]
 
 def gold_rank(ranking, gold):
-    """ranking: ページ番号 (0 始まり) を良い順に並べたもの。正解ページのうち最上位の順位を返す"""
+    """ranking: ページ番号（0 始まり）を良い順に並べたもの。正解ページのうち最上位の順位を返す"""
     return min(list(ranking).index(g - 1) + 1 for g in gold)
 
 def evaluate(rankings):
@@ -1416,7 +1416,7 @@ def evaluate(rankings):
 ```
 
 ```python
-# (A) テキストの検索: BM25 と、E5 の埋め込み (ページを 400 字のチャンクに分け、最もよく合うチャンクの類似度をページの得点にする)
+# (A) テキストの検索: BM25 と、E5 の埋め込み（ページを 400 字のチャンクに分け、最もよく合うチャンクの類似度をページの得点にする）
 from fugashi import Tagger
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
@@ -1441,7 +1441,7 @@ pd.DataFrame({"BM25": evaluate(rank_bm25), "E5 (チャンク)": evaluate(rank_e5
 ```
 
 ```python
-# (B) ページ画像の検索: ColQwen2 (Qwen2-VL-2B に ColBERT 式の late interaction を組み合わせたもの)
+# (B) ページ画像の検索: ColQwen2（Qwen2-VL-2B に ColBERT 式の late interaction を組み合わせたもの）
 import torch
 from transformers import ColQwen2ForRetrieval, ColQwen2Processor
 
@@ -1453,7 +1453,7 @@ retriever = ColQwen2ForRetrieval.from_pretrained(name, dtype=dtype, device_map="
 processor = ColQwen2Processor.from_pretrained(name)
 
 def embed(batch):
-    """ページ画像 (PIL) か質問 (str) のリストを、それぞれ (トークン数, 128) の行列のリストにする"""
+    """ページ画像 (PIL) か質問 (str) のリストを、それぞれ（トークン数, 128）の行列のリストにする"""
     x = processor(images=batch) if isinstance(batch[0], Image.Image) else processor(text=batch)
     with torch.no_grad():
         out = retriever(**x.to(retriever.device)).embeddings
@@ -1465,7 +1465,7 @@ def maxsim(q, d):
 
 query_emb = embed(questions)
 rankings = {}
-for max_tokens in [768, 1536]:                       # 1 ページあたりの画像トークン数の上限 (既定は 768)
+for max_tokens in [768, 1536]:                       # 1 ページあたりの画像トークン数の上限（既定は 768）
     processor.image_processor.size = {"longest_edge": max_tokens * 28 * 28, "shortest_edge": 56 * 56}
     page_emb = [e for i in range(0, len(pages), 2) for e in embed(pages[i:i + 2])]
     scores = np.array([[maxsim(q, d) for d in page_emb] for q in query_emb])
@@ -1474,7 +1474,7 @@ for max_tokens in [768, 1536]:                       # 1 ページあたりの�
     print(f"上限 {max_tokens}: 索引 {len(page_emb)} ページ × 平均 {n_vec / len(page_emb):.0f} ベクトル × 128 次元 = {n_vec * 128 * 2 / 1e6:.1f} MB (16 ビット)")
 print(f"(参考) E5 の索引: {len(chunks)} チャンク × 384 次元 = {len(chunks) * 384 * 2 / 1e6:.2f} MB")
 print(f"VRAM の最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
-del retriever; torch.cuda.empty_cache()              # VLM を載せる前に検索モデルを解放する (質問はすべて検索済み)
+del retriever; torch.cuda.empty_cache()              # VLM を載せる前に検索モデルを解放する（質問はすべて検索済み）
 
 def rrf(rankings, k=60):                              # RAG の章の「検索の評価セットを作って手法を比べる」と同じ順位の融合
     scores = np.zeros(rankings[0].shape)
@@ -1489,7 +1489,7 @@ pd.DataFrame({"BM25": evaluate(rank_bm25), "E5 (チャンク)": evaluate(rank_e5
 ```
 
 ```python
-# 質問ごとの正解ページの順位 (1 が最良)。本文の質問と図表の質問で分けて見る
+# 質問ごとの正解ページの順位（1 が最良）。本文の質問と図表の質問で分けて見る
 per_q = pd.DataFrame({"種類": [k for k, _, _ in eval_set], "質問": [q[:24] for q in questions],
                       **{n: [gold_rank(r, g) for r, (_, _, g) in zip(rs, eval_set)]
                          for n, rs in [("BM25", rank_bm25), ("E5", rank_e5), ("ColQwen2", rank_img)]}})
@@ -1533,7 +1533,7 @@ for qi in [0, 3, 8, 10, 12, 15]:
     print(f"[{kind}] Q: {q} (正解のページ: {gold})")
     for label, use_image in [("(A) テキスト", False), ("(B) 画像", True)]:
         text, hits, cited = answer(qi, use_image)
-        mark = "出典○" if cited and set(cited) <= set(gold) else "出典×"     # 出典が正解のページかだけを見る (答えの正しさは見ていない)
+        mark = "出典○" if cited and set(cited) <= set(gold) else "出典×"     # 出典が正解のページかだけを見る（答えの正しさは見ていない）
         print(f"  {label}  検索: p.{hits}  出典: p.{cited} {mark} | {text[:150]}")
 print(f"VRAM の最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 ```

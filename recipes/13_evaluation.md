@@ -212,7 +212,7 @@ print("平均 F1:", F.mean().item())
 ```
 
 ```python
-# 無関係な文同士でも 0.6 前後になる (値の範囲が狭い) ことに注意。設定を表すハッシュも取得できる
+# 無関係な文同士でも 0.7 近くになる（値の範囲が狭い）ことに注意。設定を表すハッシュも取得できる
 (P, R, F), setting = score(["今日は天気が良い。"], ["会議は午後 3 時に始まります。"], lang="ja", verbose=False, return_hash=True)
 print(round(F.item(), 3), setting)
 ```

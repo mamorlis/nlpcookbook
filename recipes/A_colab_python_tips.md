@@ -234,7 +234,7 @@ print(rng.integers(0, 100, 3), torch.randperm(5, generator=g).tolist())
 
 ```python
 %%time
-# セル全体の実行時間を測る (%%time はセルの 1 行目に書く)
+# セル全体の実行時間を測る（%%time はセルの 1 行目に書く）
 total = sum(i * i for i in range(3_000_000))
 ```
 
@@ -250,7 +250,9 @@ pattern = re.compile(r"\S+")
 ```
 
 ```python
+import random
 import time
+from collections import Counter
 from contextlib import contextmanager
 
 @contextmanager
@@ -260,15 +262,19 @@ def timer(name):
     yield
     print(f"[{name}] {time.perf_counter() - start:.3f} 秒")
 
+# 計測の例として、200 万語のテキストを作る
+random.seed(0)
+words = ["自然", "言語", "処理", "を", "学ぶ", "の", "は", "データ", "モデル", "文章", "単語", "解析"]
+big_text = " ".join(random.choices(words, k=2_000_000))
+
 with timer("トークン化"):
-    tokens = text.split()
+    tokens = big_text.split()
 with timer("頻度の集計"):
-    from collections import Counter
     freq = Counter(tokens)
 ```
 
 ```python
-# どの関数に時間がかかっているかを調べる (プロファイラ)
+# どの関数に時間がかかっているかを調べる（プロファイラ）
 import cProfile, pstats
 
 def slow_pipeline():
@@ -404,7 +410,7 @@ print(model_name, text, top_k, threshold, normalize, mode)
 ```
 
 ```python
-# Colab 以外 (Jupyter、VS Code) でも動く対話的な部品は ipywidgets で作る
+# Colab 以外（Jupyter、VS Code）でも動く対話的な部品は ipywidgets で作る
 import ipywidgets as widgets
 from IPython.display import display
 
@@ -419,12 +425,16 @@ def on_change(_):
 
 slider.observe(on_change, names="value"); box.observe(on_change, names="value")
 display(box, slider, out)
-on_change(None)
+on_change(None)  # 最初の表示（Output ウィジェットの中に出る）
+
+# ウィジェットの値は、Python の変数のように .value で読める
+print("クエリ:", box.value, "/ top_k:", slider.value)
 ```
 
 - `#@param` は Colab 専用のコメント記法。他の環境ではただのコメントとして無視され、右辺の値がそのまま使われるので、コードとしては普通に動く。
 - フォームの値を変えると、セルのコード（右辺の値）が書き換わる。セルを再実行して初めて反映される。
 - `#@title` を付けて `display-mode: "form"` にすると、コードを隠してフォームだけを見せられる。
+- ipywidgets の部品（テキスト欄・スライダー・`Output` の中の表示）は、セルを実行したときだけ現れる。保存されたノートブックを GitHub などで開いても表示されない。上の例では、最後の `print` の行だけが普通の出力として残る。
 
 ## pandas で長いテキストを省略せずに表示する {pandas_display}
 
