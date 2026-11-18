@@ -1394,12 +1394,14 @@ docs = [
 ]
 
 def tokenize(text):
-    return [w.surface for w in tagger(text) if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
+    """（出現位置, 単語）の列。位置は助詞などを除く前の語の列で数える（除いた語の分も位置を空ける）"""
+    return [(pos, w.surface) for pos, w in enumerate(tagger(text))
+            if w.feature.pos1 not in ("助詞", "助動詞", "補助記号")]
 
 # 転置索引: 単語 → {文書番号: [出現位置, ...]}
 index = defaultdict(dict)
 for doc_id, doc in enumerate(docs):
-    for pos, term in enumerate(tokenize(doc)):
+    for pos, term in tokenize(doc):
         index[term].setdefault(doc_id, []).append(pos)
 
 print(len(index), "語")
@@ -1416,7 +1418,7 @@ def OR(*terms): return set.union(*[posting(t) for t in terms])
 def NOT(term): return ALL - posting(term)
 
 def phrase(*terms):
-    """語がこの順番で隣り合って出現する文書 (位置情報を使う)"""
+    """語がこの順番で隣り合って出現する文書（位置情報を使う）"""
     hits = set()
     for doc_id in AND(*terms):
         if any(all(p + i in index[t][doc_id] for i, t in enumerate(terms)) for p in index[terms[0]][doc_id]):
@@ -1435,7 +1437,7 @@ for q, result in queries.items():
 ```
 
 - 転置索引は「この単語を含む文書はどれか」を即座に引ける構造。全文書を走査せずに済むので、数億件の文書でも高速に検索できる。
-- 出現位置まで持っておくと、フレーズ検索や「近くに出現する」という条件の検索ができる。最後の 2 つの結果の違い（語順どおりに並んでいるか）がその効果。
+- 出現位置まで持っておくと、フレーズ検索や「近くに出現する」という条件の検索ができる。最後の 2 つの結果の違い（語順どおりに並んでいるか）がその効果。文書 4 の「自然な言語を処理する」は 3 語とも含むが、隣り合っていないのでフレーズ検索では外れる。位置は助詞などを除く前の語の列で数える。除いてから数えると「自然 言語 処理」が隣り合っているように見えてしまう。
 - 日本語では単語の区切り方が検索結果を左右する。「東京都立大学」が 1 語になる辞書だと「東京」で検索しても当たらない。対策は、検索の章の「単語に区切らず文字 n-gram で検索する（表記ゆれに強い検索）」。
 - 実用の検索エンジン（Lucene、Elasticsearch、Tantivy）も、この構造を圧縮し、スコア計算と組み合わせたもの。
 - 実務でライブラリを使って同じことをする版は、検索の章の「SQLite の FTS5 で日本語の文書をブール検索・フレーズ検索する」。

@@ -44,20 +44,21 @@ def word_vector(sentence, word):
     words = sentence.split()
     enc = tokenizer(words, is_split_into_words=True, return_tensors="pt")
     with torch.no_grad():
-        hidden = model(**enc).last_hidden_state[0]          # (トークン数, 768)
+        hidden = model(**enc).last_hidden_state[0]          # （トークン数, 768）
     positions = [i for i, w in enumerate(enc.word_ids()) if w == words.index(word)]
     return hidden[positions].mean(dim=0)                    # サブワードが複数なら平均
 
 sents = ["i deposited money in the bank yesterday", "the bank raised its interest rates",
-         "we sat on the bank of the river", "the boat drifted toward the muddy bank"]
+         "we had a picnic on the grassy bank of the river",
+         "the river overflowed its bank after the heavy rain"]
 vecs = torch.stack([word_vector(s, "bank") for s in sents])
 sim = torch.nn.functional.cosine_similarity(vecs[:, None], vecs[None], dim=-1)
 for s, row in zip(sents, sim):
     print(" ".join(f"{x:.2f}" for x in row), "|", s)
 ```
 
-- 金融の bank 同士、川岸の bank 同士の類似度が高くなる。word2vec では 1 つのベクトルに混ざっていた語義が分離される。
-- どの層を使うかで性質が変わる。`output_hidden_states=True` で全層を取り出し、最後の 4 層を平均する方法もよく使われる。
+- 金融の bank 同士（文 1 と 2）、川岸の bank 同士（文 3 と 4）の類似度が 0.7 程度と高く、語義が違う組み合わせ（0.4〜0.5）より高くなる。word2vec では 1 つのベクトルに混ざっていた語義が分離される。
+- 例文によっては、同じ語義同士の類似度が上がらず、語義が違う組み合わせより低くなることもある。どの層を使うかでも性質が変わる。`output_hidden_states=True` で全層を取り出し、最後の 4 層を平均する方法もよく使われる。
 
 ## 2 つの文の含意関係を判定する (NLI) {nli}
 
