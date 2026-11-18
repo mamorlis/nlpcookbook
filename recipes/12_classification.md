@@ -369,7 +369,6 @@ plt.xscale("log"); plt.xlabel("training examples"); plt.ylabel("macro-F1"); plt.
 陽性が数 % しかないデータ（スパム、有害投稿、異常報告など）で、少数クラスをきちんと検出したい。
 
 ```python
-import numpy as np
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -377,7 +376,7 @@ from sklearn.metrics import average_precision_score, classification_report, prec
 from sklearn.model_selection import train_test_split
 
 data = fetch_20newsgroups(subset="all", remove=("headers", "footers", "quotes"))
-y = (data.target == data.target_names.index("sci.med")).astype(int)   # 「医療」だけを陽性 (約 5%) とする 2 値分類
+y = (data.target == data.target_names.index("sci.med")).astype(int)   # 「医療」だけを陽性（約 5%）とする 2 値分類
 X_train, X_test, y_train, y_test = train_test_split(data.data, y, test_size=0.3, stratify=y, random_state=0)
 vec = TfidfVectorizer(stop_words="english", sublinear_tf=True, min_df=2)
 Xtr, Xte = vec.fit_transform(X_train), vec.transform(X_test)
@@ -392,22 +391,34 @@ for cw in [None, "balanced"]:
 ```python
 # しきい値を動かして適合率と再現率のバランスを選ぶ
 import matplotlib.pyplot as plt
+from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.model_selection import cross_val_predict
 
-clf = LogisticRegression(C=1, max_iter=1000).fit(Xtr, y_train)
-prob = clf.predict_proba(Xte)[:, 1]
-precision, recall, thresholds = precision_recall_curve(y_test, prob)
+clf = LogisticRegression(C=1, max_iter=1000)
+# しきい値は、学習データの交差検証で出した予測確率（検証データの代わり）で決める
+prob_cv = cross_val_predict(clf, Xtr, y_train, cv=5, method="predict_proba")[:, 1]
+precision, recall, thresholds = precision_recall_curve(y_train, prob_cv)
 f1 = 2 * precision * recall / (precision + recall + 1e-9)
-best = f1[:-1].argmax()
-print(f"平均適合率 (AP) = {average_precision_score(y_test, prob):.3f}")
-print(f"しきい値 0.5 → F1 = {f1[np.searchsorted(thresholds, 0.5)]:.3f} / 最良しきい値 {thresholds[best]:.2f} → F1 = {f1[best]:.3f}")
+best_th = thresholds[f1[:-1].argmax()]
+print(f"交差検証で選んだしきい値: {best_th:.2f}")
 
-plt.plot(recall, precision); plt.scatter(recall[best], precision[best], color="red", label="best F1")
+# 決めたしきい値を、テストデータで測る
+clf.fit(Xtr, y_train)
+prob = clf.predict_proba(Xte)[:, 1]
+print(f"平均適合率 (AP) = {average_precision_score(y_test, prob):.3f}")
+for th in [0.5, best_th]:
+    pred = prob >= th
+    print(f"しきい値 {th:.2f} → 適合率 {precision_score(y_test, pred):.3f} / 再現率 {recall_score(y_test, pred):.3f} / F1 {f1_score(y_test, pred):.3f}")
+
+precision, recall, _ = precision_recall_curve(y_test, prob)
+plt.plot(recall, precision)
+plt.scatter(recall_score(y_test, prob >= best_th), precision_score(y_test, prob >= best_th), color="red", label="chosen threshold")
 plt.xlabel("recall"); plt.ylabel("precision"); plt.legend(); plt.show()
 ```
 
 - 不均衡データでは正解率は役に立たない（全部「陰性」と答えても 95%）。少数クラスの適合率・再現率・F1、あるいは PR 曲線下面積 (AP) を見る。
 - `class_weight="balanced"` は少数クラスの誤りを重く扱う。再現率が上がり、適合率は下がる。
-- しきい値は検証データで決める（テストデータで決めてはいけない）。「見逃しを減らしたい」のか「誤検出を減らしたい」のか、用途に応じて選ぶ。
+- しきい値は検証データで決める（テストデータで決めてはいけない）。ここでは学習データの交差検証で出した予測確率で決め、テストデータでは測るだけにしている。「見逃しを減らしたい」のか「誤検出を減らしたい」のか、用途に応じて選ぶ。
 
 ## 1 つの文書に複数のラベルを付ける（マルチラベル分類） {multilabel}
 
@@ -2058,7 +2069,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
-                          Trainer, TrainingArguments, set_seed)
+                          PrinterCallback, Trainer, TrainingArguments, set_seed)
 from transformers.utils import logging
 
 logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
@@ -2106,9 +2117,10 @@ def train(name, tok, train_ds, epochs, lr, T=2.0, alpha=0.0, seed=0):
         return batch
     args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=lr, warmup_steps=0.1,   # 1 未満は全ステップ数に対する割合
                              weight_decay=0.01, per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
-                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=seed,
+                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=seed, disable_tqdm=True,
                              remove_unused_columns=False)   # teacher_logits の列を消させない
     trainer = DistillTrainer(model=model, args=args, train_dataset=train_ds, data_collator=collate, T=T, alpha=alpha)
+    trainer.remove_callback(PrinterCallback)   # 学習のたびに最後の集計（train_runtime など）を表示させない
     trainer.train()
     return trainer
 
@@ -2228,7 +2240,7 @@ for title in ["新型スマートフォン、有機 EL と高性能カメラを�
 - 教師は自分が学習したデータに対しては自信が強く、T=1 では最大確率の平均が 0.984、2 番目のクラスの確率の平均は 0.0095 でほぼ正解ラベルと同じだった。T=2 では 0.837 と 0.044、T=4 では 0.462 と 0.096 になり、2 番目以下のクラスの情報が表に出る。ラベルのない文書が別にあれば、教師に確率を付けさせて生徒の学習データに足すこともできる。
 - 見出しだけの課題では、教師 (BERT-large) の正解率は 0.927、生徒を普通に学習すると 0.897（3 つの種で 0.896〜0.898）、蒸留 (T=2, alpha=0.5) すると 0.909（0.906〜0.913）で、3 つの種のすべてで蒸留のほうが高かった。差は +0.012（95% 信頼区間 +0.005〜+0.019）で、教師との差 0.030 の 4 割ほどを埋めたが、教師とはまだ 0.018（同 +0.007〜+0.030）の差がある。区間の求め方は評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照。
 - 温度と混合の重みを変えた表（種 0 のみ）では、蒸留したどの設定 (0.903〜0.915) も普通の学習 (0.898) より高く、教師の確率だけで学習した alpha=1.0 が最も高かった (0.915)。ただし設定どうしの差は 1.2 ポイント程度で、1 つの種、1474 件の評価では見分けにくい。また、ここではテストデータで設定を比べているので、実際には学習データから検証用のデータを分けて温度と重みを選ぶ。
-- 生徒のパラメータは 37M で教師 (337M) の約 9 分の 1、埋め込みを除くと 11M と 304M で約 28 分の 1 である（ModernBERT-Ja は語彙が 102,400 語と大きい）。2 スレッドの CPU では教師が 5.8 件/秒、生徒が 172.2 件/秒で約 30 倍、GPU (float16) では 1523 件/秒と 9951 件/秒で約 6.5 倍速かった。速さは環境や負荷で変わるので、Colab では測り直す。GPU メモリの最大使用量は 6.9 GB だった。
+- 生徒のパラメータは 37M で教師 (337M) の約 9 分の 1、埋め込みを除くと 11M と 304M で約 28 分の 1 である（ModernBERT-Ja は語彙が 102,400 語と大きい）。2 スレッドの CPU では、教師が 5.7 件/秒、生徒が 170.8 件/秒で、生徒が約 30 倍速かった。GPU (float16) でも生徒が約 6 倍速かったが、出力の GPU の件/秒の値は検証に使った GPU（T4 より速い）で測ったもので、Colab の T4 ではどちらも小さくなる。速さは環境や負荷で変わるので、Colab では測り直す。GPU メモリの最大使用量は 6.9 GB だった。
 - ModernBERT-Ja-30M のモデルカードにある livedoor ニュースコーパスの評価（入力や分割はこのレシピと異なる）では、正解率が ModernBERT-Ja-30M で 97.20、東北大 BERT-base v3 で 96.91、BERT-large v2 で 97.64 で、モデルの大きさによる差がほとんどない。このような課題では蒸留の余地は小さい。このレシピで見出しだけを入力にしたのは、教師と生徒の差が出る課題にするためである。教師と生徒は語彙もトークナイザー（MeCab と WordPiece、SentencePiece）も違うが、出力の確率だけを使うので問題にならない。
 - データの livedoor ニュースコーパスは CC BY-ND 2.1 JP（改変禁止）である。教師は東北大の BERT-large (Apache 2.0)、生徒は SB Intuitions の ModernBERT-Ja-30M (MIT)。学習したモデルを配布するときは、データのライセンスとの関係に注意する。
 

@@ -1773,7 +1773,7 @@ print(f"LoRA の重みのファイル: {size / 1e6:.0f} MB")
 「良い応答」と「悪い応答」の組（選好データ）から、LLM がより好まれる応答を出すように調整したい。報酬モデルを別に作らずに済む DPO を、LoRA と組み合わせて行う。
 
 ```python
-!pip install -q trl peft "torchao>=0.16"   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
+!pip install -q trl==1.18.0 peft==0.21.2 torchao==0.18.0   # Colab に入っている古い torchao (0.10) のままだと peft の import が失敗する
 ```
 
 ```python
@@ -1788,14 +1788,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 def load_tokenizer(name):
     tokenizer = AutoTokenizer.from_pretrained(name)
     # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
     sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
     tokenizer.backend_tokenizer.model = models.Unigram(
         [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
     return tokenizer
 
 set_seed(0)
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # この章の LoRA のレシピと同じ 0.5B のモデル (MIT License)
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B の指示チューニング済みモデル（この章の「ベースモデルを LoRA で指示チューニングする (SFT)」で比べた公式版と同じ、MIT License）
 tokenizer = load_tokenizer(name)
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
@@ -1804,13 +1804,13 @@ model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 
 ```python
 from datasets import Dataset, load_dataset
 
-# 選好データ: llm-jp/hh-rlhf-12k-ja (MIT License)。Anthropic の hh-rlhf (Bai et al., 2022、MIT License) から
+# 選好データ: llm-jp/hh-rlhf-12k-ja (MIT License)。Anthropic の hh-rlhf（Bai et al., 2022、MIT License）から
 # 12,000 件を選び、DeepL で日本語に訳したもの。会話 (conversations) に対して、人が選んだ応答 (chosen) と選ばなかった応答 (rejected) がある
 raw = load_dataset("llm-jp/hh-rlhf-12k-ja", split="train")
 print(raw.to_pandas()["source"].value_counts())
 
-# 有用さ (helpful-*) の部分だけを使う (harmless-base は有害な依頼とその応答で、不快な内容を含む)。
-# 1 往復の会話で、短めのものに絞る。trl の会話形式 (prompt / chosen / rejected にメッセージのリスト) にする
+# 有用さ (helpful-*) の部分だけを使う（harmless-base は有害な依頼とその応答で、不快な内容を含む）。
+# 1 往復の会話で、短めのものに絞る。trl の会話形式（prompt / chosen / rejected にメッセージのリスト）にする
 data = [{"prompt": [{"role": "user", "content": r["conversations"][0]["value"]}],
          "chosen": [{"role": "assistant", "content": r["chosen"]}],
          "rejected": [{"role": "assistant", "content": r["rejected"]}]}
@@ -1862,7 +1862,7 @@ def generate(model, prompts, max_new_tokens=384, batch_size=25):
         cut += [o[-1].item() not in (tokenizer.eos_token_id, tokenizer.pad_token_id) for o in gen]   # 長さの上限で打ち切られたか
     return outs, np.array(cut)
 
-# 調整前 (= DPO の参照モデル) の対数尤度と、評価用の質問 100 件への応答
+# 調整前（= DPO の参照モデル）の対数尤度と、評価用の質問 100 件への応答
 model.eval()
 ref_c, ref_r = response_logps(model, test, "chosen"), response_logps(model, test, "rejected")
 gen_prompts = [ex["prompt"] for ex in test[:100]]
@@ -1879,7 +1879,7 @@ lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
 args = DPOConfig(output_dir="dpo-out", beta=0.1, learning_rate=5e-5, num_train_epochs=1, per_device_train_batch_size=8,
                  warmup_steps=10, max_length=512, logging_steps=25, save_strategy="no", report_to="none",
                  gradient_checkpointing=False, bf16=BF16, fp16=not BF16, seed=0)   # DPOConfig は bf16=True が既定なので明示する
-# ref_model を渡さずに peft_config を渡すと、LoRA を外した元のモデルが参照モデルになる (モデルを 2 つ読み込まずに済む)
+# ref_model を渡さずに peft_config を渡すと、LoRA を外した元のモデルが参照モデルになる（モデルを 2 つ読み込まずに済む）
 trainer = DPOTrainer(model=model, args=args, train_dataset=Dataset.from_list(train), processing_class=tokenizer, peft_config=lora)
 trainer.model.print_trainable_parameters()
 trainer.train()   # Colab の T4 で 10〜15 分程度
@@ -1918,12 +1918,12 @@ print(f"上限の 384 トークンで打ち切られた割合: 調整前 {cut_be
 ```
 
 ```python
-# 調整前と後の応答を、大きめのモデル (sarashina2.2-3b-instruct、MIT License) に比べさせる (LLM による判定)。
+# 調整前と後の応答を、大きめのモデル（sarashina2.2-3b-instruct、MIT License）に比べさせる（LLM による判定）。
 # 応答を A と B に並べ、次のトークンが「A」と「B」になる確率を比べる。位置の偏りを打ち消すため、順番を入れ替えて 2 回聞いて平均する
 judge_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 jtok = load_tokenizer(judge_name)
 judge = AutoModelForCausalLM.from_pretrained(judge_name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
-id_a, id_b = [jtok(c, add_special_tokens=False)["input_ids"][-1] for c in ("A", "B")]   # 評価指標と統計的検定の章と同じ取り方
+id_a, id_b = [jtok(c, add_special_tokens=False)["input_ids"][-1] for c in ("A", "B")]   # LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」と同じ取り方
 print("判定に使うトークン:", jtok.convert_ids_to_tokens([id_a, id_b]))
 
 def p_first_better(q, x, y):
@@ -1936,7 +1936,7 @@ def p_first_better(q, x, y):
         return torch.softmax(logits[[id_a, id_b]], -1)[0].item()
     return (p_a(x, y) + 1 - p_a(y, x)) / 2
 
-# まず、判定役が人の選好 (評価データの chosen / rejected) とどれくらい一致するかを確かめる。Colab の T4 で 2〜3 分
+# まず、判定役が人の選好（評価データの chosen / rejected）とどれくらい一致するかを確かめる。Colab の T4 で 2〜3 分
 agree = np.array([p_first_better(ex["prompt"][0]["content"], ex["chosen"][0]["content"], ex["rejected"][0]["content"]) > 0.5 for ex in test])
 print("判定役と人の選好の一致率:", rate_ci(agree))
 
@@ -1949,8 +1949,8 @@ print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e
 ```
 
 - DPO (Direct Preference Optimization; Rafailov et al., 2023) は、選好データから報酬モデルを学習して強化学習 (PPO) で最適化する RLHF の手順を、1 つの分類のような損失に置き換えたもの。参照モデルからのずれを β で抑えながら、chosen の尤度を rejected より相対的に上げる。実際には、この章の「ベースモデルを LoRA で指示チューニングする (SFT)」のような指示チューニングの後に行う。
-- 上の出力では、評価データ（学習に使っていない 200 組）で報酬が chosen > rejected になった割合は 0.680（95% 信頼区間 0.615〜0.745）で、偶然 (0.5) より高い。ただし DPO が上げるのは chosen と rejected の差だけで、対数尤度そのものは chosen も rejected も上がり（平均で +12.82 と +6.95）、「chosen のほうが尤度が高い」割合は 0.480 → 0.485 とほとんど変わらなかった。
-- 一方、生成した応答を判定役のモデルに比べさせると、調整後が良いとされたのは 100 問中 0.340（95% 信頼区間 0.250〜0.430）で、調整前より悪いと判定された。応答は短くなり（平均 480 → 435 文字）、長くならなかった 71 問では勝率が 0.268 と特に低い。GPU の計算は実行ごとにわずかに変わることがあり、勝率は小数第 2 位で変わりうるので、100 問の信頼区間の幅で見る。選好の正解率が上がっても、生成が良くなるとは限らない。
+- 上の出力では、評価データ（学習に使っていない 200 組）で報酬が chosen > rejected になった割合は 0.680（95% 信頼区間 0.615〜0.745）で、偶然 (0.5) より高い。ただし DPO が上げるのは chosen と rejected の差だけで、対数尤度そのものは chosen も rejected も上がり（平均で +12.80 と +6.95）、「chosen のほうが尤度が高い」割合は 0.480 → 0.485 とほとんど変わらなかった。
+- 一方、生成した応答を判定役のモデルに比べさせると、調整後が良いとされたのは 100 問中 0.320（95% 信頼区間 0.230〜0.410）で、調整前より悪いと判定された。応答は短くなり（平均 480 → 445 文字）、長くならなかった 66 問では勝率が 0.288 と、長くなった 34 問（0.382）より低い。GPU の計算は実行ごとにわずかに変わることがあり、勝率は小数第 2 位で変わりうるので、100 問の信頼区間の幅で見る。選好の正解率が上がっても、生成が良くなるとは限らない。
 - 原因は確かめていないが、学習データの応答は hh-rlhf の論文（2022 年）のモデルの出力を機械翻訳したもので、ここでは 400 文字以下に絞っており、このモデル自身の応答とは文体も長さも違う（方策外のデータ）。調整するモデル自身に応答を複数生成させ、それに人や強いモデルが選好を付けたデータ（方策上のデータ）を使う方法もある。
 - 判定役 (3B) と人の選好の一致率は 0.650 程度で、判定はあくまで目安。A と B の順番を入れ替えて平均し、位置の偏りを打ち消している。判定役の信頼性の確かめ方は、LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」を参照。
 - データ: hh-rlhf の元のデータセットカードには、選好（報酬）モデルの学習用で、対話エージェントを教師ありで学習するためのものではない（有害なモデルになりうる）と書かれている。DPO は報酬モデルを作らず、対話モデルそのものをこの応答で直接学習するので、この注意が当てはまる。ここで作るモデルは手法を試すためのもので、公開や実用には使わない。harmless-base には差別や暴力などの不快な内容が含まれるので、ここでは使っていない。日本語は DeepL による翻訳で、訳の崩れも混じる（上の 1 件目の「」の対応など）。

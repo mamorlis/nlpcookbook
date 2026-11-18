@@ -513,16 +513,18 @@ for user in ["私の名前は田中です。来月、京都に 2 泊で行く予
 長い対話で、古いターンを単に捨てると大事な情報を忘れてしまう。捨てる前に要約して、記憶として持ち越したい。
 
 ```python
+import re
+
 import sentencepiece as spm
 import torch
 from huggingface_hub import hf_hub_download
 from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど (GPU メモリ約 7GB)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。T4 なら 1 応答あたり数秒〜10 秒ほど（GPU メモリ約 7GB）
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -553,11 +555,13 @@ class SummaryChat:
         if len(self.history) > self.keep + 2:
             self.compress()
         system = self.system + (f"\n\n# これまでの対話で分かっていること\n{self.summary}" if self.summary else "")
-        reply = generate([{"role": "system", "content": system}] + self.history, max_new_tokens=60)
+        reply = generate([{"role": "system", "content": system}] + self.history, max_new_tokens=150)
+        # 3B のモデルは「1〜2 文で」の指示を守らず長く答えることが多い。最初の 2 文だけを残し、履歴も短く保つ
+        reply = "".join(re.findall(r".+?[。！？]", reply)[:2]) or reply
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
-# 要約を含めて 8 回生成する。T4 で 1〜2 分 (モデルの読み込みを除く)
+# 要約を含めて 8 回生成する。T4 で 1〜2 分（モデルの読み込みを除く）
 chat = SummaryChat("あなたは旅行の相談に乗るアシスタントです。1〜2 文で短く答えてください。"
                    "「これまでの対話で分かっていること」は、あなたがユーザーから既に聞いた内容です。覚えているものとして答えてください。")
 for user in ["私の名前は田中です。来月、京都に 2 泊で行く予定です。", "混雑が苦手なので、静かな場所が好きです。", "秋におすすめのお寺を 1 つ教えてください。",
@@ -572,8 +576,9 @@ for user in ["私の名前は田中です。来月、京都に 2 泊で行く予
 - 要約を重ねるうちに細部は落ちていく。確実に覚えておきたい事実（名前、日程、決定事項）は、要約とは別に項目として抽出して保存する方法もある。
 - 過去の対話を検索できる形で保存しておき、関係する部分だけを取り出して入力に加える方法（RAG と同じ考え方）もよく使われる。
 - この例では、最初のターンが要約に置き換わったあとでも、最後の質問に名前（田中）と好み（静かな場所）を正しく答えた。この章の「対話の履歴を管理して、長くなったら古いターンを捨てる」では、古いターンを捨てたために名前を忘れる。
-- 要約にも誤りが入る。「対話に出てこないことは書かない」と指示しても、要約には対話にない「彼女は」（性別）が入った。要約は次の入力にそのまま使われるので、誤りも持ち越される。
-- 応答の中身も確かめる必要がある。静かな場所が好きだと言われたのに、混雑する紅葉の名所（東福寺）を勧め、行き方では「JR 奈良線で一駅目の稲荷駅」と答えた（一駅目は東福寺駅）。3B のモデルが答える地名や店名、経路は誤りを含みうる。
+- 要約にも誤りが入る。「対話に出てこないことは書かない」と指示しても、要約には対話にない「彼女は」（性別）や「寺社巡りや地元のグルメを楽しむことを考えている」が入り、最後の要約ではボットが勧めただけの永観堂を「訪れる予定です」と書いた。要約は次の入力にそのまま使われるので、誤りも持ち越される。
+- 小さいモデルは「1〜2 文で」のような長さの指示を守らないことが多い。この例でも 2 文に切る処理を外すと、1 応答が 4〜6 文になり、上限の 150 トークンで文の途中で切れる応答も出た。長い応答は履歴をすぐ膨らませるので、ここではコードで最初の 2 文だけを残している。
+- 応答の中身も確かめる必要がある。静かな場所が好きだと言われたのに、秋に大変混む紅葉の名所（永観堂）や嵐山を勧めた。3B のモデルが答える地名や店名、経路は誤りを含みうる。
 
 ## キャラクターや口調を設定する（ペルソナ） {persona_prompt gpu}
 

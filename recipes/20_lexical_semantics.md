@@ -338,7 +338,7 @@ print(len(pairs), "文対", pairs[0])
 ```
 
 ```python
-# IBM モデル 1 で単語の翻訳確率 t(英語 | 日本語) を推定する (EM アルゴリズム)
+# IBM モデル 1 で単語の翻訳確率 t(英語 | 日本語) を推定する（EM アルゴリズム）
 def ibm_model1(pairs, iterations=5):
     t = {}
     for it in range(iterations):
@@ -385,7 +385,8 @@ def paraphrases(word, k=8, min_freq=20):
                 score[f] += p1 * p2
     return [(w, round(s, 3)) for w, s in score.most_common(k)]
 
-for w in ["嬉しい", "素晴らしい", "始める", "病院", "多分", "怖い", "話す", "綺麗", "仕事", "直ぐ"]:
+# 語は UniDic の原形の表記で指定する（「きれい」「綺麗」は「奇麗」、「すぐ」は「直ぐ」になる）
+for w in ["嬉しい", "素晴らしい", "始める", "病院", "多分", "怖い", "話す", "奇麗", "仕事", "直ぐ"]:
     print(w, "→", paraphrases(w))
 ```
 

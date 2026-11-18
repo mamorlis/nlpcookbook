@@ -721,12 +721,12 @@ HONORIFIC = {"仰る", "為さる", "いらっしゃる", "召し上がる", "�
 
 @lru_cache(maxsize=None)     # 同じ語を何度も解析しないように結果を覚えておく
 def is_ichidan(lemma):
-    """一段動詞かカ変動詞か (ら抜きが起きるのはこれだけ。「帰れる」のような五段動詞の可能形は正しい)"""
+    """一段動詞かカ変動詞か（ら抜きが起きるのはこれだけ。「帰れる」のような五段動詞の可能形は正しい）"""
     ws = tagger(lemma)
     return len(ws) == 1 and ws[0].feature.cType.startswith(("上一段", "下一段", "カ行変格"))
 
 def rule_check(text):
-    """(種類, 箇所, 書き直しの案) のリストを返す"""
+    """（種類, 箇所, 書き直しの案）のリストを返す"""
     issues = []
     for s in split_sentences(text):
         ws = list(tagger(s))
@@ -734,17 +734,17 @@ def rule_check(text):
             issues += [("冗長", m.group(), advice) for m in re.finditer(pat, s)]
         for i, w in enumerate(ws):
             f = w.feature
-            # ら抜き (1): UniDic は「起きれる」「見れる」を 1 語 (書字形 起きれる、語彙素 起きる) として登録している
+            # ら抜き (1): UniDic は「起きれる」「見れる」を 1 語（書字形 起きれる、語彙素 起きる）として登録している
             if f.pos1 == "動詞" and f.lemma and f.orthBase == f.lemma[:-1] + "れる" and f.lemma.endswith("る") and is_ichidan(f.lemma):
                 issues.append(("ら抜き", w.surface, f"「{f.lemma[:-1]}られる」の形にする"))
-            # ら抜き (2): 「食べ」(一段の未然形) + 助動詞「れる」と解析される場合
+            # ら抜き (2): 「食べ」（一段の未然形）+ 助動詞「れる」と解析される場合
             if f.pos1 == "動詞" and f.cForm.startswith("未然") and f.cType.startswith(("上一段", "下一段", "カ行変格")) \
                     and i + 1 < len(ws) and ws[i + 1].feature.lemma == "れる":
                 issues.append(("ら抜き", w.surface + ws[i + 1].surface, f"「{f.lemma[:-1]}られる」の形にする"))
-            # 二重敬語: 尊敬語 (おっしゃる、召し上がる、お〜になる、ご覧になる) に尊敬の「れる・られる」を重ねる
+            # 二重敬語: 尊敬語（おっしゃる、召し上がる、お〜になる、ご覧になる）に尊敬の「れる・られる」を重ねる
             if f.pos1 == "助動詞" and f.lemma in ("れる", "られる") and i > 0:
                 prev = ws[i - 1].feature
-                start = None                       # 尊敬語の始まりの位置 (指摘する箇所の先頭)
+                start = None                       # 尊敬語の始まりの位置（指摘する箇所の先頭）
                 if prev.lemma in HONORIFIC:
                     start = i - 1
                 elif prev.lemma == "成る" and i >= 3 and ws[i - 2].surface == "に":
@@ -757,7 +757,7 @@ def rule_check(text):
         # 長すぎる文: 80 字を超えるか、読点が 4 つ以上
         if len(s) > 80 or s.count("、") >= 4:
             issues.append(("長文", s[:12] + "…", f"{len(s)} 字・読点 {s.count('、')} 個。2 文に分ける"))
-        # 助詞の連続: 読点で区切った範囲に同じ助詞 (が・を・に・で・は) が 2 回、または格助詞の「の」が 3 回以上
+        # 助詞の連続: 読点で区切った範囲に同じ助詞（が・を・に・で・は）が 2 回、または格助詞の「の」が 3 回以上
         for clause in s.split("、"):
             ps = [w for w in tagger(clause) if w.feature.pos1 == "助詞"]
             for p in ("が", "を", "に", "で", "は"):
@@ -773,7 +773,7 @@ def rule_check(text):
     issues += [("表記ゆれ", "/".join(sorted(fs)), "どれかにそろえる") for fs in forms.values() if len(fs) > 1]
     return issues
 
-# 動作確認用に手作りした文書 (1〜2 文) と、含まれる問題の種類 (正解)。空集合は「問題なし」
+# 動作確認用に手作りした文書（1〜2 文）と、含まれる問題の種類（正解）。空集合は「問題なし」
 DOCS = [
     ("このツールを使えば、作業を自動化することができます。", {"冗長"}),
     ("会議では、まず最初に前回の議事録を確認します。", {"冗長"}),
@@ -808,21 +808,26 @@ DOCS = [
      "各担当者から意見を出してもらい最終的な方針を決める予定です。", {"長文"}),
     ("先生がおっしゃられたとおり、この方法で問題を解決することができます。", {"二重敬語", "冗長"}),
     ("明日は6時に起きれるので、子どもを駅まで送る。子供はきっと喜ぶだろう。", {"ら抜き", "表記ゆれ"}),
-    # 以下は問題のない文 (規則が誤検出しやすい形を含む)
+    # 以下は問題のない文（規則が誤検出しやすい形を含む）
     ("この服はまだ着られる。", set()), ("駅から歩いて帰れる距離だ。", set()), ("この道は狭くて車が通れない。", set()),
     ("この部屋からは富士山が見られる。", set()), ("部長は明日の会議にいらっしゃいます。", set()), ("先生がおっしゃったとおりです。", set()),
     ("東京に住んでいる友人に手紙を送った。", set()), ("彼は私が書いた本が好きだ。", set()), ("忙しいときは昼食を抜くことがある。", set()),
     ("新しい制度は来月から始まるが、詳しい手続きは担当者から改めて連絡する予定である。", set()),
     ("この方法なら、誰でも簡単に設定できます。", set()), ("会議は午後3時から始まります。資料は事前に配布します。", set()),
 ]
+def show(text, gold, pred, issues, width=(20, 30)):
+    """1 文書を 1 行で表示する。正解と合わなければ × と正解の種類も出す"""
+    head = text if len(text) <= 14 else text[:14] + "…"
+    mark = "○" if pred == gold else f"×［正解 {'・'.join(sorted(gold)) or 'なし'}］"
+    found = " / ".join(f"{c}「{span[:width[0]]}」→ {advice[:width[1]]}" for c, span, advice in issues)
+    print(f"{mark} {head}  {found or '指摘なし'}")
+
 print(len(DOCS), "文書")
 rule_pred = []
 for text, gold in DOCS:
     issues = rule_check(text)
     rule_pred.append({c for c, _, _ in issues})
-    print(f"{'○' if rule_pred[-1] == gold else '×'} {text[:24]}  正解 {sorted(gold)}")
-    for c, span, advice in issues:
-        print(f"      {c}: {span} → {advice}")
+    show(text, gold, rule_pred[-1], issues)
 ```
 
 ```python
@@ -830,7 +835,7 @@ for text, gold in DOCS:
 import json, os, subprocess
 from pathlib import Path
 
-config = {"rules": {"preset-ja-technical-writing": {"sentence-length": {"max": 80}},   # 文の長さの上限を規則とそろえる (既定は 100 字)
+config = {"rules": {"preset-ja-technical-writing": {"sentence-length": {"max": 80}},   # 文の長さの上限を規則とそろえる（既定は 100 字）
                     "@textlint-ja/no-synonyms": True}}
 Path(".textlintrc.json").write_text(json.dumps(config))
 Path("docs").mkdir(exist_ok=True)
@@ -843,7 +848,7 @@ out = r.stdout
 if not out:      # インストールの失敗などで textlint が動かなかったときは、エラーを表示する
     print(r.stderr)
 
-# 規則の名前を、この表の種類に対応づける (二重敬語の規則はプリセットにない。ほかの規則の指摘は「その他」)
+# 規則の名前を、この表の種類に対応づける（二重敬語の規則はプリセットにない。ほかの規則の指摘は「その他」）
 TL_CAT = {"ja-no-redundant-expression": "冗長", "no-dropping-the-ra": "ら抜き", "no-doubled-joshi": "助詞連続",
           "sentence-length": "長文", "max-ten": "長文", "no-synonyms": "表記ゆれ"}
 tl_msgs = {p: [] for p in paths}
@@ -867,8 +872,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 torch.manual_seed(0)
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"     # MIT ライセンス
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (注意書きを参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（注意書きを参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -902,14 +907,12 @@ def llm_check(text):
             issues.append((f[0], f[1], f[2] if len(f) > 2 else ""))
     return issues
 
-# 43 文書の生成は T4 で 3 分ほど (初回はモデルのダウンロードに数分かかる)
+# 43 文書の生成は T4 で 3 分ほど（初回はモデルのダウンロードに数分かかる）
 llm_pred = []
 for text, gold in DOCS:
     issues = llm_check(text)
     llm_pred.append({c for c, _, _ in issues})
-    print(f"{'○' if llm_pred[-1] == gold else '×'} {text[:24]}  正解 {sorted(gold)}")
-    for c, span, advice in issues:
-        print(f"      {c}: {span[:30]} → {advice[:40]}")
+    show(text, gold, llm_pred[-1], issues, width=(20, 25))
 ```
 
 ```python
@@ -929,14 +932,15 @@ pd.DataFrame(table)
 ```
 
 ```python
-# 誤検出 (正解にない指摘) と見逃し (正解にあるのに指摘なし) を並べる
+# 誤検出（正解にない指摘）と見逃し（正解にあるのに指摘なし）を種類ごとにまとめて並べる
 for sys_name, preds in [("規則", rule_pred), ("textlint", tl_pred), ("LLM", llm_pred)]:
     print(f"■ {sys_name}")
-    for p, (text, gold) in zip(preds, DOCS):
-        if p - gold:
-            print(f"   誤検出 {sorted(p - gold)}: {text[:30]}")
-        if gold - p:
-            print(f"   見逃し {sorted(gold - p)}: {text[:30]}")
+    for kind in ("誤検出", "見逃し"):
+        for cat in CATS:
+            hits = [text[:10] for p, (text, gold) in zip(preds, DOCS)
+                    if cat in (p - gold if kind == "誤検出" else gold - p)]
+            if hits:
+                print(f"   {kind} {cat} {len(hits)} 件: {' / '.join(hits)}")
 ```
 
 - 文法誤り訂正（この章の「LLM で日本語の文法誤りを訂正して評価する」など）は、誤りを含む文を正しい文 1 つに書き換える。校正支援は、文法的には正しくても読みにくい箇所に印を付けて理由と書き直しの案を示し、直すかどうかは書き手に任せる。そのため評価も、参照文との一致ではなく、指摘の正しさ（適合率）と見逃しの少なさ（再現率）で見る。

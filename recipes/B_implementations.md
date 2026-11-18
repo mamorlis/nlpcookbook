@@ -372,8 +372,8 @@ from datasets import load_dataset
 
 random.seed(0); np.random.seed(0); torch.manual_seed(0)
 
-# 日本語版 Wikipedia (wikimedia/wikipedia の 20231101.ja。本文は CC BY-SA 3.0 と GFDL)
-# ストリーミングで 25,000 記事を取り出し、短い記事を除いて、各記事の先頭 2,000 文字だけを使う (1 分ほど)
+# 日本語版 Wikipedia（wikimedia/wikipedia の 20231101.ja。本文は CC BY-SA 3.0 と GFDL）
+# ストリーミングで 25,000 記事を取り出し、短い記事を除いて、各記事の先頭 2,000 文字だけを使う（1 分ほど）
 wiki = load_dataset("wikimedia/wikipedia", "20231101.ja", split="train", streaming=True)
 texts = [a["text"][:2000] for a in wiki.shuffle(seed=0, buffer_size=10000).take(25000) if len(a["text"]) >= 300]
 train_texts, val_texts = texts[:-500], texts[-500:]   # 最後の 500 記事を検証用に取っておく
@@ -392,7 +392,7 @@ bpe.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
 bpe.decoder = decoders.ByteLevel()
 trainer = trainers.BpeTrainer(vocab_size=8000, special_tokens=["<|endoftext|>"],
                               initial_alphabet=pre_tokenizers.ByteLevel.alphabet(), show_progress=False)
-bpe.train_from_iterator(train_texts[:8000], trainer)                  # 語彙は学習データの一部 8,000 記事から作る (Colab で 1 分以内)
+bpe.train_from_iterator(train_texts[:8000], trainer)                  # 語彙は学習データの一部 8,000 記事から作る（Colab で 1 分以内）
 tokenizer = PreTrainedTokenizerFast(tokenizer_object=bpe, bos_token="<|endoftext|>", eos_token="<|endoftext|>")
 
 ids = tokenizer("吾輩は猫である。自然言語処理は人工知能の一分野である。")["input_ids"]
@@ -413,7 +413,7 @@ val_chars = sum(len(t) for t in val_texts)
 print(f"学習 {n_train / 1e6:.1f}M トークン ({train_data.shape[0]} ブロック) / 検証 {n_val / 1e3:.0f}K トークン")
 print(f"1 トークンあたり {val_chars / n_val:.2f} 文字")
 
-# 比較の基準: 文脈を見ずにトークンの出現頻度だけで予測するモデル (ユニグラム) のパープレキシティ
+# 比較の基準: 文脈を見ずにトークンの出現頻度だけで予測するモデル（ユニグラム）のパープレキシティ
 counts = torch.bincount(train_data.flatten(), minlength=len(tokenizer)).float() + 1
 unigram_loss = -(counts / counts.sum()).log()[val_data.flatten()].mean().item()
 print(f"ユニグラムのパープレキシティ: {np.exp(unigram_loss):.0f} (語彙 {len(tokenizer)})")
@@ -445,7 +445,7 @@ amp = dict(device_type="cuda", dtype=torch.bfloat16 if BF16 else torch.float16)
 
 @torch.no_grad()
 def evaluate(data, max_blocks=None):
-    """検証データの 1 トークンあたりの平均損失 (負対数尤度、自然対数)"""
+    """検証データの 1 トークンあたりの平均損失（負対数尤度、自然対数）"""
     model.eval()
     losses = [model(input_ids=x.to(device), labels=x.to(device)).loss.item() for x in data[:max_blocks].split(64)]
     model.train()
@@ -455,25 +455,25 @@ prompts = ["日本の首都は", "猫は"]
 SAMPLING = dict(do_sample=True, temperature=0.8, top_p=0.95, top_k=0)
 @torch.no_grad()
 def sample(prompt, seed=0, **kwargs):
-    """プロンプトの続きを 40 トークン生成する (kwargs は generate に渡すデコードの設定)"""
+    """プロンプトの続きを 40 トークン生成する（kwargs は generate に渡すデコードの設定）"""
     model.eval()
-    torch.manual_seed(seed)                      # 生成用の乱数 (データの順番は下の data_gen で別に管理する)
+    torch.manual_seed(seed)                      # 生成用の乱数（データの順番は下の data_gen で別に管理する）
     ids = tokenizer(tokenizer.bos_token + prompt, return_tensors="pt", return_token_type_ids=False).to(device)
     out = model.generate(**ids, max_new_tokens=40, pad_token_id=tokenizer.eos_token_id, **kwargs)
     model.train()
     return tokenizer.decode(out[0, 1:], skip_special_tokens=True).replace("\n", " ")
 
-log, samples, recent = [], {}, []        # log: (ステップ, 検証の損失, 直前の区間の学習の損失の平均, 経過秒)
+log, samples, recent = [], {}, []        # log:（ステップ, 検証の損失, 直前の区間の学習の損失の平均, 経過秒）
 step, t0 = 0, time.time()
 data_gen = torch.Generator().manual_seed(0)   # データの順番専用の乱数。sample() の manual_seed の影響を受けない
 model.train()
-# T4 で 15 分ほど (A5000 で 4 分強から見積もり。最初に出る loss_type=None の警告は無害)
+# Colab の T4 で 10〜15 分程度（検証の GPU での時間の 2〜3 倍として見積もった目安。T4 では測っていない。最初に出る loss_type=None の警告は無害）
 while step < STEPS:
-    for idx in torch.randperm(len(train_data), generator=data_gen).split(BATCH):          # 1 周 (エポック) ごとにブロックの順番をシャッフル
+    for idx in torch.randperm(len(train_data), generator=data_gen).split(BATCH):          # 1 周（エポック）ごとにブロックの順番をシャッフル
         if step % 250 == 0 or step in (50, 100):
             train_loss = torch.stack(recent).mean().item() if recent else float("nan"); recent = []
-            log.append((step, evaluate(val_data, 200), train_loss, time.time() - t0))   # 検証は先頭 200 ブロック (約 5 万トークン) で概算
-            print(f"step {step:5}  学習の損失 {train_loss:.3f}  検証の損失 {log[-1][1]:.3f}  検証 PPL {math.exp(log[-1][1]):7.1f}  {log[-1][3]:4.0f} 秒")
+            log.append((step, evaluate(val_data, 200), train_loss, time.time() - t0))   # 検証は先頭 200 ブロック（約 5 万トークン）で概算
+            print(f"step {step:5}  学習の損失 {train_loss:.3f}  検証の損失 {log[-1][1]:.3f}  検証 PPL {math.exp(log[-1][1]):7.1f}")
         if step in (0, 100, 500, 1000, 2500):
             samples[step] = [sample(p, **SAMPLING) for p in prompts]
         if step == STEPS:
@@ -490,7 +490,7 @@ while step < STEPS:
         step += 1
 samples[STEPS] = [sample(p, **SAMPLING) for p in prompts]
 val_loss = evaluate(val_data)
-print(f"学習 {step} ステップ ({step * BATCH / len(train_data):.1f} エポック)、{time.time() - t0:.0f} 秒、GPU メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+print(f"学習 {step} ステップ ({step * BATCH / len(train_data):.1f} エポック)、GPU メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 print(f"検証データ全体: 損失 {val_loss:.3f}  PPL {math.exp(val_loss):.1f}  1 文字あたり {val_loss * n_val / val_chars / math.log(2):.2f} bit")   # 文字数は正規化前の元の文字数
 ```
 
@@ -511,8 +511,8 @@ plt.tight_layout(); plt.show()
 ```
 
 ```python
-# 学習の途中で生成した文章 (同じ乱数の種で、temperature 0.8、top_p 0.95 のサンプリング)
-val_at = {s: v for s, v, _, _ in log}          # ステップ → 検証の損失 (先頭 200 ブロック)
+# 学習の途中で生成した文章（同じ乱数の種で、temperature 0.8、top_p 0.95 のサンプリング）
+val_at = {s: v for s, v, _, _ in log}          # ステップ → 検証の損失（先頭 200 ブロック）
 for s, outs in samples.items():
     print(f"--- step {s} (検証 PPL {math.exp(val_at[s]):.0f})")
     for o in outs:
@@ -520,7 +520,7 @@ for s, outs in samples.items():
 ```
 
 ```python
-# この章の「言語モデルで文の自然さ (パープレキシティ) を測る」と同じ文で、自分で学習したモデルの確率を見る
+# 言語モデルの確率と内部を調べるの章の「言語モデルで文の自然さ（パープレキシティ）を測る」と同じ文で、自分で学習したモデルの確率を見る
 @torch.no_grad()
 def score(text):
     ids = tokenizer(tokenizer.bos_token + text, return_tensors="pt")["input_ids"].to(device)
@@ -537,7 +537,7 @@ pairs = [("太郎が本を読んだ。", "太郎が本が読んだ。"), ("私�
 for good, bad in pairs:
     print("○" if score(good)[0] > score(bad)[0] else "×", good, "/", bad)
 
-# この章の「テキスト生成のデコード方法 (貪欲法・ビームサーチ・サンプリング) を比べる」と同じく、デコードの方法で出力が変わる
+# Transformers の基本操作の章の「テキスト生成のデコード方法（貪欲法・ビームサーチ・サンプリング）を比べる」と同じく、デコードの方法で出力が変わる
 for label, kw in [("貪欲法", dict(do_sample=False)), ("貪欲法 + no_repeat_ngram_size=3", dict(do_sample=False, no_repeat_ngram_size=3)),
                   ("サンプリング (temperature 0.8)", SAMPLING)]:
     print(f"{label:30}", sample("日本の首都は", **kw))
@@ -549,7 +549,7 @@ for label, kw in [("貪欲法", dict(do_sample=False)), ("貪欲法 + no_repeat_
 - バイト単位の BPE（GPT-2 と同じ方式）で語彙 8,000 にすると、1 トークンあたり 1.55 文字で、「吾輩」「人工知能」は 1 文字ずつに分かれた（トークナイザーの学習はサブワードとトークナイザの章の「Hugging Face tokenizers で BPE / WordPiece を学習する」も参照）。トークンあたりの PPL はトークナイザーで変わるので、分割の違うモデルと比べるときは 1 文字あたりのビット数（ここでは 3.47 bit）にそろえる。
 - 言語モデルの確率と内部を調べるの章の「言語モデルで文の自然さ（パープレキシティ）を測る」と同じ 3 文では、PPL が正しい文 208.5、助詞を誤った文 396.7、語順を崩した文 1,373.6 の順になった。最小対は 4 組中 3 組で正しい文を選び、「昨日〜行った / 行く」の時制は外した。4 組では何も言えないので、系統的に調べるなら言語モデルの確率と内部を調べるの章の「言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)」の方法を使う。
 - 貪欲法では「東京都港区にある、」を繰り返すループに陥った。`no_repeat_ngram_size=3` で同じ並びの繰り返しは止まるが、「東京都港区と東京都港区の境界」のような形を変えた繰り返しは残る。小さなモデルほど繰り返しに陥りやすく、Transformers の基本操作の章の「テキスト生成のデコード方法（貪欲法・ビームサーチ・サンプリング）を比べる」のサンプリングの設定が効いてくる。
-- 13.8M パラメータ（うち埋め込み 3.2M）、学習中の GPU メモリは 2.7 GB。検証のマシン（RTX A5000、T4 と同じ float16 の経路）で学習のセルは 251 秒（1 ステップ約 50ms）で、T4 はこれより遅い。ここに書いた数値と生成文はこのマシンでの 1 回の結果で、GPU が違うと計算の細部が変わり、生成文や最小対の結果は別のものになりうる。
+- 13.8M パラメータ（うち埋め込み 3.2M）、学習中の GPU メモリは 2.7 GB。検証の GPU（T4 より速いもの。T4 と同じ float16 の経路）で学習のセルは約 4 分（1 ステップ約 50ms）で、T4 ではこの 2〜3 倍かかると見込む。ここに書いた数値と生成文は検証の GPU での 1 回の結果で、GPU が違うと計算の細部が変わり、生成文や最小対の結果は別のものになりうる。
 - 学習したトークンは延べ 4,100 万（重複しないのは 1,880 万）で、パラメータ数の約 3 倍（重複なしでは約 1.4 倍）。Chinchilla (Hoffmann et al., 2022) は 70B パラメータを 1.4 兆トークン（約 20 倍）で学習しており、それに比べるとデータがかなり少ない。エンコーダー・デコーダーをゼロから学習する例は、機械翻訳の章の「Transformer の翻訳モデルをゼロから学習する」にある。
 - データは日本語版 Wikipedia（wikimedia/wikipedia の 20231101.ja、データセットカードによれば本文は GFDL と CC BY-SA 3.0）。読み込みはTransformers の基本操作の章の「巨大なデータセットをダウンロードせずにストリーミングで読む」と同じストリーミングで、`shuffle` はバッファ内の近似的なシャッフル。各記事の先頭 2,000 文字だけを使っているので、記事の冒頭（定義文）に偏っている。
 - 実務でライブラリを使って同じことをする版は、Transformers の基本操作の章の「統制した自前のコーパスで小さな GPT を事前学習する (Trainer)」。
@@ -792,7 +792,7 @@ for k in [10, 30]:
 
 ```python
 def label_propagation(A, y, labeled, alpha=0.9, iterations=50):
-    """ラベル拡散法: 隣の文書のスコアを受け取ることを繰り返す (alpha は隣からもらう割合)"""
+    """ラベル拡散法: 隣の文書のスコアを受け取ることを繰り返す（alpha は隣からもらう割合）"""
     d = np.asarray(A.sum(axis=1)).ravel()
     d_inv = np.where(d > 0, 1 / np.sqrt(np.maximum(d, 1e-12)), 0)
     W = sp.diags(d_inv) @ A @ sp.diags(d_inv)
@@ -819,17 +819,26 @@ pd.DataFrame(results).groupby("1 クラスあたりのラベル数").mean().roun
 ```
 
 ```python
-# k 近傍グラフでは、多くの文書の近傍に入る「ハブ」ができる。ハブは別のクラスの文書どうしをつないでしまう
+# k 近傍グラフでは、多くの文書の近傍に入る「ハブ」ができる。ハブの辺の多くは一方向（相手の k 近傍にハブが入っているだけ）で、
+# 一方向の辺は、互いに近傍である辺より別のクラスどうしを結びやすい。相互 k 近傍グラフは一方向の辺を捨てる
 A = knn_graph(S, 30, mutual=False)
+M = knn_graph(S, 30, mutual=True)
+rows, cols = sp.triu(A).nonzero()
+kept = np.asarray(M[rows, cols]).ravel() > 0
+same = y[rows] == y[cols]
 degree = np.asarray((A > 0).sum(axis=1)).ravel()
-hubs = np.argsort(-degree)[:5]
-for h in hubs:
+print(f"同じクラスどうしを結ぶ辺の割合: 互いに近傍の辺 {same[kept].mean():.3f} / 一方向の辺 {same[~kept].mean():.3f} / 次数の中央値 {np.median(degree):.0f}")
+
+own = np.argsort(-S, axis=1)[:, :30]           # 各文書自身の k 近傍
+for h in np.argsort(-degree)[:5]:
     neighbors = A[h].nonzero()[1]
-    print(f"次数 {degree[h]} / クラス {df['label'][h]} / 近傍のうち同じクラス {np.mean(y[neighbors] == y[h]):.2f} | {df['text'][h].splitlines()[0][:40]}")
+    one_way = np.setdiff1d(neighbors, own[h])   # ハブを k 近傍に入れているが、ハブの k 近傍には入らない文書
+    print(f"次数 {degree[h]} / クラス {df['label'][h]} / 同じクラスの割合: 自身の k 近傍 {np.mean(y[own[h]] == y[h]):.2f}, 一方向の近傍 {len(one_way)} 件 {np.mean(y[one_way] == y[h]):.2f}"
+          f" / 別のクラスの近傍 {(y[neighbors] != y[h]).sum()} 件 | {df['text'][h].splitlines()[0][:30]}")
 ```
 
 - グラフに基づく半教師あり学習は、「似ている文書は同じラベルを持つ」という仮定で、少数のラベルをグラフの辺に沿って広げる。ラベルが極端に少ないときに効果が大きい。
-- 結果はグラフの作り方に強く左右される。普通の k 近傍グラフは、多くの点の近傍になる「ハブ」を生み、ハブを通って違うクラスにラベルが流れる。
+- 結果はグラフの作り方に強く左右される。普通の k 近傍グラフでは、多くの文書の近傍に入る「ハブ」ができる。この実験のハブは、近傍の大半が同じクラスだが、次数が大きいぶん、別のクラスの文書も数十件つながり、ラベルの通り道になる。ハブの辺の多くは片方の k 近傍にだけ入る一方向の辺で、一方向の辺は、互いに近傍である辺より別のクラスどうしを結ぶ割合が高い。
 - 相互 k 近傍グラフ（互いに近傍である組だけを結ぶ）はハブができず、同じクラスどうしを結ぶ辺の割合が高い。その代わり、どこにもつながらない孤立点ができる。この実験では、分類の正解率の差は小さく、ラベル数によって優劣が入れ替わった。
 - ラベルが増えると、普通の教師あり学習との差は縮まり、1 クラス 20 件では逆転している。数十件以上のラベルがあるなら、まずは事前学習済みモデルのファインチューニングや、埋め込み + 分類器（テキスト分類の章の「文埋め込みを特徴量にして少ない学習データで分類する」）を試す。
 - 類似度に文埋め込みを使えば、同じ方法をそのまま適用できる。高次元の埋め込みでもハブは生じる（ハブネス問題）。
