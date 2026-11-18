@@ -1,6 +1,6 @@
 # 検索
 
-転置索引と BM25 によるキーワード検索とその工夫（文字 n-gram、クエリ拡張）、埋め込みによる意味検索、評価、組み合わせと並べ替え（ハイブリッド検索、リランキング、ランキング学習、多様化）、関連記事の推薦、長い文書や言語をまたぐ検索、モデルの微調整、入力中の候補の提示。質問応答や RAG の土台になる。転置索引と BM25 を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
+転置索引と BM25 によるキーワード検索とその工夫（文字 n-gram、入力中の候補の提示、クエリ拡張）、埋め込みによる意味検索、評価、組み合わせと並べ替え（ハイブリッド検索、リランキング、ランキング学習、多様化）、関連記事の推薦、長い文書や言語をまたぐ検索、モデルの微調整。質問応答や RAG の土台になる。転置索引と BM25 を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## SQLite の FTS5 で日本語の文書をブール検索・フレーズ検索する {inverted_index}
 
@@ -210,7 +210,7 @@ for q in ["日本で一番高い山", "BERT とは何ですか", "日本一大�
         print(f"  {scores[i]:.2f}  {docs[i]}")
 ```
 
-- 3 つ目のクエリのように語が一致しない言い換え（大きい ↔ 最大）には弱い。埋め込み検索と組み合わせると補い合える（ハイブリッド検索のレシピを参照）。
+- 3 つ目のクエリでは「大きい」と「最大」が一致しない。琵琶湖が 1 位（1.90）なのは「湖」が一致したからで（「日本」は 6 件中 3 件に出るので IDF が 0 になり、スコアに効かない）、このように語が一致しない言い換えには弱い。ほかに一致する語がなければ見つからない。埋め込み検索と組み合わせると補い合える（ハイブリッド検索のレシピを参照）。
 - 大規模なら `bm25s`（高速な実装）や Elasticsearch / OpenSearch、Pyserini を使う。
 
 ## Elasticsearch で日本語の全文検索をする (kuromoji) {elasticsearch_ja}
@@ -433,6 +433,64 @@ for q in ["京都", "都立"]:
 - かわりに「東京都」の中の「京都」のような、意味のない一致が増える。単語の検索と併用し、単語で一致したものを上位にする構成が実用的。
 - 日本語の全文検索エンジンでは、形態素解析による索引と 2-gram の索引を両方持つのが定石。
 - 表記ゆれの吸収には、検索前の正規化（NFKC、長音の統一、Sudachi の正規化形）も有効。
+
+## 入力の途中で候補を出す・打ち間違いを直す（サジェストと「もしかして」） {search_suggest}
+
+検索窓に数文字入れた時点で候補を出したい。打ち間違いや、ひらがなで入力された語にも対応したい。
+
+```python
+!pip install -q rapidfuzz fugashi unidic-lite jaconv
+```
+
+```python
+import bisect
+import jaconv
+from fugashi import Tagger
+from rapidfuzz import fuzz, process
+
+# 候補の語と人気度 (検索回数など)
+terms = {"自然言語処理": 950, "自然言語理解": 120, "自然言語生成": 200, "機械翻訳": 800, "機械学習": 990, "形態素解析": 400, "係り受け解析": 150,
+         "固有表現抽出": 300, "感情分析": 350, "質問応答": 280, "文法誤り訂正": 180, "大規模言語モデル": 700, "検索拡張生成": 260, "言語モデル": 500}
+
+tagger = Tagger()
+def reading(word):
+    return jaconv.kata2hira("".join(w.feature.kana or w.surface for w in tagger(word)))
+
+# 表記と読みの両方を、前方一致で引けるように並べておく
+entries = sorted([(t, t) for t in terms] + [(reading(t), t) for t in terms])
+keys = [k for k, _ in entries]
+
+def suggest(prefix, k=5):
+    """前方一致する候補を、人気度の高い順に返す (二分探索なので、候補が数百万あっても速い)"""
+    prefix = jaconv.kata2hira(prefix)
+    lo = bisect.bisect_left(keys, prefix)
+    hi = bisect.bisect_right(keys, prefix + "￿")
+    found = {t for _, t in entries[lo:hi]}
+    return sorted(found, key=lambda t: -terms[t])[:k]
+
+for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう"]:
+    print(prefix, "→", suggest(prefix))
+```
+
+```python
+# 前方一致で見つからないときは、編集距離の近い語を「もしかして」として出す
+def did_you_mean(query, limit=2, threshold=60):
+    by_surface = process.extract(query, list(terms), scorer=fuzz.ratio, limit=limit)
+    by_reading = process.extract(reading(query), {t: reading(t) for t in terms}, scorer=fuzz.ratio, limit=limit)
+    best = {}
+    for name, score in [(m[0], m[1]) for m in by_surface] + [(m[2], m[1]) for m in by_reading]:
+        best[name] = max(best.get(name, 0), score)
+    return [(t, round(s)) for t, s in sorted(best.items(), key=lambda x: -x[1]) if s >= threshold][:limit]
+
+for q in ["自然原語処理", "機会翻訳", "けいたいそかいせき", "固有表現注出", "大規模言語モデル", "らーめん"]:
+    hits = suggest(q, 1)
+    print(q, "→", hits if hits else f"もしかして: {did_you_mean(q)}")
+```
+
+- サジェストは「前方一致 + 人気順」が基本。候補をソートしておけば二分探索で引ける。大規模にはトライ木や、検索エンジンの補完機能を使う。
+- 日本語では、変換前のひらがなやローマ字で入力されることが多い。読みでも引けるようにしておくと、「しぜんげんごし」の時点で候補を出せる。
+- 「機会翻訳」のような同音の誤変換は、表記の編集距離では遠くても、読みに直すと完全に一致する。表記と読みの両方で照合するのが有効。
+- しきい値未満なら何も出さない。無関係な語を「もしかして」と出すと、かえって邪魔になる。
 
 ## 検索結果の上位からクエリを拡張する（擬似適合性フィードバック） {query_expansion}
 
@@ -1278,61 +1336,3 @@ model.save("e5-finetuned")
 - 1200 組・1 エポック（CPU で数分）では、改善はごくわずか（Recall@1 で 0.715 → 0.723）。はっきりした効果を得るには、数万組以上のデータと GPU での学習が要る。学習データには、実際のクエリのログや、LLM に文書から作らせた質問（質問応答の章の質問生成）が学習データになる。
 - 「正解ではないが紛らわしい文書」（ハードネガティブ）を BM25 や元のモデルの検索結果から集めて加えると、さらに伸びる。
 - 評価データは必ず学習に使っていない組にする。微調整後は、分野外のクエリでの性能が下がっていないかも確かめる。
-
-## 入力の途中で候補を出す・打ち間違いを直す（サジェストと「もしかして」） {search_suggest}
-
-検索窓に数文字入れた時点で候補を出したい。打ち間違いや、ひらがなで入力された語にも対応したい。
-
-```python
-!pip install -q rapidfuzz fugashi unidic-lite jaconv
-```
-
-```python
-import bisect
-import jaconv
-from fugashi import Tagger
-from rapidfuzz import fuzz, process
-
-# 候補の語と人気度 (検索回数など)
-terms = {"自然言語処理": 950, "自然言語理解": 120, "自然言語生成": 200, "機械翻訳": 800, "機械学習": 990, "形態素解析": 400, "係り受け解析": 150,
-         "固有表現抽出": 300, "感情分析": 350, "質問応答": 280, "文法誤り訂正": 180, "大規模言語モデル": 700, "検索拡張生成": 260, "言語モデル": 500}
-
-tagger = Tagger()
-def reading(word):
-    return jaconv.kata2hira("".join(w.feature.kana or w.surface for w in tagger(word)))
-
-# 表記と読みの両方を、前方一致で引けるように並べておく
-entries = sorted([(t, t) for t in terms] + [(reading(t), t) for t in terms])
-keys = [k for k, _ in entries]
-
-def suggest(prefix, k=5):
-    """前方一致する候補を、人気度の高い順に返す (二分探索なので、候補が数百万あっても速い)"""
-    prefix = jaconv.kata2hira(prefix)
-    lo = bisect.bisect_left(keys, prefix)
-    hi = bisect.bisect_right(keys, prefix + "￿")
-    found = {t for _, t in entries[lo:hi]}
-    return sorted(found, key=lambda t: -terms[t])[:k]
-
-for prefix in ["自然", "しぜんげんごし", "機械", "きかい", "けい", "ぶんぽう"]:
-    print(prefix, "→", suggest(prefix))
-```
-
-```python
-# 前方一致で見つからないときは、編集距離の近い語を「もしかして」として出す
-def did_you_mean(query, limit=2, threshold=60):
-    by_surface = process.extract(query, list(terms), scorer=fuzz.ratio, limit=limit)
-    by_reading = process.extract(reading(query), {t: reading(t) for t in terms}, scorer=fuzz.ratio, limit=limit)
-    best = {}
-    for name, score in [(m[0], m[1]) for m in by_surface] + [(m[2], m[1]) for m in by_reading]:
-        best[name] = max(best.get(name, 0), score)
-    return [(t, round(s)) for t, s in sorted(best.items(), key=lambda x: -x[1]) if s >= threshold][:limit]
-
-for q in ["自然原語処理", "機会翻訳", "けいたいそかいせき", "固有表現注出", "大規模言語モデル", "らーめん"]:
-    hits = suggest(q, 1)
-    print(q, "→", hits if hits else f"もしかして: {did_you_mean(q)}")
-```
-
-- サジェストは「前方一致 + 人気順」が基本。候補をソートしておけば二分探索で引ける。大規模にはトライ木や、検索エンジンの補完機能を使う。
-- 日本語では、変換前のひらがなやローマ字で入力されることが多い。読みでも引けるようにしておくと、「しぜんげんごし」の時点で候補を出せる。
-- 「機会翻訳」のような同音の誤変換は、表記の編集距離では遠くても、読みに直すと完全に一致する。表記と読みの両方で照合するのが有効。
-- しきい値未満なら何も出さない。無関係な語を「もしかして」と出すと、かえって邪魔になる。

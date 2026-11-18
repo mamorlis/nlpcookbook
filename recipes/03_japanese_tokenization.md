@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読み、モーラ数やアクセントを取り出す。NEologd のような辞書の追加、KyTea のモデルの学習による分野への適応、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、KyTea のモデルの学習による分野への適応、解析器の比べ方、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -120,228 +120,6 @@ HTML(f"<p style='font-size:1.4em; line-height:2.2'>{ruby(text)}</p>")
 ```
 
 - 送り仮名ごとルビが付く（「無い」全体に「ない」）。漢字部分だけに付けたい場合は、表層と読みの末尾の共通ひらがなを削る。
-
-## 発音・モーラ数・アクセントを取り出し、5-7-5 や読みの違いを調べる (pyopenjtalk) {mora_accent}
-
-読みの先にある、文の発音（「今日は」→「キョーワ」）、モーラ（拍）の数、アクセント句ごとのアクセント核を取り出したい。音声合成システム Open JTalk のテキスト処理部分を Python から使える pyopenjtalk で求め、俳句・川柳の 5-7-5 の判定と、同じ表記で読みの違う語の読み分けに使う。
-
-```python
-# pyopenjtalk は PyPI にソースだけがあり、インストール時にビルドする（Colab で 2〜5 分ほど）
-!pip install -q pyopenjtalk==0.4.1 fugashi==1.5.2 unidic-lite==1.0.8 kytea
-# KyTea の学習済みモデル（この章の「KyTea で単語分割と読みの推定をする」と同じ）
-!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz
-```
-
-```python
-import pandas as pd
-import pyopenjtalk
-
-pd.set_option("display.unicode.east_asian_width", True)
-
-# 初回の呼び出しで Open JTalk の辞書（約 23MB）を GitHub からダウンロードする
-text = "今日はいい天気ですね。"
-print(pyopenjtalk.g2p(text, kana=True))   # 発音形（カタカナ）
-print(pyopenjtalk.g2p(text))              # 音素列（大文字の母音は無声化）
-
-# run_frontend は単語ごとの解析結果を返す。orig は原形、read は読み、pron は発音、mora_size はモーラ数、
-# acc はアクセント核の位置、chain_flag が 1 なら前の単語と同じアクセント句
-cols = ["string", "pos", "orig", "read", "pron", "mora_size", "acc", "chain_flag"]
-pd.DataFrame(pyopenjtalk.run_frontend(text))[cols]
-```
-
-```python
-import re
-
-def split_mora(kana):
-    """カタカナをモーラに分ける。小書きの「ャュョァィゥェォヮ」は前の文字と合わせて 1 モーラ、「ッ」「ン」「ー」は 1 モーラ"""
-    return re.findall(r".[ァィゥェォャュョヮ]?", kana)
-
-def accent_phrases(text):
-    """アクセント句ごとに、単語・発音・モーラ数・アクセント核（下がり目の直前のモーラの位置。0 は下がらない平板型）を返す"""
-    phrases = []
-    for f in pyopenjtalk.run_frontend(text):
-        if f["mora_size"] == 0:                    # 句読点などの記号
-            continue
-        pron = f["pron"].replace("’", "")          # ’ は直前の母音の無声化の印
-        if f["chain_flag"] == 1 and phrases:       # 前の単語と同じアクセント句
-            phrases[-1]["words"].append(f["string"])
-            phrases[-1]["pron"] += pron
-        else:                                      # 句の先頭の単語の acc が句全体のアクセント核
-            phrases.append({"words": [f["string"]], "pron": pron, "acc": f["acc"]})
-    for p in phrases:
-        mora, acc = split_mora(p["pron"]), p["acc"]
-        p["mora"] = len(mora)
-        p["marked"] = "".join(m + ("＼" if i == acc else "") for i, m in enumerate(mora, 1))
-        p["HL"] = pitch(len(mora), acc)
-    return phrases
-
-def pitch(n, acc):
-    """東京方言の高低: 1 モーラ目と 2 モーラ目は高さが違い、核の後ろで下がる"""
-    if acc == 1:
-        return "H" + "L" * (n - 1)
-    high = (acc or n) - 1                          # 平板型 (0) は最後まで高い
-    return "L" + "H" * high + "L" * (n - 1 - high)
-
-for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
-    print(s)
-    for p in accent_phrases(s):
-        print(f"  {'/'.join(p['words']):16} {p['marked']:14} {p['mora']} モーラ  核 {p['acc']}  {p['HL']}")
-```
-
-```python
-# 確認: 音声合成用のフルコンテキストラベルの /F:f1_f2 はアクセント句のモーラ数と核の位置。
-# ラベルでは平板型 (0) の核を句のモーラ数で表す（Open JTalk の jpcommon_label.c）ので、そろえて比べる
-def phrases_from_labels(text):
-    out, prev = [], None
-    for lab in pyopenjtalk.extract_fullcontext(text):
-        phone = re.search(r"-(.+?)\+", lab).group(1)
-        if phone in ("sil", "pau"):                # 無音・ポーズで句が切れる
-            prev = None
-            continue
-        f = re.search(r"/F:([^/]+)", lab).group(1)
-        if f != prev:
-            out.append(tuple(int(x) for x in re.match(r"(\d+)_(\d+)", f).groups()))
-            prev = f
-    return out
-
-for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
-    mine = [(p["mora"], p["acc"] or p["mora"]) for p in accent_phrases(s)]
-    print(s, mine, mine == phrases_from_labels(s))
-```
-
-```python
-# 読みが同じでアクセントで区別する語。UniDic (unidic-lite) の aType は単語単位のアクセント型
-from fugashi import Tagger
-
-tagger = Tagger()
-rows = []
-for s in ["橋を渡る。", "箸を使う。", "端に寄る。", "雨が降る。", "飴をなめる。"]:
-    word = next(iter(tagger(s)))
-    p = accent_phrases(s)[0]
-    rows.append({"文": s, "語": word.surface, "UniDic aType": word.feature.aType,
-                 "pyopenjtalk の句": p["marked"], "句の核": p["acc"], "高低": p["HL"]})
-print("UniDic aType:", [(w.surface, w.feature.aType) for w in tagger("東京特許許可局")])
-pd.DataFrame(rows)
-```
-
-```python
-# 応用 1: 俳句・川柳の 5-7-5 を判定する。俳句の「音」はモーラで数える（拗音は 1、促音・撥音・長音も 1）
-def nodes(text):
-    return [(f["string"], f["pron"].replace("’", ""), f["mora_size"])
-            for f in pyopenjtalk.run_frontend(text) if f["mora_size"] > 0]
-
-def split_575(text, pattern=(5, 7, 5)):
-    """単語の切れ目で 5・7・5 モーラに分けられれば 3 つの句を返す。分けられなければ理由を返す"""
-    ns = nodes(text)
-    total = sum(m for _, _, m in ns)
-    if total != sum(pattern):
-        return f"{total} モーラ"
-    parts, cur, cum, goal = [], [], 0, 0
-    for surface, pron, m in ns:
-        cur.append((surface, pron))
-        cum += m
-        if cum > goal + pattern[len(parts)]:
-            return f"単語「{surface}」が句の切れ目をまたぐ"
-        if cum == goal + pattern[len(parts)]:
-            parts.append(("".join(s for s, _ in cur), "".join(p for _, p in cur)))
-            cur, goal = [], cum
-    return parts
-
-haiku = [  # 作者の没後 100 年以上たったパブリックドメインの句
-    ("古池や蛙飛び込む水の音", "松尾芭蕉"),
-    ("閑さや岩にしみ入る蝉の声", "松尾芭蕉"),
-    ("菜の花や月は東に日は西に", "与謝蕪村"),
-    ("柿くへば鐘が鳴るなり法隆寺", "正岡子規"),
-    ("やせ蛙まけるな一茶是に有", "小林一茶"),
-] + [(s, "自作") for s in [
-    "今日もまた電車が遅れ汗をかく",
-    "学校のチャイムが鳴ってほっとする",
-    "新しいスマートフォンを買いに行く",
-    "朝からアルバイトをして眠くなる",
-    "自然言語処理の小ネタを集めたい",
-]]
-rows = []
-for text, author in haiku:
-    pron = "".join(p for _, p, _ in nodes(text))
-    r = split_575(text)
-    rows.append({"句": text, "作": author, "発音": pron, "文字数": len(pron), "モーラ数": len(split_mora(pron)),
-                 "判定": " / ".join(p for p, _ in r) if isinstance(r, list) else "× " + r})
-pd.DataFrame(rows)
-```
-
-```python
-# 句の切れ目が分かっているとき（空白区切り）は句ごとに数える。字余りも分かる
-def count_parts(text):
-    return [(part, sum(m for _, _, m in nodes(part))) for part in text.split()]
-
-print(count_parts("雀の子 そこのけそこのけ 御馬が通る"))   # 小林一茶（パブリックドメイン）
-print(count_parts("ちょっと待って ショートケーキが 売り切れだ"))  # 自作
-```
-
-```python
-# 応用 2: 同じ表記で読みの違う語を、MeCab + UniDic、KyTea、pyopenjtalk で読み分けられるか比べる（例文は自作）
-import Mykytea
-
-kytea = Mykytea.Mykytea("-model model.bin")
-
-def hira2kata(s):
-    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
-
-def span_reading(tokens, sent, target):
-    """(表層, 読み) の列から、target の文字範囲に重なる単語の読みをつなげる"""
-    # 表層をつなぐと元の文になると仮定している。pyopenjtalk は表層を書き換えることがあり
-    # （「く」→「九」など）、長さが変わると文字位置がずれるので、写して使うときは注意する
-    i = sent.index(target)
-    j, pos, out = i + len(target), 0, []
-    for surface, yomi in tokens:
-        if pos < j and pos + len(surface) > i:
-            out.append(yomi)
-        pos += len(surface)
-    return "".join(out)
-
-readers = {
-    "MeCab+UniDic": lambda s: [(w.surface, w.feature.kana or w.surface) for w in tagger(s)],
-    "KyTea": lambda s: [(w.surface, hira2kata(w.tag[1][0][0])) for w in kytea.getTags(s)],
-    "pyopenjtalk": lambda s: [(f["string"], f["read"]) for f in pyopenjtalk.run_frontend(s)],
-}
-cases = [  # (文, 対象の語, 正しい読み)
-    ("今日は朝から雨が降っている。", "今日", "キョウ"),
-    ("今日では誰もがスマートフォンを持っている。", "今日", "コンニチ"),
-    ("魚を市場で買って帰った。", "市場", "イチバ"),
-    ("株式市場が大きく混乱した。", "市場", "シジョウ"),
-    ("彼は料理が上手だ。", "上手", "ジョウズ"),
-    ("相手の方が一枚上手だった。", "上手", "ウワテ"),
-    ("役者が舞台の上手から登場する。", "上手", "カミテ"),
-    ("生物の授業で細胞を学んだ。", "生物", "セイブツ"),
-    ("生物は早めに食べてください。", "生物", "ナマモノ"),
-    ("一日に三回薬を飲む。", "一日", "イチニチ"),
-    ("四月一日は入学式だ。", "一日", "ツイタチ"),
-    ("人気のある店に並ぶ。", "人気", "ニンキ"),
-    ("人気のない夜道を歩く。", "人気", "ヒトケ"),
-    ("この辛いカレーは汗が出る。", "辛い", "カライ"),
-    ("友達との別れが辛い。", "辛い", "ツライ"),
-    ("この店は大人気だ。", "大人気", "ダイニンキ"),
-    ("大人気ない態度をとった。", "大人気", "オトナゲ"),
-]
-rows = []
-for sent, target, gold in cases:
-    row = {"文": sent, "語": target, "正解": gold}
-    for name, f in readers.items():
-        y = span_reading(f(sent), sent, target)
-        row[name] = ("○ " if y.startswith(gold) else "× ") + y
-    rows.append(row)
-df = pd.DataFrame(rows)
-print({name: f"{df[name].str.startswith('○').sum()}/{len(df)}" for name in readers})
-df
-```
-
-- pyopenjtalk は山本龍一氏による Open JTalk（名古屋工業大学の HTS Working Group が開発した日本語音声合成システム）の Python ラッパーで、MIT ライセンス。Open JTalk 本体は修正 BSD ライセンス。初回に自動でダウンロードされる辞書 (open_jtalk_dic_utf_8-1.11) は mecab-naist-jdic を元にしたもので、同梱の COPYING によれば奈良先端科学技術大学院大学と UniDic コンソーシアムの修正 BSD ライセンス。ここでは `run_frontend`（テキスト処理）と `extract_fullcontext`（ラベル）だけを使い、音声合成はしない。品詞は IPA 辞書の体系で、「いい天気」の「いい」が動詞「いう」と解析されるような誤りもある。
-- この章の「漢字の読みを取得してふりがな（ルビ）を付ける」と「KyTea で単語分割と読みの推定をする」は単語の読みまでを出す。pyopenjtalk はその先の、助詞の「は」→「ワ」や長音（「キョウ」→「キョー」）を反映した発音、無声化、アクセント句への区切りとアクセント核を出す。アクセント核は単語ごとの辞書のアクセント型に結合の規則を当てて句ごとに決まる。UniDic の `aType` は単語単位で「東京」は 0 型だが、pyopenjtalk では「東京特許許可局」が 1 つの句（11 モーラ、核 9）になった。
-- 「橋」「箸」「端」は UniDic の aType でも pyopenjtalk でも 2・1・0 型で、助詞まで含めた句で見ると「ハシ＼ヲ」「ハ＼シヲ」「ハシニ」と違いが出る（尾高型の「橋」と平板型の「端」は、単語だけでは高低が同じになる）。アクセントは辞書と規則による東京方言の推定である。
-- 5-7-5 の判定では、発音のカタカナの文字数は小書きの「ョ」「ャ」などの分だけモーラ数より多い（「今日もまた電車が遅れ汗をかく」は 19 文字で 17 モーラ）。判定は読みの推定に左右され、芭蕉の「閑さや」は「ヒマサヤ」、一茶の「是に有」は「ゼニユー」と読まれて、どちらも 16 モーラになった（正しくは「シズカサヤ」「コレニアリ」）。合計が 17 モーラでも、単語が句の切れ目をまたぐ句（句またがり）は × になる（「朝からアルバイトをして眠くなる」）。子規の「柿くへば」は旧仮名遣いの「くへ」が「九」「へ」と解析されたが、発音は「カキクエバ」で 17 モーラになった。古典や旧仮名遣いの句は、判定の前に読みを人が確かめる（古文の解析は、この章の「古文を形態素解析する（中古和文 UniDic）」を参照）。
-- 読み分けは自作の 17 例で、正解は MeCab + UniDic が 10、KyTea と pyopenjtalk が 11 だった。例が少ないので、優劣ではなく誤り方の違いとして見る。「市場（イチバ）」「生物（ナマモノ）」「人気（ヒトケ）」は 3 つとも誤り、「舞台の上手（カミテ）」は UniDic だけ、「一枚上手（ウワテ）」「大人気ない」は pyopenjtalk だけ、「今日では（コンニチ）」「辛いカレー（カライ）」は KyTea だけが当てた。読みの候補とスコアを見たいときは、KyTea の `getAllTags` を使う（「KyTea で単語分割と読みの推定をする」を参照）。
-- 決まった語の読みやアクセントを直したいときは、pyopenjtalk のユーザー辞書（`mecab_dict_index` で CSV から作り、`update_global_jtalk_with_user_dict` で読み込む）を使う。文脈で読みが変わる語は、辞書の登録では直らない。
-- pyopenjtalk は PyPI に wheel がなく、インストール時に C++ のコードをビルドする（検証では 2 コアでインストールのセル全体が約 3 分）。派生版の pyopenjtalk-plus は、ビルド済みの wheel と独自に修正した辞書を同梱し、同じ `import pyopenjtalk` で使えると README にある（MIT ライセンス）。両方を同じ環境に入れると衝突するので、どちらか一方を入れる。
 
 ## 動詞・形容詞の活用型と活用形を調べる {conjugation}
 
@@ -1248,6 +1026,228 @@ for s in ["外国人参政権について話し合った。", "東京都立大�
 
 - 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
 
+## 発音・モーラ数・アクセントを取り出し、5-7-5 や読みの違いを調べる (pyopenjtalk) {mora_accent}
+
+読みの先にある、文の発音（「今日は」→「キョーワ」）、モーラ（拍）の数、アクセント句ごとのアクセント核を取り出したい。音声合成システム Open JTalk のテキスト処理部分を Python から使える pyopenjtalk で求め、俳句・川柳の 5-7-5 の判定と、同じ表記で読みの違う語の読み分けに使う。
+
+```python
+# pyopenjtalk は PyPI にソースだけがあり、インストール時にビルドする（Colab で 2〜5 分ほど）
+!pip install -q pyopenjtalk==0.4.1 fugashi==1.5.2 unidic-lite==1.0.8 kytea
+# KyTea の学習済みモデル（この章の「KyTea で単語分割と読みの推定をする」と同じ）
+!wget -q https://github.com/neubig/kytea/raw/master/data/model.bin.gz && gunzip -f model.bin.gz
+```
+
+```python
+import pandas as pd
+import pyopenjtalk
+
+pd.set_option("display.unicode.east_asian_width", True)
+
+# 初回の呼び出しで Open JTalk の辞書（約 23MB）を GitHub からダウンロードする
+text = "今日はいい天気ですね。"
+print(pyopenjtalk.g2p(text, kana=True))   # 発音形（カタカナ）
+print(pyopenjtalk.g2p(text))              # 音素列（大文字の母音は無声化）
+
+# run_frontend は単語ごとの解析結果を返す。orig は原形、read は読み、pron は発音、mora_size はモーラ数、
+# acc はアクセント核の位置、chain_flag が 1 なら前の単語と同じアクセント句
+cols = ["string", "pos", "orig", "read", "pron", "mora_size", "acc", "chain_flag"]
+pd.DataFrame(pyopenjtalk.run_frontend(text))[cols]
+```
+
+```python
+import re
+
+def split_mora(kana):
+    """カタカナをモーラに分ける。小書きの「ャュョァィゥェォヮ」は前の文字と合わせて 1 モーラ、「ッ」「ン」「ー」は 1 モーラ"""
+    return re.findall(r".[ァィゥェォャュョヮ]?", kana)
+
+def accent_phrases(text):
+    """アクセント句ごとに、単語・発音・モーラ数・アクセント核（下がり目の直前のモーラの位置。0 は下がらない平板型）を返す"""
+    phrases = []
+    for f in pyopenjtalk.run_frontend(text):
+        if f["mora_size"] == 0:                    # 句読点などの記号
+            continue
+        pron = f["pron"].replace("’", "")          # ’ は直前の母音の無声化の印
+        if f["chain_flag"] == 1 and phrases:       # 前の単語と同じアクセント句
+            phrases[-1]["words"].append(f["string"])
+            phrases[-1]["pron"] += pron
+        else:                                      # 句の先頭の単語の acc が句全体のアクセント核
+            phrases.append({"words": [f["string"]], "pron": pron, "acc": f["acc"]})
+    for p in phrases:
+        mora, acc = split_mora(p["pron"]), p["acc"]
+        p["mora"] = len(mora)
+        p["marked"] = "".join(m + ("＼" if i == acc else "") for i, m in enumerate(mora, 1))
+        p["HL"] = pitch(len(mora), acc)
+    return phrases
+
+def pitch(n, acc):
+    """東京方言の高低: 1 モーラ目と 2 モーラ目は高さが違い、核の後ろで下がる"""
+    if acc == 1:
+        return "H" + "L" * (n - 1)
+    high = (acc or n) - 1                          # 平板型 (0) は最後まで高い
+    return "L" + "H" * high + "L" * (n - 1 - high)
+
+for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
+    print(s)
+    for p in accent_phrases(s):
+        print(f"  {'/'.join(p['words']):16} {p['marked']:14} {p['mora']} モーラ  核 {p['acc']}  {p['HL']}")
+```
+
+```python
+# 確認: 音声合成用のフルコンテキストラベルの /F:f1_f2 はアクセント句のモーラ数と核の位置。
+# ラベルでは平板型 (0) の核を句のモーラ数で表す（Open JTalk の jpcommon_label.c）ので、そろえて比べる
+def phrases_from_labels(text):
+    out, prev = [], None
+    for lab in pyopenjtalk.extract_fullcontext(text):
+        phone = re.search(r"-(.+?)\+", lab).group(1)
+        if phone in ("sil", "pau"):                # 無音・ポーズで句が切れる
+            prev = None
+            continue
+        f = re.search(r"/F:([^/]+)", lab).group(1)
+        if f != prev:
+            out.append(tuple(int(x) for x in re.match(r"(\d+)_(\d+)", f).groups()))
+            prev = f
+    return out
+
+for s in ["今日はいい天気ですね。", "東京特許許可局", "ちょっと待ってください。", "新しいスマートフォンを買いに行く。"]:
+    mine = [(p["mora"], p["acc"] or p["mora"]) for p in accent_phrases(s)]
+    print(s, mine, mine == phrases_from_labels(s))
+```
+
+```python
+# 読みが同じでアクセントで区別する語。UniDic (unidic-lite) の aType は単語単位のアクセント型
+from fugashi import Tagger
+
+tagger = Tagger()
+rows = []
+for s in ["橋を渡る。", "箸を使う。", "端に寄る。", "雨が降る。", "飴をなめる。"]:
+    word = next(iter(tagger(s)))
+    p = accent_phrases(s)[0]
+    rows.append({"文": s, "語": word.surface, "UniDic aType": word.feature.aType,
+                 "pyopenjtalk の句": p["marked"], "句の核": p["acc"], "高低": p["HL"]})
+print("UniDic aType:", [(w.surface, w.feature.aType) for w in tagger("東京特許許可局")])
+pd.DataFrame(rows)
+```
+
+```python
+# 応用 1: 俳句・川柳の 5-7-5 を判定する。俳句の「音」はモーラで数える（拗音は 1、促音・撥音・長音も 1）
+def nodes(text):
+    return [(f["string"], f["pron"].replace("’", ""), f["mora_size"])
+            for f in pyopenjtalk.run_frontend(text) if f["mora_size"] > 0]
+
+def split_575(text, pattern=(5, 7, 5)):
+    """単語の切れ目で 5・7・5 モーラに分けられれば 3 つの句を返す。分けられなければ理由を返す"""
+    ns = nodes(text)
+    total = sum(m for _, _, m in ns)
+    if total != sum(pattern):
+        return f"{total} モーラ"
+    parts, cur, cum, goal = [], [], 0, 0
+    for surface, pron, m in ns:
+        cur.append((surface, pron))
+        cum += m
+        if cum > goal + pattern[len(parts)]:
+            return f"単語「{surface}」が句の切れ目をまたぐ"
+        if cum == goal + pattern[len(parts)]:
+            parts.append(("".join(s for s, _ in cur), "".join(p for _, p in cur)))
+            cur, goal = [], cum
+    return parts
+
+haiku = [  # 作者の没後 100 年以上たったパブリックドメインの句
+    ("古池や蛙飛び込む水の音", "松尾芭蕉"),
+    ("閑さや岩にしみ入る蝉の声", "松尾芭蕉"),
+    ("菜の花や月は東に日は西に", "与謝蕪村"),
+    ("柿くへば鐘が鳴るなり法隆寺", "正岡子規"),
+    ("やせ蛙まけるな一茶是に有", "小林一茶"),
+] + [(s, "自作") for s in [
+    "今日もまた電車が遅れ汗をかく",
+    "学校のチャイムが鳴ってほっとする",
+    "新しいスマートフォンを買いに行く",
+    "朝からアルバイトをして眠くなる",
+    "自然言語処理の小ネタを集めたい",
+]]
+rows = []
+for text, author in haiku:
+    pron = "".join(p for _, p, _ in nodes(text))
+    r = split_575(text)
+    rows.append({"句": text, "作": author, "発音": pron, "文字数": len(pron), "モーラ数": len(split_mora(pron)),
+                 "判定": " / ".join(p for p, _ in r) if isinstance(r, list) else "× " + r})
+pd.DataFrame(rows)
+```
+
+```python
+# 句の切れ目が分かっているとき（空白区切り）は句ごとに数える。字余りも分かる
+def count_parts(text):
+    return [(part, sum(m for _, _, m in nodes(part))) for part in text.split()]
+
+print(count_parts("雀の子 そこのけそこのけ 御馬が通る"))   # 小林一茶（パブリックドメイン）
+print(count_parts("ちょっと待って ショートケーキが 売り切れだ"))  # 自作
+```
+
+```python
+# 応用 2: 同じ表記で読みの違う語を、MeCab + UniDic、KyTea、pyopenjtalk で読み分けられるか比べる（例文は自作）
+import Mykytea
+
+kytea = Mykytea.Mykytea("-model model.bin")
+
+def hira2kata(s):
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
+
+def span_reading(tokens, sent, target):
+    """(表層, 読み) の列から、target の文字範囲に重なる単語の読みをつなげる"""
+    # 表層をつなぐと元の文になると仮定している。pyopenjtalk は表層を書き換えることがあり
+    # （「く」→「九」など）、長さが変わると文字位置がずれるので、写して使うときは注意する
+    i = sent.index(target)
+    j, pos, out = i + len(target), 0, []
+    for surface, yomi in tokens:
+        if pos < j and pos + len(surface) > i:
+            out.append(yomi)
+        pos += len(surface)
+    return "".join(out)
+
+readers = {
+    "MeCab+UniDic": lambda s: [(w.surface, w.feature.kana or w.surface) for w in tagger(s)],
+    "KyTea": lambda s: [(w.surface, hira2kata(w.tag[1][0][0])) for w in kytea.getTags(s)],
+    "pyopenjtalk": lambda s: [(f["string"], f["read"]) for f in pyopenjtalk.run_frontend(s)],
+}
+cases = [  # (文, 対象の語, 正しい読み)
+    ("今日は朝から雨が降っている。", "今日", "キョウ"),
+    ("今日では誰もがスマートフォンを持っている。", "今日", "コンニチ"),
+    ("魚を市場で買って帰った。", "市場", "イチバ"),
+    ("株式市場が大きく混乱した。", "市場", "シジョウ"),
+    ("彼は料理が上手だ。", "上手", "ジョウズ"),
+    ("相手の方が一枚上手だった。", "上手", "ウワテ"),
+    ("役者が舞台の上手から登場する。", "上手", "カミテ"),
+    ("生物の授業で細胞を学んだ。", "生物", "セイブツ"),
+    ("生物は早めに食べてください。", "生物", "ナマモノ"),
+    ("一日に三回薬を飲む。", "一日", "イチニチ"),
+    ("四月一日は入学式だ。", "一日", "ツイタチ"),
+    ("人気のある店に並ぶ。", "人気", "ニンキ"),
+    ("人気のない夜道を歩く。", "人気", "ヒトケ"),
+    ("この辛いカレーは汗が出る。", "辛い", "カライ"),
+    ("友達との別れが辛い。", "辛い", "ツライ"),
+    ("この店は大人気だ。", "大人気", "ダイニンキ"),
+    ("大人気ない態度をとった。", "大人気", "オトナゲ"),
+]
+rows = []
+for sent, target, gold in cases:
+    row = {"文": sent, "語": target, "正解": gold}
+    for name, f in readers.items():
+        y = span_reading(f(sent), sent, target)
+        row[name] = ("○ " if y.startswith(gold) else "× ") + y
+    rows.append(row)
+df = pd.DataFrame(rows)
+print({name: f"{df[name].str.startswith('○').sum()}/{len(df)}" for name in readers})
+df
+```
+
+- pyopenjtalk は山本龍一氏による Open JTalk（名古屋工業大学の HTS Working Group が開発した日本語音声合成システム）の Python ラッパーで、MIT ライセンス。Open JTalk 本体は修正 BSD ライセンス。初回に自動でダウンロードされる辞書 (open_jtalk_dic_utf_8-1.11) は mecab-naist-jdic を元にしたもので、同梱の COPYING によれば奈良先端科学技術大学院大学と UniDic コンソーシアムの修正 BSD ライセンス。ここでは `run_frontend`（テキスト処理）と `extract_fullcontext`（ラベル）だけを使い、音声合成はしない。品詞は IPA 辞書の体系で、「いい天気」の「いい」が動詞「いう」と解析されるような誤りもある。
+- この章の「漢字の読みを取得してふりがな（ルビ）を付ける」と「KyTea で単語分割と読みの推定をする」は単語の読みまでを出す。pyopenjtalk はその先の、助詞の「は」→「ワ」や長音（「キョウ」→「キョー」）を反映した発音、無声化、アクセント句への区切りとアクセント核を出す。アクセント核は単語ごとの辞書のアクセント型に結合の規則を当てて句ごとに決まる。UniDic の `aType` は単語単位で「東京」は 0 型だが、pyopenjtalk では「東京特許許可局」が 1 つの句（11 モーラ、核 9）になった。
+- 「橋」「箸」「端」は UniDic の aType でも pyopenjtalk でも 2・1・0 型で、助詞まで含めた句で見ると「ハシ＼ヲ」「ハ＼シヲ」「ハシニ」と違いが出る（尾高型の「橋」と平板型の「端」は、単語だけでは高低が同じになる）。アクセントは辞書と規則による東京方言の推定である。
+- 5-7-5 の判定では、発音のカタカナの文字数は小書きの「ョ」「ャ」などの分だけモーラ数より多い（「今日もまた電車が遅れ汗をかく」は 19 文字で 17 モーラ）。判定は読みの推定に左右され、芭蕉の「閑さや」は「ヒマサヤ」、一茶の「是に有」は「ゼニユー」と読まれて、どちらも 16 モーラになった（正しくは「シズカサヤ」「コレニアリ」）。合計が 17 モーラでも、単語が句の切れ目をまたぐ句（句またがり）は × になる（「朝からアルバイトをして眠くなる」）。子規の「柿くへば」は旧仮名遣いの「くへ」が「九」「へ」と解析されたが、発音は「カキクエバ」で 17 モーラになった。古典や旧仮名遣いの句は、判定の前に読みを人が確かめる（古文の解析は、この章の「古文を形態素解析する（中古和文 UniDic）」を参照）。
+- 読み分けは自作の 17 例で、正解は MeCab + UniDic が 10、KyTea と pyopenjtalk が 11 だった。例が少ないので、優劣ではなく誤り方の違いとして見る。「市場（イチバ）」「生物（ナマモノ）」「人気（ヒトケ）」は 3 つとも誤り、「舞台の上手（カミテ）」は UniDic だけ、「一枚上手（ウワテ）」「大人気ない」は pyopenjtalk だけ、「今日では（コンニチ）」「辛いカレー（カライ）」は KyTea だけが当てた。読みの候補とスコアを見たいときは、KyTea の `getAllTags` を使う（「KyTea で単語分割と読みの推定をする」を参照）。
+- 決まった語の読みやアクセントを直したいときは、pyopenjtalk のユーザー辞書（`mecab_dict_index` で CSV から作り、`update_global_jtalk_with_user_dict` で読み込む）を使う。文脈で読みが変わる語は、辞書の登録では直らない。
+- pyopenjtalk は PyPI に wheel がなく、インストール時に C++ のコードをビルドする（検証では 2 コアでインストールのセル全体が約 3 分）。派生版の pyopenjtalk-plus は、ビルド済みの wheel と独自に修正した辞書を同梱し、同じ `import pyopenjtalk` で使えると README にある（MIT ライセンス）。両方を同じ環境に入れると衝突するので、どちらか一方を入れる。
+
 ## 古文を形態素解析する（中古和文 UniDic） {classical_japanese}
 
 源氏物語や枕草子のような古文を単語に分け、品詞・活用・読みを調べたい。現代語用の辞書ではうまく解析できないので、古文用の辞書を使う。
@@ -1405,7 +1405,8 @@ for name, f in splitters.items():
 
 - 単純な正規表現は、括弧内の句点で切ってしまい、絵文字や顔文字で終わる文は切れない。小数点や URL の中のピリオドは、全角の句点だけを区切りにすれば避けられる。
 - ja-sentence-segmenter は、分割と連結の規則を自分で組み替えられる。行の途中で折り返された文章（メールや PDF 由来のテキスト）をつなぎ直す処理も書ける。
-- GiNZA は句点のない文末（絵文字、顔文字の後ろ）も区切れるが、解析を伴うので 2 桁以上遅い。括弧内で切ってしまうこともある。
+- ja-sentence-segmenter と pySBD は、「本当ですか！？」を「本当ですか！」と「？」の 2 文に分けてしまう。pySBD は、折り返された「見て」と「ください。」もつながない。
+- GiNZA は句点のない文末（絵文字、顔文字の後ろ）も区切れるが、解析を伴うので 2 桁以上遅い。「はい（たぶん。）そうです。」は、閉じかっこの後ろで切って 2 文にした。
 - SNS や口コミのような崩れた文章向けには、学習ベースの bunkai がある（執筆時点では依存ライブラリ emoji の新しい版と互換性がなく、そのままでは動かなかった）。
 - 文分割の誤りは後段のすべての処理に響く。自分のデータの数十文で、どこで切れているかを必ず目で確かめる。
 
