@@ -356,7 +356,7 @@ from transformers import TrainingArguments
 args = TrainingArguments(
     output_dir=CKPT_DIR,                 # チェックポイントを Drive に直接書く
     save_strategy="steps", save_steps=500,
-    save_total_limit=2,                  # 古いものを消して Drive の容量を節約 (最新の 2 つだけ残す)
+    save_total_limit=2,                  # 古いものを消して Drive の容量を節約（最新の 2 つだけ残す）
     eval_strategy="steps", eval_steps=500,
     load_best_model_at_end=True,
     num_train_epochs=3, per_device_train_batch_size=32, report_to="none",
@@ -370,7 +370,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 last = get_last_checkpoint(CKPT_DIR) if os.path.isdir(CKPT_DIR) else None
 print("再開するチェックポイント:", last)
-# trainer.train(resume_from_checkpoint=last)   # None なら最初から、あれば続きから (オプティマイザや学習率の状態も復元される)
+# trainer.train(resume_from_checkpoint=last)   # None なら最初から、あれば続きから（オプティマイザや学習率の状態も復元される）
 ```
 
 ```python

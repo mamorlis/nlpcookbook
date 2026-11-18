@@ -1113,16 +1113,20 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStream
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-llm = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16, device_map="auto").eval()   # float16 で GPU に載せる (約 7GB)
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float16, device_map="auto").eval()   # float16 で GPU に載せる（約 7GB）
 SYSTEM = "あなたは親切なアシスタントです。簡潔に答えてください。"
+
+def text_of(content):
+    """Gradio 6 は履歴の content を [{"type": "text", "text": ...}, ...] のリストで渡すので、文字列にする"""
+    return content if isinstance(content, str) else "".join(c.get("text", "") for c in content if c.get("type") == "text")
 
 def respond(message, history):
     """history は [{"role": ..., "content": ...}, ...] の形で渡される。応答を少しずつ yield すると、画面に逐次表示される"""
-    messages = [{"role": "system", "content": SYSTEM}] + [{"role": m["role"], "content": m["content"]} for m in history[-6:]]
+    messages = [{"role": "system", "content": SYSTEM}] + [{"role": m["role"], "content": text_of(m["content"])} for m in history[-6:]]
     messages.append({"role": "user", "content": message})
     inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
@@ -1143,7 +1147,7 @@ demo.launch(share=True)   # Colab では share=True にすると、72 時間有�
 ```
 
 - `ChatInterface` に「メッセージと履歴を受け取って応答を返す関数」を渡すだけで、入力欄・履歴表示・やり直しボタンの付いた画面になる。
-- Gradio 5 までは `type="messages"` を指定しないと履歴が `[[ユーザー, アシスタント], ...]` の形で渡されたが、Gradio 6 では辞書のリストが既定になり、`type` 引数はなくなった（指定するとエラーになる）。
+- Gradio 5 までは `type="messages"` を指定しないと履歴が `[[ユーザー, アシスタント], ...]` の形で渡されたが、Gradio 6 では辞書のリストが既定になり、`type` 引数はなくなった（指定するとエラーになる）。さらに Gradio 6 では、各メッセージの `content` も文字列ではなく `[{"type": "text", "text": ...}]` のリストで渡される。そのままチャットテンプレートに渡すと、2 回目の質問から `TypeError` になるので、`text_of` で文字列にしている（Gradio 6.31 で確かめた）。
 - `share=True` の URL は誰でもアクセスできる。API キーを使うボットや、個人情報を扱うボットを公開したままにしない。
 - 止めるときは `demo.close()`。Colab のランタイムが切れると URL も無効になる。
 - 関数の中身を、RAG のチャットボットや FAQ ボットに差し替えれば、同じ画面でそのまま試せる。
