@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、KyTea のモデルの学習による分野への適応、解析器の比べ方、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -618,6 +618,41 @@ print(list(t.tokenize(text, wakati=True)))
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
 - 辞書を作らずに済ませるなら、この章の「連続する名詞をつなげて複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
+## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
+
+MeCab（UniDic / IPA 辞書）、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
+
+```python
+!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
+```
+
+```python
+from fugashi import Tagger, GenericTagger
+import ipadic
+from sudachipy import Dictionary, SplitMode
+from janome.tokenizer import Tokenizer
+
+unidic = Tagger()
+ipa = GenericTagger(ipadic.MECAB_ARGS)
+sudachi = Dictionary().create()
+janome = Tokenizer()
+
+tokenizers = {
+    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
+    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
+    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
+    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
+    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
+}
+
+for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
+    print(s)
+    for name, f in tokenizers.items():
+        print(f"  {name:13}", " | ".join(f(s)))
+```
+
+- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
+
 ## Juman++ で形態素解析する（代表表記・カテゴリ付き） {jumanpp}
 
 単語の区切りと品詞に加えて、「りんご/林檎/リンゴ」をまとめる代表表記や、「人」「場所」のような意味カテゴリも欲しい。京都大学の研究室が開発した、RNN 言語モデルで単語列のもっともらしさを評価する形態素解析器 Juman++ を使う。
@@ -1004,41 +1039,6 @@ for s in ["じょく瘡の予防に体位変換を行う。", "腹部エコー�
 - 辞書と部分的アノテーションを両方使うと、分野の語は 28/28、誤りのある文は 25 文中 1 文になった。残った誤りの「肺 炎」は、GSD の学習データに一度も出てこず、分野の語の一覧にも入れていない語。評価の文と用語の一覧はこのレシピのために作った小さなもの（25 文、247 語）で、評価に出る用語をすべて辞書に入れているので、結果は楽観的。設定の間の 1〜2 語の差は、このデータ量ではばらつきの範囲と考える。
 - リリースの tar.gz は configure 済みなので、構文解析の章の「Ckylark で日本語の句構造解析をする」（GitHub のソースから autoreconf でビルドする）と違って apt-get が要らない。`--disable-shared` で静的にリンクすれば、`make install` や `ldconfig` をせずに `src/bin/train-kytea` を使える。学習したモデルは pip の `kytea` (0.2.0) でそのまま読み込める。tar.gz の `data/model.bin` は、この章の「KyTea で単語分割と読みの推定をする」でダウンロードするモデルと同じファイル（展開後のハッシュが一致した）。
 - 検証では、何度実行しても表の数値は同じだった（GSD は r2.19。master も同じ内容だった）。KyTea のソースは Apache License 2.0、同梱のモデルの利用条件は「KyTea で単語分割と読みの推定をする」の注意書きを参照。GSD は CC BY-SA 4.0 なので、学習したモデルを配布するときは表示と継承の条件の扱いを確かめる。用語の一覧と医療の文はこのレシピのために作った架空の例。
-
-## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
-
-MeCab（UniDic / IPA 辞書）、Sudachi、Janome で同じ文がどう分割されるかを見比べたい。
-
-```python
-!pip install -q fugashi unidic-lite ipadic sudachipy sudachidict_core janome
-```
-
-```python
-from fugashi import Tagger, GenericTagger
-import ipadic
-from sudachipy import Dictionary, SplitMode
-from janome.tokenizer import Tokenizer
-
-unidic = Tagger()
-ipa = GenericTagger(ipadic.MECAB_ARGS)
-sudachi = Dictionary().create()
-janome = Tokenizer()
-
-tokenizers = {
-    "MeCab+UniDic": lambda s: [w.surface for w in unidic(s)],
-    "MeCab+IPAdic": lambda s: [w.surface for w in ipa(s)],
-    "Sudachi A": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.A)],
-    "Sudachi C": lambda s: [m.surface() for m in sudachi.tokenize(s, SplitMode.C)],
-    "Janome": lambda s: list(janome.tokenize(s, wakati=True)),
-}
-
-for s in ["外国人参政権について話し合った。", "東京都立大学で機械翻訳を研究しています。", "食べさせられたくなかった。"]:
-    print(s)
-    for name, f in tokenizers.items():
-        print(f"  {name:13}", " | ".join(f(s)))
-```
-
-- 単語の単位は辞書の設計思想で決まる。評価データや事前学習モデルが使っている辞書に合わせるのが鉄則。
 
 ## 発音・モーラ数・アクセントを取り出し、5-7-5 や読みの違いを調べる (pyopenjtalk) {mora_accent}
 
