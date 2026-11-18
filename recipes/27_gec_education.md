@@ -315,8 +315,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -330,7 +330,7 @@ def chat(prompt, max_new_tokens=80):
     return tokenizer.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True).strip().split("\n")[0]
 
 def clean(text):
-    """LLM が付け足しがちな「訂正後の文:」のような見出しや、末尾の注釈 (「（誤りはありません）」) を取り除く"""
+    """LLM が付け足しがちな「訂正後の文:」のような見出しや、末尾の注釈（「（誤りはありません）」）を取り除く"""
     text = re.sub(r"^(訂正後の文|訂正文|書き直した文|文)\s*[:：]\s*", "", text.strip())
     return re.sub(r"[（(][^（）()]*[）)]$", "", text).strip().strip("「」")
 
@@ -343,9 +343,9 @@ for s in ["図書館で本が借りました。", "私は毎日学校を行き�
 ```
 
 ```python
-# 訂正を編集 (どこをどう変えたか) の集合にして、参照訂正と比べる
+# 訂正を編集（どこをどう変えたか）の集合にして、参照訂正と比べる
 def edits(source, target):
-    """文字単位の差分から (開始位置, 終了位置, 置き換える文字列) の集合を作る"""
+    """文字単位の差分から（開始位置, 終了位置, 置き換える文字列）の集合を作る"""
     ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
     return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
 
@@ -367,7 +367,7 @@ def evaluate(system, n=100):
 
 import pandas as pd
 
-# 100 文 × 2 通りの指示で生成する。T4 で 5 分ほど
+# 100 文 × 2 通りの指示で生成する。T4 で 10 分ほど
 results, outputs = {}, {}
 for label, system in [("何もしない", lambda s: s), ("LLM (最小限の訂正)", lambda s: clean(chat(MINIMAL.format(s)))), ("LLM (流暢な書き直し)", lambda s: clean(chat(FLUENT.format(s))))]:
     results[label], outputs[label] = evaluate(system)
@@ -482,8 +482,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -500,12 +500,12 @@ def prefer_a(source, a, b):
     return float(llm(ids).logits[0, -1, AB].float().softmax(-1)[0])
 
 def compare(source, x, y):
-    """提示順を入れ替えて 2 回聞き、平均する (x のほうが良い確率)"""
+    """提示順を入れ替えて 2 回聞き、平均する（x のほうが良い確率）"""
     return (prefer_a(source, x, y) + 1 - prefer_a(source, y, x)) / 2
 ```
 
 ```python
-# 元の文ごとに、質の違う 4 つの訂正と、人が付けた順位 (1 が最良。同順位あり) を用意する
+# 元の文ごとに、質の違う 4 つの訂正と、人が付けた順位（1 が最良。同順位あり）を用意する
 data = [
     ("私は毎日学校を行きます。", [("私は毎日学校に行きます。", 1), ("私は毎日学校へ通っています。", 2), ("私は毎日学校を行きます。", 3), ("私は毎日会社に行きます。", 4)]),
     ("昨日は友達と映画を見ます。", [("昨日は友達と映画を見ました。", 1), ("昨日、友人と一緒に映画を鑑賞しました。", 2), ("昨日は友達と映画を見ます。", 3), ("昨日は友達に映画が見ました。", 4)]),
@@ -522,7 +522,7 @@ for source, candidates in data:
     wins = np.zeros(len(texts))
     for i, j in itertools.combinations(range(len(texts)), 2):
         p = compare(source, texts[i], texts[j])
-        wins[i] += p; wins[j] += 1 - p               # 総当たりの「勝ち数」(確率の和) をスコアにする
+        wins[i] += p; wins[j] += 1 - p               # 総当たりの「勝ち数」（確率の和）をスコアにする
     tau = kendalltau(-wins, human).statistic
     sentence_tau.append(tau); all_llm += list(-wins); all_human += human
     print(f"{source}  τ = {tau:.2f}")
@@ -632,8 +632,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
-# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる (LLM の章の「オープンな LLM とチャットする」を参照)。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)

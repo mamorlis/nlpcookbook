@@ -624,7 +624,7 @@ import numpy as np
 import pandas as pd
 
 ATTRS = ["brand", "color", "size", "material", "capacity"]
-# 評価用の商品名 (このレシピのために作ったもの。実在のブランド名や商品名・型番も含むが、属性の組み合わせは実際の商品の仕様とは限らない)
+# 評価用の商品名（このレシピのために作ったもの。実在のブランド名や商品名・型番も含むが、属性の組み合わせは実際の商品の仕様とは限らない）
 # [表記|属性] が正解。表記と正規化した値が違うときは [表記|属性=正規化した値] と書く
 TEST = """\
 【送料無料】[NIKE|brand=ナイキ] エア ズーム ペガサス ランニングシューズ メンズ [ブラック|color=黒] [26.5cm|size]
@@ -708,7 +708,7 @@ print(test[1])
 ```
 
 ```python
-# 値の正規化: 商品マスタの値 (左) と、その別表記 (右)。辞書による抽出にも同じ表を使う
+# 値の正規化: 商品マスタの値（左）と、その別表記（右）。辞書による抽出にも同じ表を使う
 BRANDS = {"ナイキ": ["NIKE"], "アディダス": ["adidas"], "ユニクロ": ["UNIQLO"], "無印良品": ["MUJI"], "サーモス": ["THERMOS"],
           "象印": ["ZOJIRUSHI"], "タイガー": ["TIGER"], "アイリスオーヤマ": ["IRIS OHYAMA"], "パナソニック": ["Panasonic"],
           "エレコム": ["ELECOM"], "サンディスク": ["SanDisk"], "コールマン": ["Coleman"], "アンカー": ["Anker"],
@@ -776,7 +776,7 @@ def evaluate(preds, name, use_norm=True):
 ```python
 # 方法 1: 辞書と正規表現
 def dict_regex(table_alias):
-    words = sorted(table_alias, key=len, reverse=True)       # 長い語を先に (「PUレザー」を「レザー」より優先)
+    words = sorted(table_alias, key=len, reverse=True)       # 長い語を先に（「PUレザー」を「レザー」より優先）
     return re.compile("|".join(re.escape(w) for w in words), re.IGNORECASE)
 
 DICT_RE = {attr: dict_regex(alias) for attr, alias in ALIAS.items()}
@@ -802,12 +802,12 @@ df
 ```
 
 ```python
-# 方法 2 の準備: BERT の学習データをテンプレートから自動で作る (人手のアノテーションなし)
+# 方法 2 の準備: BERT の学習データをテンプレートから自動で作る（人手のアノテーションなし）
 rng = random.Random(0)
 KANA = list("アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン")
 
 def rand_brand():
-    """辞書のブランドに加えて、ランダムな名前も混ぜる (辞書にないブランドにも対応できるように)"""
+    """辞書のブランドに加えて、ランダムな名前も混ぜる（辞書にないブランドにも対応できるように）"""
     if rng.random() < 0.5:
         canon = rng.choice(list(BRANDS))
         return rng.choice([canon, *BRANDS[canon]])
@@ -841,7 +841,7 @@ CATEGORIES = [
     (["ワイヤレスイヤホン", "電動歯ブラシ", "デスクライト", "財布", "ショルダーバッグ", "スマートウォッチ", "加湿器"], ["color", "material"]),
 ]
 NOISE = ["", "", "", "【送料無料】", "【公式】", "ポイント10倍 ", "2024年モデル ", "【あす楽】"]
-# 属性ではない語 (宣伝文句や機能) も混ぜておかないと、属性以外の語まで属性として取り出すようになる
+# 属性ではない語（宣伝文句や機能）も混ぜておかないと、属性以外の語まで属性として取り出すようになる
 EXTRA = ["メンズ", "レディース", "キッズ", "大容量", "軽量", "撥水", "保温", "保冷", "速乾", "UVカット", "おしゃれ", "ギフト", "人気",
          "新作", "限定", "日本製", "洗える", "折りたたみ", "コンパクト", "3枚セット", "母の日", "プレゼント", "通勤", "アウトドア"]
 
@@ -895,7 +895,7 @@ def encode(example):
         if s == e:
             tags.append(-100)                                # 特殊トークンは損失の計算から除く
             continue
-        if tok != "▁":                                       # 単独の「▁」は次の文字と同じ位置を返すので O にする (この章の「BERT をファインチューニングして日本語の固有表現抽出器を作る」を参照)
+        if tok != "▁":                                       # 単独の「▁」は次の文字と同じ位置を返すので O にする（この章の「BERT をファインチューニングして日本語の固有表現抽出器を作る」を参照）
             for start, end, attr in zip(example["starts"], example["ends"], example["attrs"]):
                 if s < end and e > start:
                     tag = ("B-" if s <= start else "I-") + attr
@@ -913,7 +913,7 @@ args = TrainingArguments(output_dir="attr-out", num_train_epochs=3, learning_rat
                          per_device_train_batch_size=32, save_strategy="no", logging_steps=50, report_to="none",
                          seed=0, bf16=BF16, fp16=not BF16)
 trainer = Trainer(model=model, args=args, train_dataset=ds, data_collator=DataCollatorForTokenClassification(tokenizer))
-trainer.train()   # T4 で 1〜2 分
+trainer.train()   # T4 で 1〜2 分（出力の train_runtime は検証の GPU での値）
 ```
 
 ```python
@@ -933,7 +933,7 @@ results["BERT"][0]
 ```
 
 ```python
-# 方法 3: LLM に JSON で答えさせる (sarashina2.2-3b-instruct、MIT ライセンス)
+# 方法 3: LLM に JSON で答えさせる（sarashina2.2-3b-instruct、MIT ライセンス）
 import gc, json
 import sentencepiece as spm
 from huggingface_hub import hf_hub_download
@@ -945,7 +945,7 @@ gc.collect(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 llm_tok = AutoTokenizer.from_pretrained(name, padding_side="left")
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 llm_tok.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -958,7 +958,7 @@ INSTRUCTION = ("次の商品名から、ブランド (brand)・色 (color)・サ
 def as_json(text, spans):
     return json.dumps({a: [text[s:e] for s, e, l in spans if l == a] for a in ATTRS}, ensure_ascii=False)
 
-shots = [train[i] for i in (0, 1, 2)]                         # few-shot の例は学習データ (テンプレート) から取る
+shots = [train[i] for i in (0, 1, 2)]                         # few-shot の例は学習データ（テンプレート）から取る
 def prompt(text):
     messages = []
     for t, s in shots:
@@ -974,7 +974,7 @@ def extract_json(text):
         return {}
 
 outputs = []
-for i in range(0, len(test), 16):                             # T4 で 1〜2 分 (モデルのダウンロードは別)。VRAM は 10GB 程度
+for i in range(0, len(test), 16):                             # T4 で 1〜2 分（モデルのダウンロードは別）。VRAM は 10GB 程度
     enc = llm_tok([prompt(t) for t, _ in test[i:i + 16]], return_tensors="pt", padding=True, add_special_tokens=False).to(llm.device)
     with torch.no_grad():
         out = llm.generate(**enc, max_new_tokens=120, do_sample=False, pad_token_id=llm_tok.pad_token_id)
@@ -995,7 +995,7 @@ results["LLM"][0]
 ```
 
 ```python
-# 3 つの方法を並べる。正規化しない (取り出した文字列のまま商品マスタの値と比べる) 場合の F1 も見る
+# 3 つの方法を並べる。正規化しない（取り出した文字列のまま商品マスタの値と比べる）場合の F1 も見る
 summary = pd.concat([df for df, _ in results.values()], axis=1)
 n_gold = pd.Series([a for _, g in test for *_, a, _ in g]).value_counts()
 summary[("", "正解数")] = [n_gold.get(a, n_gold.sum()) for a in summary.index]
@@ -1006,7 +1006,7 @@ summary
 ```
 
 ```python
-# 方法ごとの誤りを見る: 辞書にないブランド、紛らわしい語 (綿棒、L字、幅120cm) など
+# 方法ごとの誤りを見る: 辞書にないブランド、紛らわしい語（綿棒、L字、幅120cm）など
 def diff(i, preds):
     g = {(a, c) for *_, a, c in test[i][1]}
     p = {(a, normalize(a, v)) for a, v in preds[i]}

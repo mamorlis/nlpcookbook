@@ -149,7 +149,7 @@ HMM や CRF の復号に使われるビタビアルゴリズムを、自分で�
 import numpy as np
 
 def viterbi(emission, transition, start):
-    """emission: (系列長, ラベル数), transition: (ラベル数, ラベル数), start: (ラベル数,) の対数スコア"""
+    """emission:（系列長, ラベル数）, transition:（ラベル数, ラベル数）, start:（ラベル数,）の対数スコア"""
     T, K = emission.shape
     score = start + emission[0]
     back = np.zeros((T, K), dtype=int)
@@ -170,7 +170,7 @@ transition = log([[0.2, 0.2, 0.6],     # 名詞 → 名詞 / 動詞 / 助詞
                   [0.3, 0.3, 0.4],     # 動詞 →
                   [0.6, 0.39, 0.01]])  # 助詞 →
 emission = log([[0.9, 0.05, 0.05],     # 猫
-                [0.3, 0.1, 0.6],       # が (「蛾」かもしれない)
+                [0.5, 0.1, 0.4],       # が（単独では「蛾」の名詞の確率が高い）
                 [0.9, 0.05, 0.05],     # 魚
                 [0.1, 0.1, 0.8],       # を
                 [0.1, 0.85, 0.05]])    # 食べる
@@ -180,16 +180,18 @@ print([f"{w}/{labels[i]}" for w, i in zip(words, path)], round(score, 3))
 ```
 
 ```python
-# 貪欲法 (各位置で独立に最大のラベルを選ぶ) との比較、および総当たりとの一致の確認
+# 貪欲法（各位置で独立に最大のラベルを選ぶ）との比較、および総当たりとの一致の確認
 from itertools import product
 
 greedy = emission.argmax(axis=1).tolist()
 def total(p):
     return start[p[0]] + emission[0, p[0]] + sum(transition[a, b] + emission[t, b] for t, (a, b) in enumerate(zip(p, p[1:]), 1))
 brute = max(product(range(3), repeat=5), key=total)
-print("貪欲法:", [labels[i] for i in greedy], " 総当たり:", [labels[i] for i in brute], " 一致:", list(brute) == path)
+print("貪欲法:", [labels[i] for i in greedy], round(float(total(greedy)), 3))
+print("総当たり:", [labels[i] for i in brute], round(float(total(brute)), 3), " ビタビと一致:", list(brute) == path)
 ```
 
+- 「が」は単独で見ると名詞（蛾）の確率が高いので、貪欲法は「猫/名詞 が/名詞」と誤る。ビタビは「名詞 → 名詞」の遷移が起こりにくいことも考えて「が/助詞」を選び、スコアも高くなる。
 - 計算量は O(系列長 × ラベル数²)。総当たりの O(ラベル数^系列長) を動的計画法で避けている。
 - 遷移スコアに「O → I- は −∞」のような制約を入れれば、ニューラルモデルの出力に対しても正しい BIO 系列だけを出力させられる。
 
@@ -576,8 +578,8 @@ random.seed(0); np.random.seed(0); torch.manual_seed(0)
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 DTYPE = torch.bfloat16 if BF16 else torch.float16
 
-# 学習データ: 日本語 Wikipedia (wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL) の先頭の記事から文を切り出す
-# streaming=True なので全体 (約 4GB) はダウンロードしない
+# 学習データ: 日本語 Wikipedia（wikimedia/wikipedia の 20231101.ja、CC BY-SA 3.0 / GFDL）の先頭の記事から文を切り出す
+# streaming=True なので全体（約 4GB）はダウンロードしない
 wiki = load_dataset("wikimedia/wikipedia", "20231101.ja", split="train", streaming=True)
 sents = []
 for article in wiki:
@@ -588,7 +590,7 @@ for article in wiki:
 random.shuffle(sents)
 print(len(sents), "文", sents[:3])
 
-# 評価データ: JGLUE の JSTS v1.3 のテストセット (1589 組、0〜5 の類似度、CC BY-SA 4.0)
+# 評価データ: JGLUE の JSTS v1.3 のテストセット（1589 組、0〜5 の類似度、CC BY-SA 4.0）
 url = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jsts-v1.3/test-v1.3.json"
 jsts = [json.loads(l) for l in urllib.request.urlopen(url).read().decode("utf-8").splitlines()]
 print(len(jsts), "組", jsts[1])
@@ -599,7 +601,7 @@ name = "tohoku-nlp/bert-base-japanese-v3"   # 東北大の日本語 BERT (Apache
 tokenizer = AutoTokenizer.from_pretrained(name)
 
 def embed(model, texts, max_length=64):
-    """平均プーリング (この章の「BERT の出力から文ベクトルを自分で作る」と同じ)"""
+    """平均プーリング（文埋め込みとクラスタリングの章の「BERT の出力から文ベクトルを自分で作る (mean pooling)」と同じ）"""
     batch = tokenizer(texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt").to("cuda")
     with torch.autocast("cuda", dtype=DTYPE):
         hidden = model(**batch).last_hidden_state
@@ -614,7 +616,7 @@ def jsts_cos(model):
     return F.cosine_similarity(e1, e2).cpu().numpy()
 
 gold = np.array([d["label"] for d in jsts])
-jsts_spearman = lambda model: spearmanr(jsts_cos(model), gold).statistic   # この章の「文の意味的類似度 (STS) でモデルを評価する」と同じ指標
+jsts_spearman = lambda model: spearmanr(jsts_cos(model), gold).statistic   # 文埋め込みとクラスタリングの章の「文の意味的類似度 (STS) でモデルを評価する」と同じ指標
 
 bert = AutoModel.from_pretrained(name).to("cuda")
 print(f"学習前の BERT (平均プーリング): JSTS Spearman = {jsts_spearman(bert):.4f}")
@@ -622,13 +624,13 @@ print(f"学習前の BERT (平均プーリング): JSTS Spearman = {jsts_spearma
 
 ```python
 def simcse_loss(z1, z2, temperature=0.05, z3=None):
-    """InfoNCE。z1[i] と z2[i] が正例、z2[j] (j≠i) はすべて負例。z3 を渡すと z3[j] も負例 (ハードネガティブ) に加える"""
+    """InfoNCE。z1[i] と z2[i] が正例、z2[j] (j≠i) はすべて負例。z3 を渡すと z3[j] も負例（ハードネガティブ）に加える"""
     z1, z2 = F.normalize(z1, dim=-1), F.normalize(z2, dim=-1)
     sim = z1 @ z2.T                                         # (N, N) のコサイン類似度。対角が正例
     if z3 is not None:
         sim = torch.cat([sim, z1 @ F.normalize(z3, dim=-1).T], dim=1)   # (N, 2N)
     labels = torch.arange(len(z1), device=z1.device)        # i 行目の正解は i 列目
-    return F.cross_entropy(sim / temperature, labels)       # 「N 個 (2N 個) の候補から正例を当てる」分類の損失
+    return F.cross_entropy(sim / temperature, labels)       # 「N 個（2N 個）の候補から正例を当てる」分類の損失
 
 def train(examples, batch_size=64, temperature=0.05, lr=3e-5, supervised=False, seed=0):
     torch.manual_seed(seed)
@@ -639,11 +641,11 @@ def train(examples, batch_size=64, temperature=0.05, lr=3e-5, supervised=False, 
     scaler = torch.amp.GradScaler(enabled=not BF16)                          # float16 の勾配のアンダーフロー対策
     for s in range(steps):
         batch = examples[s * batch_size:(s + 1) * batch_size]
-        if supervised:   # (前提, 含意, 矛盾) の三つ組を 1 回の順伝播で埋め込む
+        if supervised:   # （前提, 含意, 矛盾）の三つ組を 1 回の順伝播で埋め込む
             z = embed(model, [a for a, _, _ in batch] + [p for _, p, _ in batch] + [n for _, _, n in batch], max_length=32)
             z1, z2, z3 = z.chunk(3)
         else:            # 同じ文を 2 回並べる。ドロップアウトのマスクが行ごとに違うので、2 つの埋め込みは少しずれる
-            z1, z2 = embed(model, batch + batch, max_length=32).chunk(2)   # 学習は 32 トークンで切る (論文と同じ)
+            z1, z2 = embed(model, batch + batch, max_length=32).chunk(2)   # 学習は 32 トークンで切る（論文と同じ）
             z3 = None
         loss = simcse_loss(z1, z2, temperature, z3)
         opt.zero_grad(); scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); sched.step()
@@ -651,7 +653,7 @@ def train(examples, batch_size=64, temperature=0.05, lr=3e-5, supervised=False, 
             print(f"step {s:4d}  loss {loss.item():.3f}")
     return model
 
-# 12800 文、バッチ 64 で 200 ステップ。乱数の種を変えて 3 回学習する (Colab の T4 で 2〜4 分の見込み)
+# 12800 文、バッチ 64 で 200 ステップ。乱数の種を変えて 3 回学習する（Colab の T4 で 2〜4 分の見込み）
 scores = []
 for seed in range(3):
     simcse = train(sents[:12800], seed=seed)
@@ -661,7 +663,7 @@ print(f"平均 {np.mean(scores):.4f} (最小 {min(scores):.4f}、最大 {max(sco
 ```
 
 ```python
-# 学習前後で、文の組の類似度がどう変わるか (simcse は上で最後に学習した seed=2 のモデル)
+# 学習前後で、文の組の類似度がどう変わるか（simcse は上で最後に学習した seed=2 のモデル）
 pairs = [("猫がソファの上で寝ている。", "ソファで猫が眠っています。"),
          ("猫がソファの上で寝ている。", "犬が公園を走り回っている。"),
          ("猫がソファの上で寝ている。", "株価が大きく値下がりした。")]
@@ -671,7 +673,7 @@ with torch.no_grad():
         r = [F.cosine_similarity(embed(m, [a]), embed(m, [b])).item() for m in (bert, simcse)]
         print(f"学習前 {r[0]:.3f}  学習後 {r[1]:.3f}  {a} / {b}")
 
-# ランダムな文の組の類似度の平均: 素の BERT はどの文同士も似ている (異方性)
+# ランダムな文の組の類似度の平均: 素の BERT はどの文同士も似ている（異方性）
 with torch.no_grad():
     for label, m in [("学習前", bert), ("学習後", simcse)]:
         e = F.normalize(embed(m, sents[-512:]), dim=-1)
@@ -679,13 +681,13 @@ with torch.no_grad():
 ```
 
 ```python
-# 温度とバッチサイズを変えてみる (それぞれ 12800 文、seed=0。温度 0.05・バッチ 64 は上の seed=0 と同じ設定。Colab の T4 で 2〜4 分の見込み)
+# 温度とバッチサイズを変えてみる（それぞれ 12800 文、seed=0。温度 0.05・バッチ 64 は上の seed=0 と同じ設定。Colab の T4 で 2〜4 分の見込み）
 for t, b in [(0.01, 64), (1.0, 64), (0.05, 256)]:
     print(f"温度 {t:<4} バッチ {b:<3}: JSTS Spearman = {jsts_spearman(train(sents[:12800], batch_size=b, temperature=t)):.4f}")
 ```
 
 ```python
-# 教師あり SimCSE: JSNLI (SNLI の日本語訳、京都大学、CC BY-SA 4.0) の「含意」を正例、「矛盾」をハードネガティブにする
+# 教師あり SimCSE: JSNLI（SNLI の日本語訳、京都大学、CC BY-SA 4.0）の「含意」を正例、「矛盾」をハードネガティブにする
 import io, zipfile
 url = "https://nlp.ist.i.kyoto-u.ac.jp/DLcounter/lime.cgi?down=https://nlp.ist.i.kyoto-u.ac.jp/nl-resource/JSNLI/jsnli_1.1.zip&name=JSNLI.zip"
 with urllib.request.urlopen(url) as r:
@@ -699,7 +701,7 @@ triples = [(p, h["entailment"], h["contradiction"]) for p, h in hyp.items() if "
 random.shuffle(triples)
 print(len(triples), "組", triples[0])
 
-# 16000 組、バッチ 64 で 250 ステップ (ダウンロードを含めて Colab の T4 で 2〜3 分の見込み)
+# 16000 組、バッチ 64 で 250 ステップ（ダウンロードを含めて Colab の T4 で 2〜3 分の見込み）
 sup = train(triples[:16000], lr=5e-5, supervised=True)
 print(f"教師あり SimCSE: JSTS Spearman = {jsts_spearman(sup):.4f}")
 ```
@@ -714,7 +716,7 @@ for a, b in [("学習前", "教師なし"), ("学習前", "教師あり")]:
 ```
 
 ```python
-# 自作の損失は、Sentence Transformers の MultipleNegativesRankingLoss (scale=20 = 1/温度 0.05) と同じ値になる
+# 自作の損失は、Sentence Transformers の MultipleNegativesRankingLoss（scale=20 = 1/温度 0.05）と同じ値になる
 from sentence_transformers.losses import MultipleNegativesRankingLoss
 
 z1, z2, z3 = torch.randn(3, 8, 768)
@@ -724,12 +726,12 @@ print("自作 (ハードネガティブあり):", simcse_loss(z1, z2, z3=z3).ite
 print(f"最大メモリ {torch.cuda.max_memory_allocated() / 1e9:.1f}GB")
 ```
 
-- 以下の数値は、A5000 で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもの（最大メモリ 10.1GB）。学習の最初に出る `lr_scheduler.step()` の警告は、float16 の GradScaler が勾配のオーバーフローでそのステップを飛ばしたときに出るもので、害はない。
+- 以下の数値は、検証の GPU で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもの（最大メモリ 10.1GB）。学習の最初に出る `lr_scheduler.step()` の警告は、float16 の GradScaler が勾配のオーバーフローでそのステップを飛ばしたときに出るもので、害はない。
 - SimCSE は Gao, Yao, Chen (EMNLP 2021) の手法。教師なしでは、同じ文を 2 回エンコードしたときのドロップアウト (p=0.1) のマスクの違いだけがデータ拡張になり、バッチ内の他の文が負例になる。論文の教師なしは英語 Wikipedia の 100 万文、バッチ 64、学習率 3e-5、温度 0.05 で、[CLS] に MLP を載せて学習し、評価時は MLP を外す。教師ありは SNLI と MNLI（論文の記載で 31.4 万組）、バッチ 512、学習率 5e-5、3 エポック、[CLS] + MLP である。このレシピは平均プーリングで MLP を使わず、教師なしは 1 万 2800 文、教師ありはバッチ 64 で 1 万 6000 組（1 エポック未満）に縮めた。論文は STS-B の開発セットで最良のチェックポイントを選んでいるが、ここでは選んでいない（教師なしの損失は 100 ステップで 0.001 まで下がっている）。
-- JSTS のテストセット（1589 組）の Spearman は、学習前の平均プーリングで 0.7536、教師なし SimCSE で 0.752〜0.763（乱数の種 3 つ、平均 0.758）になり、seed=0 は学習前をわずかに下回った。seed=2 との差 (+0.0065) のブートストラップの 95% 信頼区間も 0 をまたぎ、この規模ではばらつきと区別できない。種を変えてもデータの順序は同じで、変わるのはドロップアウトの乱数だけなので、この幅は学習のばらつきを小さめに見せている可能性がある。日本語 SimCSE の報告（Tsukagoshi ら 2023）は、約 100 万文で学習し、ハイパーパラメータとチェックポイントを開発セット (JSICK) で選んで、同じ BERT で JSTS の検証セット（このレシピのテストセットとは別）が 74.09（学習前、平均プーリング）から 78.70（5 回の平均）に上がったと報告している。
+- JSTS のテストセット（1589 組）の Spearman は、学習前の平均プーリングで 0.7536、教師なし SimCSE で 0.756〜0.763（乱数の種 3 つ、平均 0.760）になり、学習前をわずかに上回った。ただし seed=2 と学習前の差 (+0.0065) のブートストラップの 95% 信頼区間（−0.007〜+0.020）は 0 をまたぎ、この規模ではばらつきと区別できない。種を変えてもデータの順序は同じで、変わるのはドロップアウトの乱数だけなので、この幅は学習のばらつきを小さめに見せている可能性がある。日本語 SimCSE の報告（Tsukagoshi ら 2023）は、約 100 万文で学習し、ハイパーパラメータとチェックポイントを開発セット (JSICK) で選んで、同じ BERT で JSTS の検証セット（このレシピのテストセットとは別）が 74.09（学習前、平均プーリング）から 78.70（5 回の平均）に上がったと報告している。
 - 類似度の値の分布は大きく変わる。ランダムな文の組のコサイン類似度の平均は 0.834 から 0.177 に、無関係な「猫が…」と「株価が…」は 0.755 から 0.119 に下がった。文埋め込みとクラスタリングの章の「BERT の出力から文ベクトルを自分で作る (mean pooling)」で、素の BERT の平均ベクトルは類似度計算にあまり向かないとしたのはこの点で、順位 (Spearman) はそこそこでも、どの文の組も類似度が高く出る（異方性）ので、値をそのまま使ったりしきい値を決めたりするのに向かない。JSTS は短い画像の説明文の組なので、単語の重なりで判断しやすく、素の BERT に有利な面もある。
-- 温度を 1.0 にすると、損失は 3.2 付近で下げ止まり（ln 64 ≈ 4.16 に近いまま）、Spearman は 0.7258 と学習前より悪くなった。温度 0.01 (0.7676) とバッチ 256 (0.7695) は温度 0.05・バッチ 64 の seed=0 (0.7520) を上回ったが、どれも種 1 つだけで、種による幅も 0.01 あるので優劣は言えない。同じ種でも GPU の演算の非決定性で値が変わることがある。学習率は 3e-5 のまま変えていない。論文の付録は、学習率を合わせればバッチサイズにはあまり敏感でない、としている。
-- 教師あり SimCSE（JSNLI の含意を正例、矛盾をハードネガティブ）は 0.8257 で、学習前との差は +0.072（95% 信頼区間 +0.055〜+0.090。評価の組を復元抽出するブートストラップで求めた。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照）だった。NLI のラベルが「同じ意味か」の教師信号になるので、論文でも Tsukagoshi らでも教師ありは教師なしより高い。JSNLI は SNLI を機械翻訳して自動で絞り込んだものである。また SNLI の元は Flickr30k の画像の説明文、JSTS は YJ Captions（MS COCO の画像の日本語説明文）で、分野が近いことも効いている可能性がある。
+- 温度を 1.0 にすると、損失は 3.2 付近で下げ止まり（ln 64 ≈ 4.16 に近いまま）、Spearman は 0.7246 と学習前より悪くなった。温度 0.01 (0.7675) とバッチ 256 (0.7711) は温度 0.05・バッチ 64 の seed=0 (0.7556) を上回ったが、どれも種 1 つだけで、種による幅も 0.008 あるので優劣は言えない。同じ種でも GPU の演算の非決定性で値が変わることがある。学習率は 3e-5 のまま変えていない。論文の付録は、学習率を合わせればバッチサイズにはあまり敏感でない、としている。
+- 教師あり SimCSE（JSNLI の含意を正例、矛盾をハードネガティブ）は 0.8256 で、学習前との差は +0.072（95% 信頼区間 +0.054〜+0.090。評価の組を復元抽出するブートストラップで求めた。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照）だった。NLI のラベルが「同じ意味か」の教師信号になるので、論文でも Tsukagoshi らでも教師ありは教師なしより高い。JSNLI は SNLI を機械翻訳して自動で絞り込んだものである。また SNLI の元は Flickr30k の画像の説明文、JSTS は YJ Captions（MS COCO の画像の日本語説明文）で、分野が近いことも効いている可能性がある。
 - 検索の章の「検索用の埋め込みモデルを自分のデータで微調整する」で使う `MultipleNegativesRankingLoss` は、既定（コサイン類似度、scale=20 = 温度 0.05）でこの `simcse_loss` と同じ値になる（最後のセル）。Sentence Transformers の説明でも、既定の設定は InfoNCE や SimCSE の損失とも呼ばれるとしている。違うのは正例の組の作り方だけで、検索の章は（クエリ, 文書）、教師なし SimCSE は（文, 同じ文）、教師ありは（前提, 含意）に矛盾を足した三つ組である。Sentence Transformers で教師なし SimCSE をするなら、anchor と positive に同じ文を入れて学習すればよい。
 - データとモデルの出典とライセンス: 日本語 Wikipedia（wikimedia/wikipedia、CC BY-SA 3.0 / GFDL）、JGLUE の JSTS（ヤフー、CC BY-SA 4.0）、JSNLI（京都大学、CC BY-SA 4.0）、tohoku-nlp/bert-base-japanese-v3 (Apache 2.0)。ハイパーパラメータや学習の打ち切りを決めるときは、テストセットではなく JSTS の学習セットなど別の開発データで選ぶ。
 - 実務でライブラリを使って同じことをする版は、文埋め込みとクラスタリングの章の「文埋め込み用でない BERT を対照学習で文埋め込みモデルにする（SimCSE、Sentence Transformers）」。
@@ -866,22 +868,22 @@ name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # SB Intuitions、MIT �
 
 def fix_sarashina_tokenizer(tokenizer, name):
     """transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-    元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)"""
+    元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）"""
     sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
     tokenizer.backend_tokenizer.model = models.Unigram(
         [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
     return tokenizer
 
-tokenizer = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(name), name)   # 詳しくはこの章の「オープンな LLM とチャットする」の注意書き
+tokenizer = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(name), name)   # 詳しくは大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書き
 tokenizer.padding_side = "left"
 model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="cuda").eval()
 
 KEY = 15485863   # 透かしの鍵。transformers の WatermarkingConfig の既定値で公開されている値。実際には乱数で選んで秘密にする
 
 def is_green(prev, cur, gamma, key=KEY):
-    """直前のトークン prev と鍵から決まる擬似乱数で、次のトークン cur が green かどうかを決める (語彙の約 γ が green)"""
+    """直前のトークン prev と鍵から決まる擬似乱数で、次のトークン cur が green かどうかを決める（語彙の約 γ が green）"""
     x = (prev * 1_000_003 + cur + key) & 0xFFFFFFFF
-    for _ in range(3):                                   # 整数のハッシュ (ビットをよく混ぜる)
+    for _ in range(3):                                   # 整数のハッシュ（ビットをよく混ぜる）
         x = ((x ^ (x >> 16)) * 0x45D9F3B) & 0xFFFFFFFF
     return x.double() / 2**32 < gamma
 
@@ -891,14 +893,14 @@ class GreenListWatermark(LogitsProcessor):
         self.gamma, self.delta = gamma, delta
     def __call__(self, input_ids, scores):
         vocab = torch.arange(scores.shape[1], device=scores.device)
-        green = is_green(input_ids[:, -1:], vocab[None, :], self.gamma)    # (バッチ, 語彙) の green / red の表
+        green = is_green(input_ids[:, -1:], vocab[None, :], self.gamma)    # （バッチ, 語彙）の green / red の表
         return scores + self.delta * green.to(scores.dtype)
 
 def hf_encode(text):
     return tokenizer(text, add_special_tokens=False)["input_ids"]
 
 def detect(text, gamma, encode=hf_encode):
-    """文章だけから green のトークンの割合を数え、z 検定をする (モデルもプロンプトも要らない。鍵と、生成時と同じトークン化とハッシュが要る)"""
+    """文章だけから green のトークンの割合を数え、z 検定をする（モデルもプロンプトも要らない。鍵と、生成時と同じトークン化とハッシュが要る）"""
     ids = torch.tensor(encode(text))
     T = len(ids) - 1                                    # 最初のトークンは直前のトークンがないので数えない
     if T < 1:
@@ -933,7 +935,7 @@ for label, text in [("透かしなし", plain[0]), ("透かしあり", marked[0]
 ```
 
 ```python
-# 60 件ずつの z スコアの分布を比べる。z > 4 なら「透かしあり」と判定する (偶然 z > 4 になる確率は約 3e-5)
+# 60 件ずつの z スコアの分布を比べる。z > 4 なら「透かしあり」と判定する（偶然 z > 4 になる確率は約 3e-5）
 z_plain = np.array([detect(t, 0.25) for t in plain])
 z_marked = np.array([detect(t, 0.25) for t in marked])
 print(pd.DataFrame({"透かしなし": z_plain, "透かしあり": z_marked}).describe().round(2).T.to_string())
@@ -947,7 +949,7 @@ def z_ids(ids, gamma=0.25):
     T = len(ids) - 1
     return (int(is_green(ids[:-1], ids[1:], gamma).sum()) - gamma * T) / math.sqrt(T * gamma * (1 - gamma))
 
-raw_tokenizer = AutoTokenizer.from_pretrained(name)          # 比較用: 直さない (transformers 5 のまま) トークナイザー
+raw_tokenizer = AutoTokenizer.from_pretrained(name)          # 比較用: 直さない（transformers 5 のまま）トークナイザー
 gen_ids = [generated_tokens(row) for row in marked_ids]
 fixed_ids = [hf_encode(t) for t in marked]
 raw_ids = [raw_tokenizer(t, add_special_tokens=False)["input_ids"] for t in marked]
@@ -962,8 +964,8 @@ print("生成:", tokenizer.convert_ids_to_tokens(gen_ids[j][k - 2:k + 4]), "\n�
 ```
 
 ```python
-# δ と γ を変えて、検出のしやすさと文章の質 (大きなモデルで測ったパープレキシティ) の釣り合いを見る。Colab の T4 で 5〜10 分程度 (3B のモデルのダウンロードを含む)
-oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価用の大きなモデル (SB Intuitions、MIT ライセンス)
+# δ と γ を変えて、検出のしやすさと文章の質（大きなモデルで測ったパープレキシティ）の釣り合いを見る。Colab の T4 で 5〜10 分程度（3B のモデルのダウンロードを含む）
+oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価用の大きなモデル（SB Intuitions、MIT ライセンス）
 oracle_tok = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(oracle_name), oracle_name)
 oracle_tok.padding_side = "left"
 oracle = AutoModelForCausalLM.from_pretrained(oracle_name, dtype=DTYPE, device_map="cuda").eval()
@@ -1031,7 +1033,7 @@ out = model.generate(**enc, watermarking_config=wm_config, do_sample=True, tempe
                      max_new_tokens=200, pad_token_id=tokenizer.pad_token_id)
 builtin = tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
-detector = WatermarkDetector(model_config=model.config, device=model.device, watermarking_config=wm_config)   # 生成と同じデバイスで (乱数がデバイスで変わる)
+detector = WatermarkDetector(model_config=model.config, device=model.device, watermarking_config=wm_config)   # 生成と同じデバイスで（乱数がデバイスで変わる）
 def builtin_z(texts):
     return np.array([detector(torch.tensor([tokenizer(t, add_special_tokens=False)["input_ids"]], device=model.device), return_dict=True).z_score[0] for t in texts])
 print(f"組み込みの透かし → 組み込みの検出器: z の平均 {builtin_z(builtin).mean():.2f} / 自作の検出器: {np.mean([detect(t, 0.25) for t in builtin]):.2f}")

@@ -1335,14 +1335,15 @@ for end, (term, label) in A.iter(text):          # 重なりも含めてすべ�
 ```
 
 ```python
-# 最長一致だけ残す (重なったら長い語を優先)
+# 最長一致だけ残す（重なったら長い語を優先）
 for end, (term, label) in A.iter_long(text):
     print(end - len(term) + 1, end + 1, term, label)
 ```
 
 ```python
-# 正規表現の | 連結と速度を比べる
-import random, re, time
+# 語ごとにテキスト全体を調べる単純な in 判定と速度を比べる
+# （in 判定は 5 万語だと時間がかかるので、500 語で測って 5 万語ぶんに換算する）
+import random, time
 
 random.seed(0)
 vocab = ["".join(random.choices("あいうえおかきくけこさしすせそ", k=random.randint(3, 6))) for _ in range(50000)]
@@ -1354,7 +1355,8 @@ B.make_automaton()
 
 t = time.perf_counter(); n1 = sum(1 for _ in B.iter(big)); t1 = time.perf_counter() - t
 t = time.perf_counter(); n2 = sum(1 for w in vocab[:500] if w in big); t2 = time.perf_counter() - t
-print(f"Aho-Corasick (5 万語): {t1:.3f} 秒 / 単純な in 判定 (500 語だけ): {t2:.3f} 秒")
+print(f"Aho-Corasick (5 万語): {t1:.3f} 秒")
+print(f"単純な in 判定 (500 語): {t2:.3f} 秒 → 5 万語なら約 {t2 * 100:.1f} 秒")
 ```
 
 - テキストを 1 回走査するだけで、辞書の語数に関係なくすべての一致を列挙できる。

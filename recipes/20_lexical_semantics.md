@@ -788,7 +788,7 @@ TARGETS = ["原子", "同志", "活動", "戦争", "自由", "言葉", "必要",
 CONTENT = {"名詞", "動詞", "形容詞", "形状詞"}
 
 def cooccurrence(works, window=5, max_chars=20_000_000):
-    """対象語の前後 window 語に出てくる内容語を数える"""
+    """対象語の前後 window 語に出てくる内容語（対象語そのものは除く）を数える"""
     pair, word, n = defaultdict(Counter), Counter(), 0
     for text in random.sample(works, len(works)):
         for s in re.split(r"(?<=[。！？])|\n", text[:30000]):
@@ -797,7 +797,7 @@ def cooccurrence(works, window=5, max_chars=20_000_000):
             word.update(words)
             for i, w in enumerate(words):
                 if w in TARGETS:
-                    pair[w].update(words[max(0, i - window):i] + words[i + 1:i + 1 + window])
+                    pair[w].update(c for c in words[max(0, i - window):i] + words[i + 1:i + 1 + window] if c != w)
         n += min(len(text), 30000)
         if n > max_chars:
             break

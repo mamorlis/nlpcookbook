@@ -20,13 +20,13 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 torch.manual_seed(0)
-# JGLUE (Kurihara et al., 2022) の JCommonsenseQA (5 択の常識問題) と JSQuAD (読解)。ライセンスは CC BY-SA 4.0
+# JGLUE (Kurihara et al., 2022) の JCommonsenseQA（5 択の常識問題）と JSQuAD（読解）。ライセンスは CC BY-SA 4.0
 jcqa = load_dataset("sbintuitions/JCommonsenseQA", split="validation").shuffle(seed=0).select(range(500))
 jsquad = load_dataset("sbintuitions/JSQuAD", split="validation").shuffle(seed=0).select(range(200))
 jcqa_train = load_dataset("sbintuitions/JCommonsenseQA", split="train").shuffle(seed=0)    # few-shot の例は学習データから取る
 jsquad_train = load_dataset("sbintuitions/JSQuAD", split="train").shuffle(seed=0).select(range(2))
 
-# few-shot の例を 2 通り選ぶ: 先頭の 3 問そのまま (正解が偏っている) と、正解の番号が重ならない 3 問
+# few-shot の例を 2 通り選ぶ: 先頭の 3 問そのまま（正解が偏っている）と、正解の番号が重ならない 3 問
 skewed = [jcqa_train[i] for i in range(3)]
 balanced = []
 for ex in jcqa_train:
@@ -50,7 +50,7 @@ def normalize(text):
     return re.sub(r"[\s。、．，,.!?！？「」『』()（）]", "", text)
 
 def char_f1(pred, golds):
-    """文字単位の F1 (正解が複数あれば最大値)。JSQuAD の標準的な指標"""
+    """文字単位の F1（正解が複数あれば最大値）。JSQuAD の標準的な指標"""
     best = 0.0
     for g in golds:
         common = sum((Counter(normalize(pred)) & Counter(normalize(g))).values())
@@ -70,7 +70,7 @@ from tokenizers import models
 def load_tokenizer(name):
     tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
     # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま。この章の「オープンな LLM とチャットする」を参照)
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま。大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）
     sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
     tokenizer.backend_tokenizer.model = models.Unigram(
         [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -91,7 +91,7 @@ def batches(texts, bs=32):
 
 @torch.no_grad()
 def number_prob(texts):
-    """方式 1: 次のトークンとして「1」〜「5」のどれの確率が高いか (生成はしない)"""
+    """方式 1: 次のトークンとして「1」〜「5」のどれの確率が高いか（生成はしない）"""
     digits = [tokenizer(str(i), add_special_tokens=False)["input_ids"][-1] for i in range(1, 6)]
     preds = []
     for enc in batches(texts):
@@ -131,14 +131,14 @@ def choice_loglik(exs):
 ```
 
 ```python
-# 3 つのモデルを順に読み込み、すべて同じ問題・同じプロンプト・同じ答えの取り出し方で評価する (Colab の T4 で合計 10〜15 分程度)
+# 3 つのモデルを順に読み込み、すべて同じ問題・同じプロンプト・同じ答えの取り出し方で評価する（Colab の T4 で合計 10〜15 分程度）
 MODELS = ["sbintuitions/sarashina2.2-0.5b-instruct-v0.1", "sbintuitions/sarashina2.2-1b-instruct-v0.1", "sbintuitions/sarashina2.2-3b-instruct-v0.1"]
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 gold = np.array(jcqa["label"])
 SHOTS = {"0-shot": [], "3-shot (正解が偏った例)": [(mc_prompt(e), str(e["label"] + 1)) for e in skewed],
          "3-shot (正解が重ならない例)": [(mc_prompt(e), str(e["label"] + 1)) for e in balanced]}
 qa_shots = [(qa_prompt(e), e["answers"]["text"][0]) for e in jsquad_train]
-per_item, outputs, preds = {}, {}, {}         # per_item[モデル, 設定] = 問題ごとの得点 (0/1 または F1)
+per_item, outputs, preds = {}, {}, {}         # per_item[モデル, 設定] = 問題ごとの得点（0/1 または F1）
 
 for name in MODELS:
     t = time.time()
@@ -180,7 +180,7 @@ print(f"(JCQA {len(jcqa)} 問、偶然の正解率 20%。JSQuAD {len(jsquad)} �
 ```
 
 ```python
-# 番号の確率で選んだ答えの分布 (評価データの正解は 1〜5 にほぼ均等) と、生成方式で番号を取り出せなかった割合
+# 番号の確率で選んだ答えの分布（評価データの正解は 1〜5 にほぼ均等）と、生成方式で番号を取り出せなかった割合
 for m in models:
     print(m, {shot: sorted(Counter(int(p) + 1 for p in preds[m, shot]).items()) for shot in SHOTS})
     print("   番号を取り出せなかった割合:", {shot: f"{np.mean([parse_number(o) < 0 for o in outputs[m, shot]]):.1%}" for shot in SHOTS})
@@ -204,7 +204,7 @@ for method in ["番号の確率", "生成"]:
     for shot in list(SHOTS)[1:]:
         print(f"{method} {shot}:", {m: diff_ci(per_item[m, f"JCQA {method} {shot}"], per_item[m, f"JCQA {method} 0-shot"]) for m in models})
 
-# 評価の件数を減らすと、信頼区間はどれくらい広がるか (3b、番号の確率、0-shot)
+# 評価の件数を減らすと、信頼区間はどれくらい広がるか（3b、番号の確率、0-shot）
 x = per_item[models[2], "JCQA 番号の確率 0-shot"]
 for n in [50, 100, 200, 500]:
     print(f"{n:3d} 問: {ci(x[:n])}")
@@ -1908,7 +1908,7 @@ print(f"GPU メモリの最大使用量: テンソル {torch.cuda.max_memory_all
 ```
 
 - Kirchenbauer らの方式 (Kirchenbauer et al., 2023, "A Watermark for Large Language Models")。直前のトークンと鍵から語彙の γ を「green」に選び、そのロジットに δ を足して生成する。検出には鍵と設定とトークナイザーがあればよく、モデルの重みもプロンプトも要らない。`generate(watermarking_config=...)` で透かしを入れ、`WatermarkDetector` が green の数から z を計算する（`prediction` の既定のしきい値は z > 3 で、透かしのない文章が偶然超える確率は約 1e-3。ここでは原論文にならって z > 4 にした）。検出では `ignore_repeated_ngrams=True` を付け、同じ n-gram を何度も数えないようにした（原著の実装 jwkirchenbauer/lm-watermarking の README が「検出では必ず使う」と勧める設定で、transformers の既定は False）。60 件（約 200 トークン）で、透かしなしの z は平均 −0.08（最大 2.87）、γ = 0.25、δ = 2 の透かしありは平均 5.16 で、z > 4 は 83% だった（繰り返しも数える既定のままだと、透かしなしは平均 −0.28、最大 2.29）。60 件なので、割合には ±10 ポイント程度の幅がある。
-- 検出の条件は生成時とそろえる。鍵を 1 つ変えると z の平均は −0.58、GPU で生成した文章を CPU で検出すると 0.24 になり、まったく検出できなかった（green の表を `torch.Generator` の乱数で作るので、デバイスで変わる）。CPU と GPU の違いしか確かめておらず、GPU の種類が違う場合（たとえば T4 と A5000）に同じ表になるかは確かめていない。上の数値も、GPU によって変わりうる。鍵は秘密にし、transformers と torch の版も記録して固定しておく（版を変えても同じ表になるかも確かめていない）。トークナイザーも同じにする: sarashina2.2 のトークナイザーを直さずに使うと z の平均は 3.91、z > 4 は 50% まで下がった（直し方は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照）。直したトークナイザーでは 5.16 で、生成したトークン列のままの 5.24 とほとんど変わらないが、同じトークン列に戻った文章は 58% で、同じ文字列に分割が複数ありうる分だけ目減りは残る。
+- 検出の条件は生成時とそろえる。鍵を 1 つ変えると z の平均は −0.58、GPU で生成した文章を CPU で検出すると 0.24 になり、まったく検出できなかった（green の表を `torch.Generator` の乱数で作るので、デバイスで変わる）。CPU と GPU の違いしか確かめておらず、GPU の種類が違う場合（たとえば T4 と検証に使った GPU）に同じ表になるかは確かめていない。上の数値も、GPU によって変わりうる。鍵は秘密にし、transformers と torch の版も記録して固定しておく（版を変えても同じ表になるかも確かめていない）。トークナイザーも同じにする: sarashina2.2 のトークナイザーを直さずに使うと z の平均は 3.91、z > 4 は 50% まで下がった（直し方は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照）。直したトークナイザーでは 5.16 で、生成したトークン列のままの 5.24 とほとんど変わらないが、同じトークン列に戻った文章は 58% で、同じ文字列に分割が複数ありうる分だけ目減りは残る。
 - δ を大きくすると検出しやすくなるが、文章の質が落ちる。γ = 0.25 で δ を 0, 1, 2, 4, 8 と上げると、z の平均は −0.08, 2.15, 5.16, 10.54, 17.02、3B のモデルで測ったパープレキシティの中央値は 9.5, 10.1, 12.0, 20.3, 78.5 になった（同じ系列のモデルで測ったので目安）。δ = 1 では z > 4 は 5% で、200 トークンではほとんど検出できない。γ = 0.5 は γ = 0.25 より z が低かった (4.47)。transformers では（5.22.1 で確認）透かしの処理が top_p などの絞り込みのあとにかかるので、モデルの既定の top_p = 0.9 のまま生成すると、δ = 2 でも z の平均は 4.04（z > 4 は 57%）に下がった。この設定のパープレキシティ (8.3) が透かしなし (9.5) より低いのは top_p で候補を絞った効果で、透かしのコストとは比べられない。
 - `seeding_scheme="selfhash"` は名前が同じでも、原著の実装と transformers で中身が違う。原著の README は幅 (context width) h = 4 を勧め、`selfhash` を幅 4 の方式の略称としている。transformers の `selfhash` は既定が `context_width=1` で、そのままだと green かどうかが各トークンだけで決まる。そのため、繰り返しも数える既定の検出器では、透かしのない文章でも z の平均が 3.65、z > 4 が 40% になった（`ignore_repeated_ngrams=True` にすると 0.49 と 0%）。selfhash を使うなら `context_width=4` を明示する（候補のトークン自身を含む 4 トークンから green が決まる。lefthash では幅を変えても直前の 1 トークンしか使わない）。幅 4 では、透かしのない文章の z > 4 は 0（ただし z の平均は 0.90 とやや高い）、透かしありは z の平均 6.29（z > 4 は 93%）、パープレキシティの中央値 10.5 だった。候補を 1 つずつ確かめながら生成するので、lefthash より生成が遅い。
 - SynthID Text (Dathathri et al., 2024, Nature, Google DeepMind) は、直前の数トークン、候補のトークン、複数の鍵から決まる 0/1 の値（g 値）が大きいトークンを、トーナメント方式の抽出で選ぶ。ここでは z の平均 7.63（z > 4 は 100%）と検出しやすく、パープレキシティの中央値も 9.5 で、透かしなし (9.5) とほとんど変わらなかった。transformers の公式の検出器 `SynthIDTextWatermarkDetector` は、学習したベイズ検出器 (`BayesianDetectorModel`) を使う。学習の手順は transformers-research-projects リポジトリにあり、ここでは代わりに、g 値の平均の検定を小さな関数で書いた。transformers の実装はハッシュの方式が Gemini アプリのものと違うので（ソースコードのコメント）、Gemini の出力の検出には使えない。

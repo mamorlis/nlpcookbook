@@ -16,11 +16,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # 0.5B の小型日本語モデル。CPU でも動く
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                                              device_map="auto" if torch.cuda.is_available() else None).eval()
 
 def chat(messages, max_new_tokens=200, **kwargs):
@@ -38,7 +38,7 @@ print(reply)
 ```
 
 ```python
-# 対話を続ける: これまでのやりとりをすべて messages に積んで渡す (モデル自体は状態を持たない)
+# 対話を続ける: これまでのやりとりをすべて messages に積んで渡す（モデル自体は状態を持たない）
 messages += [{"role": "assistant", "content": reply}, {"role": "user", "content": "今の説明を、小学生にもわかるように一文で言い直してください。"}]
 print(chat(messages))
 ```
@@ -68,7 +68,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -82,7 +82,7 @@ _ = model.generate(**inputs, max_new_tokens=120, do_sample=False, streamer=strea
 ```
 
 ```python
-# 自分のコードで受け取りたい場合 (Web アプリに流すなど): 別スレッドで生成し、イテレータから読む
+# 自分のコードで受け取りたい場合（Web アプリに流すなど）: 別スレッドで生成し、イテレータから読む
 from threading import Thread
 from transformers import TextIteratorStreamer
 
@@ -91,8 +91,14 @@ thread = Thread(target=model.generate, kwargs=dict(**inputs, max_new_tokens=60, 
 thread.start()
 chunks = [chunk for chunk in streamer]
 thread.join()
-print(len(chunks), "個の断片:", chunks[:8])
+# 断片は、区切りのよいところ（空白・改行・漢字）までたまってから届き、たまっている間は空の文字列 "" が届く。表示では空のものを除く
+texts = [chunk for chunk in chunks if chunk]
+print(len(chunks), "個の断片のうち、空でないものは", len(texts), "個")
+print(texts[:12])
+print("つなげると:", "".join(texts))
 ```
+
+ストリーマーは、文字化けや単語の途中での切れ目を避けるため、空白・改行・漢字のところまで文字をためてから渡す。そのため、日本語では 1 文字ずつではなく、漢字で終わるところまでのまとまりで表示される（ひらがな・カタカナが続く間は、まとめて出る）。TextIteratorStreamer では、ためている間は空の文字列が届くので、上のように除いて使う。
 
 ## 複数のプロンプトをまとめてバッチ生成する {llm_batch_generation}
 
@@ -109,7 +115,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -125,7 +131,9 @@ prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{w}�
 @torch.no_grad()
 def generate(batch):
     enc = tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False)
-    out = model.generate(**enc, max_new_tokens=40, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+    # stop_strings: 「。」が出たところで、その系列の生成を止める（一文だけ答えさせる）
+    out = model.generate(**enc, max_new_tokens=60, do_sample=False, pad_token_id=tokenizer.pad_token_id,
+                         stop_strings=["。"], tokenizer=tokenizer)
     return tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
 t = time.perf_counter(); single = [generate([p])[0] for p in prompts]; t1 = time.perf_counter() - t
@@ -136,6 +144,8 @@ for w, s in zip(words, batched):
 ```
 
 - 右パディングのままだと、短いプロンプトの後ろにパディングが入り、その続きを生成することになって出力が壊れる。
+- 「一文で」と頼んでも、モデルは二文、三文と続けることが多い。`stop_strings=["。"]` で最初の「。」で止め、`max_new_tokens` は長すぎる答えを打ち切る上限にしている。上限に達した答えは文の途中で切れる。
+- バッチでは、全部の系列が止まるか上限に達するまで生成が続く（先に止まった系列はパディングで埋まる）。
 - バッチ内の長さを揃える（長さでソートする）とパディングが減って効率が良い。
 - 数万件以上を本格的に処理するなら、vLLM などの推論エンジン（連続バッチ処理）を使う。この章の「vLLM で大量のプロンプトをまとめて高速に生成する」を参照。
 
@@ -758,7 +768,7 @@ print(pd.DataFrame({"問題数": pd.Series(top).value_counts().sort_index(),
 - 指示チューニング済みのモデルは「数値だけを出力」と指示しても説明から書き始め、例なしの直接では 16 トークンの中に数値が出てこない出力が 31% あった。例を 2 問見せると多くは「答えは…です。」で書き始めるようになるが、そのあとに説明を続ける（出力の全部が 16 トークンで打ち切られ、6% は数値が出てこなかった）。答えの取り出し方は、取り出せなかった出力を目で確かめて直す。ここでは「答え」の後ろ、\boxed{} の中、最後に出た数値の順に探し、「3万」「3万5000」のような書き方も数値に直している。
 - 多数決 (self-consistency) は Wang et al. (2023) の方法で、サンプリングで複数の推論を生成させ、最終的な答えだけで多数決をとる。例なしの CoT で、サンプリング 1 回では 29.0%（5 回のどれを使うかで平均した値）、5 回の多数決で 36.0% になり、差は +7.0 ポイント [+2.2, +12.0] だった。ただし貪欲法 1 回 (35.0%) との差は +1.0 ポイント [−9.0, +11.0] で、このモデルでは 5 倍のコストをかけても貪欲法を上回ったとはいえない。サンプリングは 1 回ごとには貪欲法より正解率が下がり、多数決はその分を取り戻している。推論を書かせない直接の答えで多数決をとっても 6.6% → 7.0% とほとんど変わらなかった。
 - 票の集まり方は確信度の目安になる。5 回とも同じ答えだった 5 問では多数決の正解率が 100%、4 票だった 12 問では 91.7% だったのに対し、最多票が 1（同じ答えが 2 回以上出なかった）の 31 問では 0% だった。票が割れた問題だけ人が確かめる、答えを保留する、といった使い方ができる。
-- コスト: 出力のトークン数は、直接の 16 トークン（上限）に対して CoT は平均 171.0 トークン、5 回の多数決では 1 問あたり 930 トークンになる。検証に使った GPU（RTX A5000、1 回のバッチは 64 件、多数決では 12 問 × 5 回の 60 件）での 1 問あたりの時間は、直接 0.03 秒以下、CoT 0.22 秒、5 回の多数決 1.27 秒だった（T4 ではもっとかかる）。例ありの CoT は出力が短い（平均 154.6 トークン）のに 0.32 秒かかった。例の分だけ入力が長くなるためと考えられる（時間の内訳は測っていない）。バッチの中で最も長い出力が終わるまで待つので、時間は出力の長さのばらつきにも左右される。CoT の 1〜2% は 400 トークンの上限で打ち切られた。
+- コスト: 出力のトークン数は、直接の 16 トークン（上限）に対して CoT は平均 171.0 トークン、5 回の多数決では 1 問あたり 930 トークンになる。検証に使った GPU（T4 より速いもの。1 回のバッチは 64 件、多数決では 12 問 × 5 回の 60 件）での 1 問あたりの時間は、直接 0.03 秒以下、CoT 0.22 秒、5 回の多数決 1.27 秒だった（T4 ではもっとかかる）。例ありの CoT は出力が短い（平均 154.6 トークン）のに 0.32 秒かかった。例の分だけ入力が長くなるためと考えられる（時間の内訳は測っていない）。バッチの中で最も長い出力が終わるまで待つので、時間は出力の長さのばらつきにも左右される。CoT の 1〜2% は 400 トークンの上限で打ち切られた。
 - MGSM は 250 問しかなく、ここではさらに先頭の 100 問を使ったので、正解率の差の信頼区間の幅は 10〜21 ポイントあった。GSM8K と MGSM は公開から時間がたっており、sarashina2.2 の事前学習モデルのモデルカードによると、数学の性能を上げるための合成データでも学習している。評価データやその言い換えが学習データに含まれていれば、点数は実力より高く出る（LLM の評価と分析の章の「日本語のベンチマークで複数の LLM を同じ条件で比べる」の注意書きを参照）。データセットのライセンスは、元のリポジトリの mgsm/LICENSE では CC BY 4.0、Hugging Face のデータセットカードのメタデータでは CC BY-SA 4.0 となっている。
 - このモデルの generation_config は、サンプリングの既定値を温度 0.7、top_p 0.9 にし、repetition_penalty 1.05 を貪欲法でも掛ける。設定を変えると点数も変わるので、比べるときはそろえる。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
@@ -2224,7 +2234,7 @@ from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 set_seed(0)
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # この章の LoRA・DPO のレシピと同じ 0.5B のモデル (MIT License)
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # この章の「選好データで LLM を調整する (DPO)」と同じ 0.5B の指示チューニング済みモデル (MIT License)
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
 # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
@@ -2234,7 +2244,7 @@ tokenizer.backend_tokenizer.model = models.Unigram(
 BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
 model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto")
 
-# 学習用: SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0)。GSM8K (Cobbe et al., 2021、MIT License) のテストの 251 問目以降の
+# 学習用: SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0)。GSM8K（Cobbe et al., 2021、MIT License）のテストの 251 問目以降の
 # 1,069 問を GPT-4 で日本語に訳したもの。先頭の 250 問は MGSM と重なるので、開発元があえて除いている
 train_raw = load_dataset("json", data_files=hf_hub_download("SakanaAI/gsm8k-ja-test_250-1319", "gsm8k-ja-test_250-1319.jsonl",
                                                             repo_type="dataset"), split="train")
@@ -2369,8 +2379,8 @@ for label, hits in [("形が直った", ~b_strict & b_loose & a_strict), ("学�
 
 - GRPO (Group Relative Policy Optimization) は、Shao et al. (2024) が DeepSeekMath の論文で提案した強化学習の方法で、PPO の価値関数のモデルを使わず、同じ問題に対して生成した複数の応答（グループ、ここでは 8 個）の報酬の平均と標準偏差から、各応答がグループの中でどれだけ良かったか（アドバンテージ）を決める。DeepSeek-R1 (2025) は、数学の問題で、決まった形で書かせた最終的な答えの正誤と、形式を守ったかどうかを規則で判定する報酬を使った。ここも同じ考え方で、正解の報酬 (1) と形式の報酬 (0.2) を足している（このように規則で判定できる報酬は、検証できる報酬 (verifiable rewards) と呼ばれる）。グループの 8 個がすべて同じ報酬だとアドバンテージが 0 になって学習に使われないので、学習前に正解がほとんど出ない課題（正解率がほぼ 0）では、正解の報酬からは学べない（形式の報酬で差がつけば、形式だけは学ぶ）。
 - この章の「選好データで LLM を調整する (DPO)」との違い: DPO は人が付けた選好の組（chosen と rejected）が要り、その応答は別のモデルの出力（方策外のデータ）だった。GRPO は選好の組も推論の過程の手本も要らず、問題と正解の数値と、それを判定する報酬関数だけで学習できる。応答は学習中のモデル自身がその場で生成する（方策上のデータ）。その代わり、学習のたびに生成するので時間がかかる。正解を機械的に判定できない課題（応答の役に立ち方など）には、判定役のモデル（報酬モデル）が要る。
-- 上の出力では、正解率（決まった形の答え）は 0.072 → 0.212（+14.0 ポイント [+8.8, +19.2]）、形を守った割合は 0.200 → 0.944 に上がった。しかし形を問わない正解率は 0.252 → 0.216（−3.6 ポイント [−9.6, +1.6]）で、上がらなかった（信頼区間は 0 をまたぐ）。問題ごとに見ると、30 問が正解から不正解に、21 問が不正解から正解に変わった。この実行で身についたのは「決まった形で答える」ことで、40 ステップ（160 問）の学習では解く力は上がらなかった。報酬の推移でも、正解の報酬の上昇（0.05 前後 → 0.12〜0.26）は形式の報酬の上昇 (0.05 → 0.18) と同時に起きている。1 ステップは 4 問だけなので、正解の報酬は問題の難しさで大きく揺れる。また、GPU の計算は実行ごとにわずかに変わり、それがサンプリングで生成する応答と学習の経過を変えるので、同じ種でも学習後の正解率は実行ごとに変わる。1 回の実行で結論を出さず、種を変えて何回か学習して比べる。
-- 応答は短くなった（評価で平均 192 → 130 トークン、学習中に上限の 320 トークンで打ち切られた割合は 0.21 → 0.01〜0.05）。打ち切られた応答は最後の「答えは〇〇です。」まで書けずに報酬が 0 になるので、短い応答が有利になると考えられる（短くなったことが正解率に影響したかどうかは確かめていない）。報酬が形式だけで取れるように設計すると、推論を書かずに答えだけを出すような、報酬は上がるが目的に合わない学習（報酬ハッキング）が起きることがある。報酬だけでなく、応答の長さと出力の例も見る。
-- この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」との関係: 指示文はそのレシピの「CoT (0-shot)」と同じで、推論を書かせてから答えさせる。GRPO は推論の過程には報酬を与えず、最後の答えだけを判定する。推論の書き方は、正解に結びつくかどうかを通じて間接的に学ばれるだけで、上の「形が直った例」でも、学習後の途中の計算は筋が通らないのに最後の答えは正解になっている。そのレシピでは、形の違う答えも取り出せるように取り出し方を工夫したが、ここでは答えの形そのものを LoRA の重みに覚えさせた。正解の判定には、そのレシピの取り出し方より厳しい「決まった形」を使っている。取り出し方が緩いと、途中に出てきた数値がたまたま正解と一致しただけの応答にも報酬を与えてしまう。
-- 時間とメモリ: 検証に使った GPU（T4 と同じ float16 の経路）では学習が 497 秒、全体で約 11 分、GPU メモリの最大使用量は 10.5GB だった。T4 では応答の生成が遅いので、この 2〜2.5 倍程度かかると見込んでいる（T4 では測っていない）。応答の生成は `use_vllm=True` で vLLM を使うと速くなるとされるが、Colab の torch などを入れ替えることになるので、ここでは使っていない（確かめていない）。`GRPOConfig` は trl 1.18.0 では `beta=0`（参照モデルとの KL の罰則なし、参照モデルを読み込まない）、学習率 1e-6、`bf16=True`、`gradient_checkpointing=True`、`loss_type="dapo"` が既定で、版によって変わることがある。
+- 上の出力では、正解率（決まった形の答え）は 0.072 → 0.216（+14.4 ポイント [+9.2, +19.6]）、形を守った割合は 0.200 → 0.916 に上がった。しかし形を問わない正解率は 0.252 → 0.216（−3.6 ポイント [−9.6, +2.0]）で、上がらなかった（信頼区間は 0 をまたぐ）。問題ごとに見ると、32 問が正解から不正解に、23 問が不正解から正解に変わった。この実行で身についたのは「決まった形で答える」ことで、40 ステップ（160 問）の学習では解く力は上がらなかった。報酬の推移でも、正解の報酬の上昇（0.04〜0.07 → 0.12〜0.27）は形式の報酬の上昇 (0.05 → 0.17) と同時に起きている。1 ステップは 4 問だけなので、正解の報酬は問題の難しさで大きく揺れる。また、GPU の計算は実行ごとにわずかに変わり、それがサンプリングで生成する応答と学習の経過を変えるので、同じ種でも学習後の正解率は実行ごとに変わる。1 回の実行で結論を出さず、種を変えて何回か学習して比べる。
+- 応答は短くなった（評価で平均 192 → 141 トークン、学習中に上限の 320 トークンで打ち切られた割合は 0.20 → 0.02〜0.07）。打ち切られた応答は最後の「答えは〇〇です。」まで書けずに報酬が 0 になるので、短い応答が有利になると考えられる（短くなったことが正解率に影響したかどうかは確かめていない）。報酬が形式だけで取れるように設計すると、推論を書かずに答えだけを出すような、報酬は上がるが目的に合わない学習（報酬ハッキング）が起きることがある。報酬だけでなく、応答の長さと出力の例も見る。
+- この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」との関係: 指示文はそのレシピの「CoT (0-shot)」と同じで、推論を書かせてから答えさせる。GRPO は推論の過程には報酬を与えず、最後の答えだけを判定する。推論の書き方は、正解に結びつくかどうかを通じて間接的に学ばれるだけで、途中の計算が正しいかどうかは確かめていない。上の「学習後に間違えた例」では、学習後の応答は「答えは〇〇です。」の形は守っているが、途中の計算 (2 + 2 / 2 = 4) を誤っている。そのレシピでは、形の違う答えも取り出せるように取り出し方を工夫したが、ここでは答えの形そのものを LoRA の重みに覚えさせた。正解の判定には、そのレシピの取り出し方より厳しい「決まった形」を使っている。取り出し方が緩いと、途中に出てきた数値がたまたま正解と一致しただけの応答にも報酬を与えてしまう。
+- 時間とメモリ: 検証に使った GPU（T4 と同じ float16 の経路）では学習が 736 秒、全体で約 17 分、GPU メモリの最大使用量は 10.5GB だった（時間は GPU のほかの負荷で変わり、別の実行では学習が 497 秒、全体で約 11 分だった）。T4 では応答の生成が遅いので、この 2〜2.5 倍程度かかると見込んでいる（T4 では測っていない）。応答の生成は `use_vllm=True` で vLLM を使うと速くなるとされるが、Colab の torch などを入れ替えることになるので、ここでは使っていない（確かめていない）。`GRPOConfig` は trl 1.18.0 では `beta=0`（参照モデルとの KL の罰則なし、参照モデルを読み込まない）、学習率 1e-6、`bf16=True`、`gradient_checkpointing=True`、`loss_type="dapo"` が既定で、版によって変わることがある。
 - データ: 学習用の SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0) は、データセットカードによると GPT-4 (gpt-4-0125-preview) で訳したもので、評価用の MGSM と重ならないように GSM8K のテストの 251 問目以降だけを使っている。どちらも GSM8K のテストの問題なので、ここで学習したモデルを GSM8K で評価すると、学習した問題で評価することになる。MGSM のライセンスと、評価データが事前学習に含まれている可能性については、この章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の注意書きを参照。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。

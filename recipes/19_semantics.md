@@ -217,7 +217,7 @@ print(len(problems), "問"); print(problems[0]); print(problems[1])
 name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -233,7 +233,7 @@ def p_first(text, pronoun, a, b):
     return float(llm(ids).logits[0, -1, ONE_TWO].float().softmax(-1)[0])
 
 def solve(p):
-    """選択肢の順序を入れ替えて 2 回聞き、平均する (1 番目を選びやすい、といった偏りを打ち消す)"""
+    """選択肢の順序を入れ替えて 2 回聞き、平均する（1 番目を選びやすい、といった偏りを打ち消す）"""
     a, b = p["candidates"]
     score = (p_first(p["text"], p["pronoun"], a, b) + 1 - p_first(p["text"], p["pronoun"], b, a)) / 2
     return a if score > 0.5 else b
@@ -246,7 +246,7 @@ print("正解率:", round(df["correct"].mean(), 3), "(でたらめなら 0.5)")
 ```
 
 ```python
-# このデータは 2 文で 1 組 (同じ登場人物で、1 語か 2 語だけ違い、答えが入れ替わる)。組の両方に正解できた割合を見る
+# このデータは 2 文で 1 組（同じ登場人物で、1 語か 2 語だけ違い、答えが入れ替わる）。組の両方に正解できた割合を見る
 pair_ok = [df["correct"][i] and df["correct"][i + 1] for i in range(0, len(df) - 1, 2)]
 print("組の両方に正解:", round(np.mean(pair_ok), 3), "/ 常に同じ側を答えているだけの組:",
       round(np.mean([df["prediction"][i] == df["prediction"][i + 1] for i in range(0, len(df) - 1, 2)]), 3))
@@ -415,7 +415,7 @@ def train(marker, pool, epochs=4):
 gold = np.array(ds["test"]["relation"])
 results = {}
 for name, marker, pool in [("印なし + [CLS]", False, "cls"), ("印あり + [CLS]", True, "cls"), ("印あり + 印の位置", True, "entity")]:
-    model, pred = train(marker, pool)   # T4 で 1 つあたり 3〜4 分
+    model, pred = train(marker, pool)   # T4 で 1 つあたり 4〜6 分の見込み
     results[name] = pred
     print(name, "正解率:", round(float((pred == gold).mean()), 3))
 print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
@@ -481,10 +481,10 @@ for s in ["The <e1>fire</e1> was caused by a faulty <e2>heater</e2>.",
 
 - 関係分類は、文と 2 つのエンティティが与えられたときに、その組の関係のラベルを 1 つ選ぶ文分類である。この章の「文から関係の三つ組を抽出する (REBEL)」は、学習済みのモデルが Wikidata の関係を文から生成するだけで、関係の種類を自分では決められない。自分の分野の関係（薬と副作用、部品と製品など）を扱うには、注釈を付けたデータでこのような分類器を学習する。
 - 実務では、固有表現抽出の章の「BERT をファインチューニングして日本語の固有表現抽出器を作る」で文中のエンティティを見つけ、その組ごとに印を付けてこの分類器にかけるパイプラインにすることが多い。組の大半は関係なしになるので、Other (no_relation) の例を十分に学習させる必要がある。BERT に分類の層を付けて Trainer で学習する流れは、テキスト分類の章の「BERT をファインチューニングして文書分類する (Trainer)」と同じで、ここでは印の位置のベクトルを取り出すために自作のモデルを渡している。
-- 公式の F1 は、印なし 0.808、印あり + [CLS] 0.889、印あり + 印の位置 0.891 になった。印の効果ははっきりしている。印なしでも 0.81 になるのは、SemEval の文は短く、関係を聞く名詞の組が 1 つで、先に出る名詞が常に e1 だからと考えられる。印の位置のベクトルを使う方法は Baldini Soares ら (2019) が最もよかったと報告しているが、ここでは [CLS] との差 +0.003 の信頼区間（-0.005〜+0.011）が 0 をまたいでおり、ばらつきの範囲である。
+- 公式の F1 は、印なし 0.810、印あり + [CLS] 0.888、印あり + 印の位置 0.891 になった。印の効果ははっきりしている。印なしでも 0.81 になるのは、SemEval の文は短く、関係を聞く名詞の組が 1 つで、先に出る名詞が常に e1 だからと考えられる。印の位置のベクトルを使う方法は Baldini Soares ら (2019) が最もよかったと報告しているが、ここでは [CLS] との差 +0.003 の信頼区間（-0.005〜+0.011）が 0 をまたいでおり、ばらつきの範囲である。
 - ラベルは方向付きで、`Cause-Effect(e1,e2)` は e1 が原因、`(e2,e1)` は e2 が原因を表す。上の例でも、受け身の文と能動の文で向きが入れ替わった。関係の種類は合っていて方向だけを間違えたのは 7 件と少ない。ただし `Entity-Destination(e2,e1)` は学習データにも評価データにも 1 件しかなく、評価データの 1 件も当たっていない。
-- 公式の評価は、Other を除く 9 種類の関係の F1 のマクロ平均で、方向を間違えると不正解になる。Other は「9 種類のどれでもない」の寄せ集めで、クラスごとの F1 は 0.666 にとどまり、関係ありのラベル（0.77〜0.95。評価データが 1 件だけの `Entity-Destination(e2,e1)` を除く）より明らかに低い。混同行列でも、Other を関係ありと予測した 163 件と、関係ありを Other と予測した 129 件が誤りの大半を占める。
-- T4 では、3 つの学習で合わせて 10 分ほどかかる見込みで、GPU メモリの最大は 3.7 GB である。ここでは学習データ全体で学習し、評価データで 1 回だけ測っている。学習率やエポック数を選ぶなら、学習データの一部を開発データとして分ける。
+- 公式の評価は、Other を除く 9 種類の関係の F1 のマクロ平均で、方向を間違えると不正解になる。Other は「9 種類のどれでもない」の寄せ集めで、クラスごとの F1 は 0.664 にとどまり、関係ありのラベル（0.76〜0.94。評価データが 1 件だけの `Entity-Destination(e2,e1)` を除く）より明らかに低い。混同行列でも、Other を関係ありと予測した 166 件と、関係ありを Other と予測した 125 件が誤りの大半を占める。
+- T4 では、3 つの学習で合わせて 12〜18 分ほどかかる見込みで、GPU メモリの最大は 3.7 GB である。ここに示した値は、T4 と同じ float16 で学習したときのものである（bfloat16 が使える GPU では `BF16` が True になり、値が少し変わる。同じ GPU でも、実行のたびに F1 が 0.003 程度ぶれる）。ここでは学習データ全体で学習し、評価データで 1 回だけ測っている。学習率やエポック数を選ぶなら、学習データの一部を開発データとして分ける。
 - 日本語では、ライセンスが明確で手軽に使える関係分類の注釈付きデータが見当たらない。日本語で作るなら、同じ形式（印を付けた文とラベル）で自分のデータに注釈を付け、`tohoku-nlp/bert-base-japanese-v3` などの日本語のモデルに替える。
 
 ## 固有表現を Wikidata のエンティティに結び付ける（エンティティリンキング） {entity_linking}

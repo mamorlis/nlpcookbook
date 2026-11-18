@@ -800,7 +800,7 @@ BM25 のスコア、埋め込みの類似度、文書の長さなど、手元に
 import numpy as np
 import pandas as pd
 
-# JQaRA: クイズの質問ごとに Wikipedia の段落の候補 (dev は 50 件、test は 100 件) が付いている。
+# JQaRA: クイズの質問ごとに Wikipedia の段落の候補（dev は 50 件、test は 100 件）が付いている。
 # ラベルは、答えの文字列を含み、答えを導くのに有用と確かめた段落が 1、それ以外が 0
 base = "hf://datasets/hotchpotch/JQaRA/data/"
 dev = pd.read_parquet(base + "dev-00000-of-00001.parquet")
@@ -810,7 +810,7 @@ for name, d in [("dev", dev), ("test", test)]:
     print(f"{name}: {d['q_id'].nunique()} 質問, 正解の割合 (並び順の 1〜8 番目) {by_pos.head(8).round(2).tolist()}")
 
 # 配布時の並び順は、dev でも test でも上位ほど正解が多い。並び順が答えを漏らさないよう、候補の順番は混ぜる
-# 時間の都合で、dev (学習用) と test (評価用) から 100 質問ずつ選ぶ
+# 時間の都合で、dev（学習用）と test（評価用）から 100 質問ずつ選ぶ
 rng = np.random.default_rng(0)
 def sample(d, n):
     qids = rng.choice(d["q_id"].unique(), n, replace=False)
@@ -832,7 +832,7 @@ def tokenize(text):
 
 titles = [tokenize(t) for t in df["title"]]
 bodies = [tokenize(t) for t in df["text"]]
-# IDF は手元の候補全体 (200 質問分) から計算する簡略版。本来は検索対象の全文書から計算する
+# IDF は手元の候補全体（200 質問分）から計算する簡略版。本来は検索対象の全文書から計算する
 bm25 = BM25Okapi([t + b for t, b in zip(titles, bodies)])   # タイトル + 本文
 bm25_title = BM25Okapi(titles)                               # タイトルだけ
 
@@ -881,7 +881,7 @@ print("group:", group[:8], "... 合計", group.sum(), "=", len(train), "行")
 ranker = lgb.LGBMRanker(**params)
 ranker.fit(train[features], train["label"], group=group)
 ev["ltr"] = ranker.predict(ev[features])
-ev["rrf"] = 1 / (60 + ev["bm25_rank"]) + 1 / (60 + ev["dense_rank"])    # この章の「キーワード検索と埋め込み検索を組み合わせる (ハイブリッド検索、RRF)」と同じ RRF (k=60)
+ev["rrf"] = 1 / (60 + ev["bm25_rank"]) + 1 / (60 + ev["dense_rank"])    # この章の「キーワード検索と埋め込み検索を組み合わせる（ハイブリッド検索、RRF）」と同じ RRF (k=60)
 ```
 
 ```python
@@ -896,7 +896,7 @@ def ndcg_at_k(ranked, gains, k):
     ideal = sum(g / np.log2(i + 1) for i, g in enumerate(sorted(gains.values(), reverse=True)[:k], 1))
     return float(dcg / ideal) if ideal else 0.0
 
-# 正解は第 1 段で落ちたものも含めて数える (理想の nDCG は元の候補全体の正解から計算)
+# 正解は第 1 段で落ちたものも含めて数える（理想の nDCG は元の候補全体の正解から計算）
 gold = {qid: {d: 1 for d in s} for qid, s in df[df["label"] == 1].groupby("q_id")["id"]}
 
 def evaluate(data, col):
@@ -911,7 +911,7 @@ results = {name: evaluate(ev, col) for name, col in methods}
 print(pd.DataFrame({k: {"nDCG@10": v[0].mean(), "MRR@10": v[1].mean()} for k, v in results.items()}).T.round(4))
 
 def paired_ci(diff, n_boot=2000, seed=0):
-    """質問ごとの差の平均の 95% 信頼区間 (質問を復元抽出するブートストラップ)"""
+    """質問ごとの差の平均の 95% 信頼区間（質問を復元抽出するブートストラップ）"""
     r = np.random.default_rng(seed)
     means = [diff[r.integers(0, len(diff), len(diff))].mean() for _ in range(n_boot)]
     return diff.mean(), *np.percentile(means, [2.5, 97.5])
@@ -927,7 +927,7 @@ print((imp / imp.sum()).sort_values(ascending=False).round(3))
 ```
 
 ```python
-# 比較: 評価と同じ分布のデータ (test の別の質問) で学習したらどうなるか。test の 100 質問を、質問単位で 5 分割して交差検証する
+# 比較: 評価と同じ分布のデータ（test の別の質問）で学習したらどうなるか。test の 100 質問を、質問単位で 5 分割して交差検証する
 from sklearn.model_selection import GroupKFold
 
 ev["ltr_cv"] = 0.0

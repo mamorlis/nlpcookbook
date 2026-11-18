@@ -460,17 +460,17 @@ from huggingface_hub import hf_hub_download
 from tokenizers import models
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。CPU でも 1 応答あたり数秒〜十数秒 (メモリ約 7GB)
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 3B の日本語モデル。CPU でも動く（メモリ約 7GB）
 tokenizer = AutoTokenizer.from_pretrained(name)
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
 llm = AutoModelForCausalLM.from_pretrained(name).eval()
 
 class Chat:
-    def __init__(self, system, max_input_tokens=200):
+    def __init__(self, system, max_input_tokens=300):
         self.system = {"role": "system", "content": system}
         self.history = []                       # user と assistant の発話を交互に積む
         self.max_input_tokens = max_input_tokens
@@ -479,13 +479,13 @@ class Chat:
         return len(tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True)["input_ids"])
 
     def window(self):
-        """システムプロンプトは必ず残し、上限に収まるまで古いターン (user と assistant の組) を捨てる"""
+        """システムプロンプトは必ず残し、上限に収まるまで古いターン（user と assistant の組）を捨てる"""
         history = list(self.history)
         while len(history) > 1 and self.n_tokens([self.system] + history) > self.max_input_tokens:
             history = history[2:]
         return [self.system] + history
 
-    def say(self, text, max_new_tokens=60):
+    def say(self, text, max_new_tokens=150):
         self.history.append({"role": "user", "content": text})
         messages = self.window()
         inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True)
@@ -504,6 +504,8 @@ for user in ["私の名前は田中です。来月、京都に 2 泊で行く予
 
 - LLM は状態を持たない。「覚えている」ように見えるのは、毎回これまでの対話をすべて入力しているから。
 - 古いターンを捨てると、そこで話したこと（最初に名乗った名前）は忘れる。上限を小さくしてあるこの例では、最後の質問でそれが起きる。
+- 「1〜2 文で」と指示しても、このモデルは長めに答えることが多い。`max_new_tokens` は生成するトークン数の上限で、そこに達すると文の途中で切れる。ここでは応答が途中で切れないように 150 にしてある。応答が長いほど履歴もすぐ長くなる。
+- 店名やバスの系統などの細かい事実は、モデルが知識から作ったもので、誤りを含むことがある。
 - 捨てるときは user と assistant の組で捨てる。片方だけ残すと、チャットテンプレートの交互の並びが崩れる。
 - 大事な情報を失わないための方法が、次項の「古い対話を要約して長い対話を続ける」。
 - トークナイザーを読み込んだあとの数行は、transformers 5 系で sarashina2.2 の分割が学習時と変わってしまう不具合への対処（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照）。この章のほかのレシピも同じ。
@@ -893,8 +895,8 @@ for post in posts[:2]:
 import glob, json, random, urllib.request, zipfile
 import numpy as np
 
-# 対話破綻検出チャレンジ 3 (DBDC3) の日本語の評価データ (MIT ライセンス、DBDC3 Task Organizers)。
-# 人と 3 つの雑談システムの対話 50 件ずつ (DCM: NTT ドコモの雑談対話 API、DIT: デンソーアイティーラボラトリのシステム、IRS: IR-status に基づくシステム)。システムの各発話に、30 人が O (破綻ではない)・T (破綻の可能性がある)・X (破綻) を付けている
+# 対話破綻検出チャレンジ 3 (DBDC3) の日本語の評価データ（MIT ライセンス、DBDC3 Task Organizers）。
+# 人と 3 つの雑談システムの対話 50 件ずつ（DCM: NTT ドコモの雑談対話 API、DIT: デンソーアイティーラボラトリのシステム、IRS: IR-status に基づくシステム）。システムの各発話に、30 人が O（破綻ではない）・T（破綻の可能性がある）・X（破綻）を付けている
 urllib.request.urlretrieve("https://dbd-challenge.github.io/dbdc3/data/DBDC3.zip", "DBDC3.zip")
 zipfile.ZipFile("DBDC3.zip").extractall(".")
 
@@ -903,7 +905,7 @@ for path in sorted(glob.glob("DBDC3/dbdc3/ja/eval/*/*.log.json")):
     log = json.load(open(path, encoding="utf-8"))
     turns = log["turns"]
     for i, t in enumerate(turns):
-        if t["speaker"] == "S" and i > 0:                        # 最初の挨拶 (定型文) は除く
+        if t["speaker"] == "S" and i > 0:                        # 最初の挨拶（定型文）は除く
             labels = [a["breakdown"] for a in t["annotations"]]
             items.append({"system": path.split("/")[-2], "dialogue": log["dialogue-id"],
                           "context": [(u["speaker"], u["utterance"]) for u in turns[:i]], "response": t["utterance"],
@@ -920,7 +922,7 @@ print("\n".join(f"  {sp}: {u}" for sp, u in x["context"][-3:]), f"\n→ S: {x['r
 ```
 
 ```python
-# 同じ文脈に、この章の LLM (sarashina2.2-3b) で応答を生成する。履歴あり (直近 5 発話) と、履歴なし (直前のユーザー発話だけ) の 2 つの設定
+# 同じ文脈に、この章の LLM (sarashina2.2-3b) で応答を生成する。履歴あり（直近 5 発話）と、履歴なし（直前のユーザー発話だけ）の 2 つの設定
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -931,7 +933,7 @@ import sentencepiece as spm
 from huggingface_hub import hf_hub_download
 from tokenizers import models
 # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す (特殊トークンやチャットテンプレートはそのまま)
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
 sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
 tokenizer.backend_tokenizer.model = models.Unigram(
     [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
@@ -964,8 +966,8 @@ for x in data[:3]:
 ```
 
 ```python
-# (1) 参照ありの指標: DBDC3 には人が書いた参照応答がないので、LLM (履歴あり) の応答を代わりの「参照応答」として、
-#     元のシステムの応答を BLEU と BERTScore で測る (本来は人が書いた参照応答を、できれば複数使う)
+# (1) 参照ありの指標: DBDC3 には人が書いた参照応答がないので、LLM（履歴あり）の応答を代わりの「参照応答」として、
+#     元のシステムの応答を BLEU と BERTScore で測る（本来は人が書いた参照応答を、できれば複数使う）
 from bert_score import BERTScorer
 from sacrebleu.metrics import BLEU
 from scipy.stats import spearmanr
@@ -1009,7 +1011,7 @@ SYSTEMS = {"DCM": [x["response"] for x in data if x["system"] == "DCM"], "DIT": 
 for s, texts in SYSTEMS.items():
     print(f"{s:8} 平均の長さ {np.mean([len(t) for t in texts]):5.1f} 文字  distinct-1 {distinct_n(texts, 1):.3f}  distinct-2 {distinct_n(texts, 2):.3f}")
 
-nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"     # 多言語の NLI モデル (MIT ライセンス)
+nli_name = "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"     # 多言語の NLI モデル（MIT ライセンス）
 # transformers 5 系の DebertaV2Tokenizer は全角の記号や英数字を [UNK] にしてしまう (issue #49622) ので、tokenizer.json から直接読む
 nli_tok = PreTrainedTokenizerFast.from_pretrained(nli_name)
 nli = AutoModelForSequenceClassification.from_pretrained(nli_name).to("cuda").eval()
@@ -1017,14 +1019,14 @@ CONTRA = nli.config.label2id["contradiction"]
 
 @torch.no_grad()
 def contradiction(premises, hyps, bs=64):
-    """前提 (文脈) と応答が矛盾する確率"""
+    """前提（文脈）と応答が矛盾する確率"""
     out = []
     for k in range(0, len(hyps), bs):
         enc = nli_tok(premises[k:k + bs], hyps[k:k + bs], return_tensors="pt", padding=True, truncation=True, max_length=256).to("cuda")
         out += nli(**enc).logits.softmax(-1)[:, CONTRA].tolist()
     return np.array(out)
 
-# 前提: 同じシステムが以前に言ったこと (自己矛盾) と、直前のユーザー発話
+# 前提: 同じシステムが以前に言ったこと（自己矛盾）と、直前のユーザー発話
 own = ["\n".join(u for sp, u in x["context"] if sp == "S") for x in data]
 last_user = [x["context"][-1][1] for x in data]
 resp = [x["response"] for x in data]
@@ -1034,7 +1036,7 @@ for m, v in free.items():
 ```
 
 ```python
-# (3) LLM による判定: 観点ごとに「はい / いいえ」で答えさせ、「はい」の確率をスコアにする (評価の章の CPU で動く LLM-as-a-judge と同じ方法)
+# (3) LLM による判定: 観点ごとに「はい / いいえ」で答えさせ、「はい」の確率をスコアにする（LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」と同じ方法）
 YES_NO = [tokenizer(c, add_special_tokens=False)["input_ids"][0] for c in ["はい", "いいえ"]]
 ASPECTS = {
     "適切さ": "最後の「応答」は、直前のユーザーの発話に対する返事として適切ですか。",
@@ -1067,7 +1069,7 @@ for a in ASPECTS:
 ```
 
 ```python
-# 2 つの応答を比べさせる (ペアワイズ)。A と B の位置を入れ替えて 2 回聞き、位置バイアスを確かめる
+# 2 つの応答を比べさせる（ペアワイズ）。A と B の位置を入れ替えて 2 回聞き、位置バイアスを確かめる
 AB = [tokenizer(c, add_special_tokens=False)["input_ids"][-1] for c in ["A", "B"]]
 
 def prefer_a(contexts, a, b):
