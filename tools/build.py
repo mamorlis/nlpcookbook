@@ -153,6 +153,8 @@ def to_notebook(r: Recipe) -> dict:
     cells = [md_cell(head)]
     for kind, src in r.cells:
         cells.append(md_cell(src) if kind == "markdown" else code_cell(src))
+    for index, cell in enumerate(cells):
+        cell["id"] = f"cell-{index}"
     meta = {
         "colab": {"provenance": [], "toc_visible": True},
         "kernelspec": {"display_name": "Python 3", "name": "python3"},
@@ -174,7 +176,6 @@ def clean_outputs(nb: dict) -> None:
     """警告・進捗バーなどを落として、読んで意味のある出力だけ残す。"""
     count = 0
     for cell in nb["cells"]:
-        cell.pop("id", None)
         if cell["cell_type"] != "code":
             continue
         count += 1
@@ -259,6 +260,9 @@ def dump(nb: dict, path: Path) -> None:
         for o in cell.get("outputs", []):
             if isinstance(o.get("text"), str):
                 o["text"] = o["text"].splitlines(keepends=True)
+    ids = [cell["id"] for cell in nb["cells"]]
+    if len(set(ids)) != len(ids) or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", i) for i in ids):
+        raise ValueError(f"{path}: セル ID が不正または重複しています")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(nb, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
