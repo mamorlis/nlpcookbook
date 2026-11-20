@@ -198,6 +198,8 @@ print("top_k=20        :", generate(do_sample=True, temperature=1.0, top_p=1.0, 
 
 ```python
 import time
+from statistics import median
+import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
@@ -212,25 +214,40 @@ texts = [base[2] if i % 8 == 0 else base[i % 2] for i in range(96)]   # 8 件に
 @torch.inference_mode()
 def predict(texts, batch_size, sort_by_length=False):
     order = sorted(range(len(texts)), key=lambda i: len(texts[i])) if sort_by_length else list(range(len(texts)))
+    padding = 0
     preds = [None] * len(texts)
     for i in range(0, len(order), batch_size):
         idx = order[i:i + batch_size]
-        batch = tokenizer([texts[j] for j in idx], padding=True, truncation=True, max_length=256, return_tensors="pt").to(device)
+        batch = tokenizer([texts[j] for j in idx], padding=True, truncation=True, max_length=256, return_tensors="pt")
+        padding += (batch.attention_mask == 0).sum().item()
+        batch = batch.to(device)
         for j, p in zip(idx, model(**batch).logits.argmax(-1).tolist()):
             preds[j] = model.config.id2label[p]
-    return preds
+    return preds, padding
 
 print("device:", device)
-predict(texts[:32], batch_size=32)   # 初回は GPU の初期化に時間がかかるので、計測の前に 1 回動かしておく
-for label, kwargs in [("1 件ずつ", dict(batch_size=1)), ("バッチ 32", dict(batch_size=32)), ("バッチ 32 + 長さでソート", dict(batch_size=32, sort_by_length=True))]:
-    t = time.perf_counter()
-    preds = predict(texts, **kwargs)
-    print(f"{label:22} {time.perf_counter() - t:5.2f} 秒  {preds[:3]}")
+reference, _ = predict(texts, 1)
+rows = []
+for label, size, sort in [("1 件ずつ", 1, False), ("バッチ 32", 32, False), ("バッチ 32 + 長さでソート", 32, True)]:
+    predict(texts, size, sort)  # 各条件でウォームアップ
+    seconds = []
+    for _ in range(3):
+        if device == "cuda":
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        preds, padding = predict(texts, size, sort)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        seconds.append(time.perf_counter() - start)
+    rows.append({"条件": label, "秒（中央値）": round(median(seconds), 3),
+                 "パディング数": padding, "予測一致数": sum(a == b for a, b in zip(preds, reference)),
+                 "全件数": len(texts)})
+print(pd.DataFrame(rows).to_string(index=False))
 ```
 
 - `torch.inference_mode()`（または `no_grad()`）で勾配計算を止める。忘れるとメモリを浪費し、遅くなる。
 - 長さの近い文を同じバッチにまとめると、パディングが減って速くなる。結果は元の順番に戻す。
-- この 96 件では、検証の GPU で 1 件ずつ 0.31 秒 → バッチ + 長さでソートで 0.04 秒（約 8 倍）。T4 では値が変わる。件数が多いほど、またモデルが大きいほど差は広がる。さらに `model.half()`（半精度）で速度とメモリが改善する。
+- 予測一致数を全件数と比べ、元の順番で同じラベルになったか確かめる。時間はトークン化・転送・予測を含む。バッチ32の2行で、パディング数と時間の変化を比べる。
 - CPU では、長さを揃えずにバッチにすると、長い文に合わせたパディングの計算が重く、1 件ずつより遅くなることがある。
 - GPU の処理時間を測るときは、最初の 1 回（初期化やカーネルの準備を含む）を計測から外す。
 - `pipeline(..., device=0, batch_size=32)` でも同様のバッチ処理ができる。
@@ -914,3 +931,79 @@ for s in [0, 200, 1000, 5000]:
 - 最小対は検証用の記事の文から機械的に作ったもので、人手で確かめていない。「が」と「を」を入れ替えても文法的なままの組や、1 組の差が助詞以外の要因で決まる組も混ざりうる。系統的に調べるなら、言語モデルの確率と内部を調べるの章の「言語モデルの文法知識を最小対で調べる (BLiMP / JBLiMP)」のような人手で作った最小対を使う。生成文は、学習前はでたらめなトークンの列、200 ステップと 1,000 ステップでは記号や断片が並ぶだけで、5,000 ステップで「日本の首都は、東京都千代田区にある。」のあとに「概要」のような Wikipedia の見出しが続く文章になった（各チェックポイントで 1 回ずつサンプリングしただけなので、傾向として見る程度にとどめる）。
 - 13.8M パラメータで、GPU メモリの最大使用量は 2.6 GB。数値と生成文は、検証の GPU（T4 と同じ float16 の経路）での 1 回の結果で、学習のセルは 326 秒（うち `trainer.train()` は 308 秒）だった。T4 はこれより遅い。GPU が違うと計算の細部が変わり、生成文などは別のものになりうる。版をそろえるなら `!pip install -q transformers==5.22.1 datasets==4.8.5` のように固定する（検証は transformers 5.22.1、datasets 4.8.5、tokenizers 0.23.3、torch 2.14.1）。
 - データは日本語版 Wikipedia（wikimedia/wikipedia の 20231101.ja、データセットカードによれば CC BY-SA 3.0 と GFDL）と青空文庫（globis-university/aozorabunko-clean、CC BY 4.0）。ライブラリは transformers、datasets、tokenizers が Apache 2.0、fugashi が MIT と BSD 3 条項、unidic-lite がパッケージは MIT で、同梱の UniDic 2.1.2 の辞書は GPL、LGPL、BSD のいずれかを選べる（パッケージに同梱の COPYING による）。トークナイザーの学習は、サブワードとトークナイザの章の「Hugging Face tokenizers で BPE / WordPiece を学習する」を参照。仕組みを自分で実装して確かめる版は、付録「仕組みを理解するための実装」の「小さな GPT を日本語のテキストでゼロから事前学習する（学習ループを自分で書く）」にある。
+
+## 日本語 BERT の学習を GPU メモリに収める {bert_training_memory gpu}
+
+日本語の口コミ8件で分類器を1回更新するのに、何秒と何 MiB かかるだろうか。入力と初期重みをそろえ、バッチの分割、勾配チェックポイント、系列長の効果を順に測る。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import gc
+import time
+from statistics import median
+
+import pandas as pd
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, set_seed
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+print(torch.cuda.get_device_name())
+name = "tohoku-nlp/bert-base-japanese-char-v2"
+tok = AutoTokenizer.from_pretrained(name)
+reviews = ["操作が簡単で助かった。", "説明が少なく迷った。", "届くのが早かった。", "箱が壊れていた。",
+           "音が静かで快適だった。", "動作が遅くて困った。", "色も形も気に入った。", "すぐ電池が切れた。"]
+# 長さの異なる教材用の入力を作る。偶数番が好意的、奇数番が否定的。
+texts = [s * (i + 1) for i, s in enumerate(reviews)]
+labels = torch.tensor([1, 0] * 4, device="cuda")
+lengths = [len(ids) for ids in tok(texts)["input_ids"]]
+```
+
+```python
+def measure(batch_size, checkpoint, max_length):
+    set_seed(0)
+    model = AutoModelForSequenceClassification.from_pretrained(name, num_labels=2).cuda().train()
+    if checkpoint:
+        model.gradient_checkpointing_enable()
+    opt = torch.optim.AdamW(model.parameters(), lr=2e-5)
+    batch = tok(texts, truncation=True, padding="max_length", max_length=max_length,
+                return_tensors="pt").to("cuda")
+    accumulation = len(texts) // batch_size
+
+    def update():
+        opt.zero_grad(set_to_none=True)
+        for start in range(0, len(texts), batch_size):
+            part = slice(start, start + batch_size)
+            inputs = {k: v[part] for k, v in batch.items()}
+            loss = model(**inputs, labels=labels[part]).loss
+            (loss / accumulation).backward()
+        opt.step()
+
+    update()  # Adam の状態と CUDA カーネルを準備する
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    seconds = []
+    for _ in range(3):
+        start = time.perf_counter()
+        update()
+        torch.cuda.synchronize()
+        seconds.append(time.perf_counter() - start)
+    return {"バッチ": batch_size, "累積回数": accumulation, "チェックポイント": checkpoint,
+            "系列長": max_length, "切り詰め件数": sum(n > max_length for n in lengths),
+            "ピーク MiB": round(torch.cuda.max_memory_allocated() / 2**20),
+            "秒/更新（中央値）": round(median(seconds), 3)}
+
+rows = []
+for setting in [(8, False, 128), (2, False, 128), (2, True, 128), (2, True, 32)]:
+    gc.collect()
+    torch.cuda.empty_cache()
+    rows.append(measure(*setting))
+print(pd.DataFrame(rows).to_string(index=False))
+```
+
+- 1行目と2行目はどちらも8件で1回更新する。勾配累積では小分けの損失を累積回数で割る。バッチを分けると、同時に保持する中間結果が減る。
+- 2行目と3行目で、中間結果を逆伝播時に再計算するコストを読む。3行目と4行目では、節約できたメモリと、末尾が切れた口コミの件数を合わせて見る。
+- ピークはモデル、勾配、Adam の状態を含む PyTorch の割り当て量。計測は同じ8件を繰り返す教材用の設定で、分類精度を評価するには別の検証データが要る。

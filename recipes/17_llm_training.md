@@ -63,8 +63,23 @@ def to_example(r):
     # trl の「会話形式の prompt-completion」: prompt と completion にメッセージのリストを入れる
     return {"prompt": [{"role": "user", "content": user}], "completion": [{"role": "assistant", "content": r["response"]}]}
 
-# 応答が空でなく、全体が短めのもの（max_length の 512 トークンに収まる長さ）に絞る
-rows = [r for r in raw if r["response"].strip() and len(r["instruction"]) + len(r["context"]) + len(r["response"]) <= 600]
+MAX_LENGTH = 512
+rows = []
+too_long = 0
+for r in raw:
+    if not r["response"].strip():
+        continue
+    example = to_example(r)
+    messages = example["prompt"] + example["completion"]
+    ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False,
+                                        truncation=False, return_dict=False)
+    if len(ids) > MAX_LENGTH:
+        too_long += 1
+    else:
+        rows.append(r)
+print(f"応答ありのうち {MAX_LENGTH} トークン超過: {too_long} 件、採用候補: {len(rows)} 件")
+if len(rows) < 8240:
+    raise ValueError("固定の学習・評価分割に必要な 8,240 件に足りません")
 rng = np.random.default_rng(0)
 rows = [rows[i] for i in rng.permutation(len(rows))]
 train_ds = Dataset.from_list([to_example(r) for r in rows[:8000]])
@@ -155,7 +170,7 @@ lora = LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM",
                   target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])   # すべての線形層に低ランク行列を足す
 args = SFTConfig(
     output_dir="sft-out", num_train_epochs=1, per_device_train_batch_size=8, gradient_accumulation_steps=2,
-    learning_rate=2e-4, lr_scheduler_type="cosine", warmup_steps=10, max_length=512,
+    learning_rate=2e-4, lr_scheduler_type="cosine", warmup_steps=10, max_length=MAX_LENGTH,
     completion_only_loss=True,    # prompt-completion 形式のデータでは既定でも True。応答 (completion) の部分だけに損失をかける
     packing=False,                # 複数の例を 1 本の系列に詰めない（下の注意書きを参照）
     logging_steps=50, save_strategy="no", report_to="none", seed=0,
@@ -240,6 +255,8 @@ model.save_pretrained("sft-lora")   # 保存されるのは追加した LoRA の
 size = sum(os.path.getsize(f"sft-lora/{f}") for f in os.listdir("sft-lora") if f.endswith(".safetensors"))
 print(f"LoRA の重みのファイル: {size / 1e6:.0f} MB")
 ```
+
+> 以下の数値は旧版（指示・参考文・応答の合計が600文字以下）の実測例です。現在の512トークン条件での結果は、上の表と照らして読んでください。
 
 - 指示チューニング (SFT: supervised fine-tuning) は、指示と応答の組で、応答の部分を次のトークンの予測として学習させること。上の出力では、ベースモデルはチャットの形式で渡した指示に英語の文章やプログラムを書き続け、`</s>` を出して止まったのは 100 問中 2 問だった。ふつうの文章の続きとしてなら答えるが、次の質問と答えを自分で作り続ける。8,000 件・1 エポックの SFT のあとは止まった割合が 0.92 になり（公式の指示チューニング版は 0.93）、学習に使っていない 200 件の応答部分の損失は 2.945 → 2.386 に下がった。なお、ベースモデルのモデルカードには、事前学習の最後の段階で「さまざまな応用タスクの性能を上げるための少量のデータ」で学習したとあり、純粋に Web のテキストだけで学習したモデルではない。
 - 決まった形を守ったかの自動評価（60 問）では、指示に従った割合は学習前 0.15、学習後 0.20、公式版 0.20 で、95% 信頼区間が重なり、この問題数では差があるとは言えない。学習前の 0.15 は、何を聞かれても英語を書くので「英語で」の 10 問中 9 問が当たっただけである。学習後は「箇条書き 3 つ」が 0.9 と公式版 (0.2) より高い一方、「JSON」は 0（公式版は 1.0）で、「はい/いいえ」の一言は 3 つとも 0 だった。SFT で身につくのは主に学習データの形と文体で、学習後の応答は短く（平均 92 文字、公式版は 251 文字）、学習データと同じである調になった。dolly には JSON で答える例がほとんどない。「12 + 30」に「答えは32である。」と答えたり、参考文を答えの代わりにそのまま写したりするように、0.5B のモデルに 8,000 件学習させただけでは中身の正しさは上がらない。決まった形で答えさせたいなら、その形の例を学習データに入れる。中身の良し悪しを比べるには、LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」のような判定を使う。
