@@ -48,11 +48,21 @@ import requests
 API = "https://ja.wikipedia.org/w/api.php"
 HEADERS = {"User-Agent": "nlp-cookbook-example/0.1 (educational notebook)"}   # 利用者を識別できる User-Agent を付けるのがルール
 
+def query_api(params):
+    response = requests.get(API, params=params, headers=HEADERS, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        raise RuntimeError(data["error"]["info"])
+    return data["query"]
+
 def fetch(title):
     params = {"action": "query", "prop": "extracts", "explaintext": 1, "titles": title, "format": "json", "redirects": 1}
-    pages = requests.get(API, params=params, headers=HEADERS, timeout=30).json()["query"]["pages"]
+    pages = query_api(params)["pages"]
     page = next(iter(pages.values()))
-    return page.get("extract", "")
+    if "missing" in page:
+        raise ValueError(f"記事「{title}」が見つかりません")
+    return page["extract"]
 
 text = fetch("自然言語処理")
 print(len(text), "文字")
@@ -63,7 +73,7 @@ print(text[:300])
 # キーワードで記事を検索する
 def search(query, limit=5):
     params = {"action": "query", "list": "search", "srsearch": query, "srlimit": limit, "format": "json"}
-    return [hit["title"] for hit in requests.get(API, params=params, headers=HEADERS, timeout=30).json()["query"]["search"]]
+    return [hit["title"] for hit in query_api(params)["search"]]
 
 print(search("機械翻訳 ニューラル"))
 ```

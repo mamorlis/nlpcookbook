@@ -7,6 +7,16 @@
 - 各ノートブックは上から順に実行するだけで動きます（必要なライブラリのインストールを含む）。
 - 実行結果を埋め込んであるので、GitHub 上で眺めるだけでも使えます。
 
+## 初めての方へ
+
+次の3件は CPU で試せます。リンク先で実行例を読み、自分の文章で試すときは「Open In Colab」を開いてください。
+
+- [全角・半角の表記をそろえる](notebooks/02_string/nfkc.ipynb)
+- [Janome で日本語の文を単語に分ける](notebooks/03_japanese_tokenization/janome.ipynb)
+- [記事名を指定して Wikipedia の本文を取得する](notebooks/01_data_io/wikipedia_api.ipynb)
+
+目次の ⚡ は GPU ランタイム推奨、🔑 は API キーが必要なレシピです。
+
 ## 目次
 
 <!-- INDEX:START -->
