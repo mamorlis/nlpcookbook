@@ -20,7 +20,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 414 レシピ（付録を含めると 449 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 416 レシピ（付録を含めると 451 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
@@ -29,13 +29,13 @@
 - [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (12)
 - [6. 単語ベクトル](#6-単語ベクトル) (10)
 - [7. サブワードとトークナイザ](#7-サブワードとトークナイザ) (13)
-- [8. Transformers の基本操作](#8-transformers-の基本操作) (13)
+- [8. Transformers の基本操作](#8-transformers-の基本操作) (14)
 - [9. 言語モデルの確率と内部を調べる](#9-言語モデルの確率と内部を調べる) (9)
 - [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (8)
 - [11. トピックとキーワードの抽出](#11-トピックとキーワードの抽出) (9)
 - [12. テキスト分類](#12-テキスト分類) (29)
 - [13. 評価指標と統計的検定](#13-評価指標と統計的検定) (10)
-- [14. 大規模言語モデル (LLM)](#14-大規模言語モデル-llm) (14)
+- [14. 大規模言語モデル (LLM)](#14-大規模言語モデル-llm) (15)
 - [15. LLM の API（Gemini と Claude）](#15-llm-の-apigemini-と-claude) (11)
 - [16. LLM の評価と分析](#16-llm-の評価と分析) (10)
 - [17. LLM の学習と調整](#17-llm-の学習と調整) (4)
@@ -239,6 +239,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 08-11 | [巨大なデータセットをダウンロードせずにストリーミングで読む](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/datasets_streaming.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/datasets_streaming.ipynb) |
 | 08-12 | [BERT を自分の分野のテキストで追加で事前学習する（ドメイン適応）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/mlm_domain_adaptation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/mlm_domain_adaptation.ipynb) |
 | 08-13 | [統制した自前のコーパスで小さな GPT を事前学習する (Trainer)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/gpt_from_scratch.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/gpt_from_scratch.ipynb) |
+| 08-14 | [日本語 BERT の学習を GPU メモリに収める](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/bert_training_memory.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/08_transformers/bert_training_memory.ipynb) |
 
 ### 9. 言語モデルの確率と内部を調べる
 
@@ -360,6 +361,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 14-12 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/llm_json_output.ipynb) |
 | 14-13 | [制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/constrained_decoding.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/constrained_decoding.ipynb) |
 | 14-14 | [検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/ad_text_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/ad_text_generation.ipynb) |
+| 14-15 | [長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/llm_prefill_decode.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/14_llm/llm_prefill_decode.ipynb) |
 
 ### 15. LLM の API（Gemini と Claude）
 

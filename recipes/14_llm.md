@@ -1529,3 +1529,64 @@ diff_ci("8 本を短くしてから選ぶ", "実際の広告 (title_org)", "ROUG
 - 参照との自動評価では、方法の違いがほとんど見えなかった。人が書いた 3 本の参照に対する ROUGE-1（参照ごとの F の最大）は、どの方法も 0.18〜0.22 で、短くしてから選んだ見出しと貪欲法の差は −0.011 [−0.034, +0.013]（対応のあるブートストラップの 95% 信頼区間。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照）だった。chrF は −0.013 [−0.027, −0.000] とわずかに下がったが、信頼区間の端が 0 に接する程度である。実際の広告 (0.184) との差も +0.026 [−0.007, +0.059] で、人が書いた見出しも LLM と同じくらい参照と重ならない。広告文は同じ商品でも訴求の仕方がいくつもあるので、参照との重なりは良し悪しの目安にしかならない。CAMERA の論文 (Mita et al., 2024) も、BLEU-4、ROUGE-1、BERTScore のほかに、キーワードを含む割合と文字数の規定を守る割合を指標にし、人手評価との比較では、魅力 (attractiveness) の順位を既存の自動評価指標で再現するのは難しかったと報告している。記事の本文から見出しを生成して実際の見出しと比べる例は、要約と平易化の章の「記事の見出しを生成して実際の見出しと比べる」にある。
 - キーワードの語を含む割合は、LLM の見出し (0.80〜0.86) のほうが実際の広告 (0.32) よりずっと高く、実際の広告はキーワードの語をそのまま含まないことが多い。ただし、CAMERA のキーワード (kw) は検索語なので、「は な さくせい めい ほけん」のように分かち書きが崩れたものや、LP や参照と内容が合わないもの（「東京 銀座 バイト」に対して実際の広告が池袋の求人）も混じるので、実際の広告の低さには、キーワードと広告が合わない組の影響も含まれる。件数も 120 件なので、細かな差は読み取らない。
 - データは CAMERA（CyberAgent、CC BY-NC-SA 4.0）。非商用に限られ、改変したものも同じライセンスで公開する必要がある。商用の広告文生成のモデルの学習や評価には使えない。ここでは LP の画像を含まない without-lp-images のテストデータ（872 件）の parquet だけを読み込んでいる。モデルは sarashina2.2（SB Intuitions、MIT ライセンス）で、T4 と同じ float16 で実行したとき GPU メモリを最大 10.8 GB 使った。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る {llm_prefill_decode gpu}
+
+RAG で参考文書を増やしたときの待ち時間を調べたい。小型 LLM に長さだけを変えた入力を渡し、最初の1トークンを返すまでと、続く31トークンを生成する区間を分けて測る。
+
+```python
+import time
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+print(torch.cuda.get_device_name())
+name = "Qwen/Qwen2.5-0.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, torch_dtype=torch.float16).cuda().eval()
+context = tok.encode("この図書館は午前九時に開館します。", add_special_tokens=False)
+question = tok.encode("質問：この図書館の開館時刻は？", add_special_tokens=False)
+
+def make_input(length):
+    n = length - len(question)
+    prefix = (context * (n // len(context) + 1))[:n]
+    return torch.tensor([prefix + question], device="cuda")
+```
+
+```python
+@torch.inference_mode()
+def measure(ids, cached):
+    # 入力はあらかじめ GPU に置き、トークン化・転送を計測から外す。
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    start = time.perf_counter()
+    out = model(ids, use_cache=cached, logits_to_keep=1)
+    token = out.logits[:, -1].argmax(-1, keepdim=True)
+    torch.cuda.synchronize()
+    first = time.perf_counter()
+    for _ in range(31):
+        if cached:
+            out = model(token, past_key_values=out.past_key_values, use_cache=True, logits_to_keep=1)
+        else:
+            ids = torch.cat([ids, token], dim=1)
+            out = model(ids, use_cache=False, logits_to_keep=1)
+        token = out.logits[:, -1].argmax(-1, keepdim=True)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - first
+    return {"初回 ms": (first - start) * 1000, "続き token/s": 31 / elapsed,
+            "ピーク MiB": torch.cuda.max_memory_allocated() / 2**20}
+
+rows = []
+for length, cached in [(128, True), (512, True), (2048, True), (128, False)]:
+    ids = make_input(length)
+    measure(ids, cached)  # 同じ条件でウォームアップ
+    runs = pd.DataFrame([measure(ids, cached) for _ in range(3)])
+    rows.append({"入力トークン": length, "KV キャッシュ": cached, **runs.median().to_dict()})
+print(pd.DataFrame(rows).round(2).to_string(index=False))
+```
+
+- 入力には同じ参考文を繰り返し、末尾に同じ質問を置く。貪欲法で文末記号が出ても32トークンまで続け、出力長を固定する。表は3回の中央値。
+- キャッシュありの3行では、質問全体を処理する最初の待ち時間と、その後の生成速度を別々に読む。ピークはモデルの重みを含む PyTorch の割り当て量。
+- 128トークンの2行では、過去のキーと値を GPU に残して次の1トークンだけを入力する場合と、毎回全文を入力し直す場合の時間とメモリを比べる。
