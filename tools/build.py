@@ -407,12 +407,19 @@ def main() -> None:
 
     has_cuda = cuda_available() if args.run and not args.allow_cpu_for_gpu else False
 
+    existing_by_slug: dict[str, dict] = {}
+    for p in sorted(OUT.glob("**/*.ipynb")):
+        nb_old = json.loads(p.read_text(encoding="utf-8"))
+        slug_old = nb_old.get("metadata", {}).get("nlpcookbook", {}).get("slug")
+        if slug_old:
+            existing_by_slug[slug_old] = nb_old
+
     todo: list[Recipe] = []
     wanted = set()
     for r in recipes:
         path = ROOT / r.relpath
         wanted.add(path)
-        old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else existing_by_slug.get(r.slug)
         old_meta = (old or {}).get("metadata", {}).get("nlpcookbook", {})
         reusable = old_meta.get("executed") and old_meta.get("digest") == r.digest
         selected = args.k in r.slug or args.k in r.chapter_dir
@@ -422,7 +429,7 @@ def main() -> None:
                 print(f"skip {r.ident} {r.slug} (gpu recipe on CPU host; pass --allow-cpu-for-gpu to override)")
             else:
                 todo.append(r)
-                if not old:
+                if not path.exists():
                     dump(to_notebook(r), path)
                 continue
         nb = to_notebook(r)
@@ -440,6 +447,10 @@ def main() -> None:
     for stale in set(OUT.glob("**/*.ipynb")) - wanted:
         stale.unlink()
         print(f"removed {stale.relative_to(ROOT)}")
+
+    for d in sorted((p for p in OUT.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+        if not any(d.iterdir()):
+            d.rmdir()
 
     write_index(chapters)
     print(f"{len(recipes)} recipes / {len(chapters)} chapters")

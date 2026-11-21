@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd やユーザー辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -555,7 +555,98 @@ for s in ["附属病院でシュミレーションを行なう", "付属病院�
 ```
 
 - `dictionary_form()` は活用を戻すだけ、`normalized_form()` は表記ゆれまで統一する。頻度集計や検索では後者が便利。
-- 専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
+- ユーザー辞書を作って表記ゆれや専門用語を登録する方法は、次の「Sudachi にユーザー辞書をコンパイルして追加する」を参照。専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) も参照。
+
+## Sudachi にユーザー辞書をコンパイルして追加する {sudachi_userdic}
+
+システム辞書で細かく分割されてしまう専門用語や、カタカナ表記から英語表記へ揃えたい表記ゆれを、ユーザー辞書（18 列の CSV）に登録して `sudachipy ubuild` でコンパイルし、分割と正規化形を単体テストで確かめたい。
+
+```python
+!pip install -q sudachipy sudachidict_core
+```
+
+```python
+from sudachipy import Dictionary, SplitMode
+
+sys_tokenizer = Dictionary().create()
+test_sentences = [
+    "自然言語処理では検索拡張生成やラベルバイアス問題が話題になる。",
+    "形態素解析にスダチパイやフガシを使う。",
+    "翻訳の品質推定にコメットキューイーを用いる。",
+]
+
+def show_tokens(tok, sentences):
+    for s in sentences:
+        items = [f"{m.surface()}({m.part_of_speech()[0]}-{m.part_of_speech()[1]}|{m.normalized_form()})"
+                 for m in tok.tokenize(s, SplitMode.C)]
+        print("入力:", s)
+        print("  →", " / ".join(items))
+
+print("=== システム辞書のみ（登録前） ===")
+show_tokens(sys_tokenizer, test_sentences)
+```
+
+```python
+import json, shutil, subprocess, sys, tempfile
+from pathlib import Path
+import sudachidict_core, sudachipy
+
+# （表層形、品詞大分類、品詞中分類、読み、正規化形）
+user_entries = [
+    ("ラベルバイアス問題", "名詞", "普通名詞", "ラベルバイアスモンダイ", "ラベルバイアス問題"),
+    ("検索拡張生成", "名詞", "普通名詞", "ケンサクカクチョウセイセイ", "検索拡張生成"),
+    ("スダチパイ", "名詞", "固有名詞", "スダチパイ", "SudachiPy"),
+    ("フガシ", "名詞", "固有名詞", "フガシ", "fugashi"),
+    ("コメットキューイー", "名詞", "固有名詞", "コメットキューイー", "COMET-QE"),
+]
+
+# Sudachi ユーザー辞書の 18 列 CSV 形式を作成して sudachipy ubuild で user.dic にコンパイルする
+with tempfile.TemporaryDirectory() as tmp:
+    work = Path(tmp)
+    csv_path, dic_path, cfg_path = work / "user.csv", work / "user.dic", work / "sudachi.json"
+    rows = [
+        # 左連接ID, 右連接ID は名詞の標準的な値 (4785)、コストは既存語より優先されるよう小さめの値 (4000) にする
+        ",".join([surf, "4785", "4785", "4000", surf, pos1, pos2, "一般", "*", "*", "*", rd, norm, "*", "A", "*", "*", "*"])
+        for surf, pos1, pos2, rd, norm in user_entries
+    ]
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    sys_dic = Path(sudachidict_core.__file__).parent / "resources" / "system.dic"
+    cand_bin = Path(sys.executable).parent / "sudachipy"
+    sudachipy_bin = str(cand_bin) if cand_bin.exists() else (shutil.which("sudachipy") or "sudachipy")
+    subprocess.run([sudachipy_bin, "ubuild", "-s", str(sys_dic), "-o", str(dic_path), str(csv_path)], check=True)
+
+    # 既定の sudachi.json を基に systemDict と userDict を指定する
+    base_cfg = json.loads((Path(sudachipy.__file__).parent / "resources" / "sudachi.json").read_text(encoding="utf-8"))
+    base_cfg["systemDict"] = str(sys_dic)
+    base_cfg["userDict"] = [str(dic_path)]
+    if "characterDefinitionFile" in base_cfg and not Path(base_cfg["characterDefinitionFile"]).is_absolute():
+        base_cfg["characterDefinitionFile"] = str(Path(sudachipy.__file__).parent / "resources" / base_cfg["characterDefinitionFile"])
+    cfg_path.write_text(json.dumps(base_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    user_tokenizer = Dictionary(config_path=str(cfg_path)).create()
+    print("=== ユーザー辞書適用後 ===")
+    show_tokens(user_tokenizer, test_sentences)
+
+    # 単体テスト（回帰テスト）: 期待どおりの分割と正規化形になっているか確認する
+    cases = [
+        ("ラベルバイアス問題を学ぶ", "ラベルバイアス問題", "ラベルバイアス問題"),
+        ("検索拡張生成の精度を上げる", "検索拡張生成", "検索拡張生成"),
+        ("形態素解析にスダチパイを使う", "スダチパイ", "SudachiPy"),
+        ("ラッパーのフガシを試す", "フガシ", "fugashi"),
+        ("コメットキューイーで評価する", "コメットキューイー", "COMET-QE"),
+    ]
+    for sent, expected_surface, expected_norm in cases:
+        matched = [m for m in user_tokenizer.tokenize(sent, SplitMode.C) if m.surface() == expected_surface]
+        assert matched, f"分割失敗: {sent!r} に {expected_surface!r} が見つかりません"
+        assert matched[0].normalized_form() == expected_norm, f"正規化不一致: {matched[0].normalized_form()}"
+    print(f"\n単体テスト: {len(cases)}/{len(cases)} 件合格")
+```
+
+- Sudachi のユーザー辞書は 18 列の CSV で表層形・連接コスト ID・生起コスト・品詞・読み・正規化形・分割タイプ（`A`/`B`/`C` のどの単位で登録するか）などを指定し、`sudachipy ubuild` でバイナリの `user.dic` に変換してから設定 JSON の `userDict` に登録する。
+- 名詞として追加する場合は左・右連接 ID に標準的な名詞の ID (`4785`) を流用でき、生起コストを小さめ（`4000` など）にするとシステム辞書の細かな分割（「ラベル / バイアス / 問題」「検索 / 拡張 / 生成」）より 1 語としての分割が選ばれやすくなる。
+- 表記ゆれ（「スダチパイ」→ `SudachiPy`、「フガシ」→ `fugashi`）を正規化形欄に書いておくと、`m.normalized_form()` で表記を統一できる。辞書に語を足したときは、想定外の文で誤分割が起きないかも含めて単体テストで継続的に検証する。
+- 設定不要で手早く簡易 CSV を試したい場合は、この章の「Janome にユーザー辞書を追加する」も使える。詳しい設計・運用の解説は姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
 
 ## Janome で形態素解析する (Pure Python) {janome}
 

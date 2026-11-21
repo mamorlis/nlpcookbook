@@ -1,6 +1,6 @@
 # 仕組みを理解するための実装
 
-ライブラリを使えば数行で済む処理を、あえて自分で実装して仕組みを確かめるレシピ。単語分割と品詞タグ付け（系列ラベリング、HMM、ビタビアルゴリズム）、BPE、n-gram 言語モデル、カウントベースの単語ベクトル、GPT の事前学習の学習ループ、SimCSE、ラベル伝播、LLM の透かし、構文解析のアルゴリズム、論理式による意味表現、適合率・再現率・F1、転置索引と BM25、規則によるチャットボット、翻訳の評価指標の学習、スペル訂正。実務で使うときのライブラリ版がある場合は、各レシピの注意書きに本文のレシピを挙げた。各手法の理論や定義式の解説については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の各章の実装演習も参照。
+ライブラリを使えば数行で済む処理を、あえて自分で実装して仕組みを確かめるレシピ。単語分割と品詞タグ付け（系列ラベリング、HMM、ビタビアルゴリズム、MEMM と線形鎖 CRF によるラベルバイアス問題）、BPE、n-gram 言語モデル、カウントベースの単語ベクトル、GPT の事前学習の学習ループ、SimCSE、ラベル伝播と適合率・再現率・F1、LLM の透かし、構文解析のアルゴリズム、論理式による意味表現、転置索引と BM25、規則によるチャットボット、IBM Model 1 と翻訳の評価指標（BLEU・ROUGE・学習型指標）、抽出型要約（TextRank・LexRank）、スペル訂正。実務で使うときのライブラリ版がある場合は、各レシピの注意書きに本文のレシピを挙げた。各手法の理論や定義式の解説については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の各章の実装演習も参照。
 
 ## 単語分割を文字単位の系列ラベリングとして解く {char_segmentation}
 
@@ -194,6 +194,174 @@ print("総当たり:", [labels[i] for i in brute], round(float(total(brute)), 3)
 - 「が」は単独で見ると名詞（蛾）の確率が高いので、貪欲法は「猫/名詞 が/名詞」と誤る。ビタビは「名詞 → 名詞」の遷移が起こりにくいことも考えて「が/助詞」を選び、スコアも高くなる。
 - 計算量は O（系列長 × ラベル数²）。総当たりの O（ラベル数^系列長）を動的計画法で避けている。
 - 遷移スコアに「O → I- は −∞」のような制約を入れれば、ニューラルモデルの出力に対しても正しい BIO 系列だけを出力させられる。
+
+## MEMM と線形鎖 CRF を実装してラベルバイアス問題を確かめる {memm_vs_crf_scratch}
+
+局所正規化を行う最大エントロピーマルコフモデル (MEMM) と、系列全体で大域正規化を行う線形鎖 CRF をまったく同じ素性空間で実装し、遷移の分岐数が偏るデータで MEMM が観測を無視して誤る「ラベルバイアス問題」を数値で確かめたい。
+
+```python
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import logsumexp
+
+# 分岐の非対称性を持つ状態遷移:
+# L1 からは L2 の 1 通りしか分岐しないが、M1 からは M2 と M4 の 2 通りに分岐する
+STATES = ["L1", "L2", "L3", "M1", "M2", "M3", "M4", "M5"]
+S2I = {s: i for i, s in enumerate(STATES)}
+K = len(STATES)
+
+train_data = (
+    [(["a", "b", "x"], ["L1", "L2", "L3"])] * 40
+    + [(["a", "b", "y"], ["M1", "M2", "M3"])] * 18
+    + [(["a", "b", "z"], ["M1", "M4", "M5"])] * 18
+)
+
+# MEMM と CRF で共通の素性空間: 開始状態、状態遷移、観測の出力
+feat_map = {}
+def fid(key):
+    return feat_map.setdefault(key, len(feat_map))
+
+for s in STATES:
+    fid(("START", s))
+    for s2 in STATES:
+        fid(("TRANS", s, s2))
+    for x in ["a", "b", "x", "y", "z"]:
+        fid(("EMIT", s, x))
+D = len(feat_map)
+print("状態数:", K, "/ 素性次元:", D)
+```
+
+```python
+def memm_nll_grad(w, l2=0.05):
+    """MEMM: 各時刻 t で直前ラベル y_{t-1} を固定し、次の候補 y_t だけで局所正規化する"""
+    nll, grad = 0.0, np.zeros_like(w)
+    for xs, ys in train_data:
+        ys_idx = [S2I[y] for y in ys]
+        l0 = np.array([w[fid(("START", STATES[y]))] + w[fid(("EMIT", STATES[y], xs[0]))] for y in range(K)])
+        z0 = float(logsumexp(l0))
+        p0 = np.exp(l0 - z0)
+        nll -= l0[ys_idx[0]] - z0
+        for y in range(K):
+            diff = p0[y] - (1.0 if y == ys_idx[0] else 0.0)
+            grad[fid(("START", STATES[y]))] += diff
+            grad[fid(("EMIT", STATES[y], xs[0]))] += diff
+        for t in range(1, len(xs)):
+            yp = ys_idx[t - 1]
+            lt = np.array([w[fid(("TRANS", STATES[yp], STATES[y]))] + w[fid(("EMIT", STATES[y], xs[t]))] for y in range(K)])
+            zt = float(logsumexp(lt))
+            pt = np.exp(lt - zt)
+            nll -= lt[ys_idx[t]] - zt
+            for y in range(K):
+                diff = pt[y] - (1.0 if y == ys_idx[t] else 0.0)
+                grad[fid(("TRANS", STATES[yp], STATES[y]))] += diff
+                grad[fid(("EMIT", STATES[y], xs[t]))] += diff
+    return nll + 0.5 * l2 * np.sum(w ** 2), grad + l2 * w
+
+def crf_nll_grad(w, l2=0.05):
+    """線形鎖 CRF: 前向き・後ろ向きアルゴリズムで系列全体の分配関数 Z(x) を求め、大域正規化する"""
+    nll, grad = 0.0, np.zeros_like(w)
+    trans_mat = np.array([[w[fid(("TRANS", STATES[y1], STATES[y2]))] for y2 in range(K)] for y1 in range(K)])
+    start_vec = np.array([w[fid(("START", STATES[y]))] for y in range(K)])
+    for xs, ys in train_data:
+        T = len(xs)
+        ys_idx = [S2I[y] for y in ys]
+        emit_mat = np.array([[w[fid(("EMIT", STATES[y], xs[t]))] for y in range(K)] for t in range(T)])
+
+        alpha = np.zeros((T, K))
+        alpha[0] = start_vec + emit_mat[0]
+        for t in range(1, T):
+            alpha[t] = logsumexp(alpha[t - 1][:, None] + trans_mat, axis=0) + emit_mat[t]
+        logZ = float(logsumexp(alpha[-1]))
+
+        beta = np.zeros((T, K))
+        for t in range(T - 2, -1, -1):
+            beta[t] = logsumexp(trans_mat + emit_mat[t + 1][None, :] + beta[t + 1][None, :], axis=1)
+
+        gold = start_vec[ys_idx[0]] + emit_mat[0, ys_idx[0]]
+        for t in range(1, T):
+            gold += trans_mat[ys_idx[t - 1], ys_idx[t]] + emit_mat[t, ys_idx[t]]
+        nll -= gold - logZ
+
+        marg_node = np.exp(alpha + beta - logZ)
+        for y in range(K):
+            grad[fid(("START", STATES[y]))] += marg_node[0, y] - (1.0 if y == ys_idx[0] else 0.0)
+            for t in range(T):
+                grad[fid(("EMIT", STATES[y], xs[t]))] += marg_node[t, y] - (1.0 if y == ys_idx[t] else 0.0)
+        for t in range(1, T):
+            marg_edge = np.exp(alpha[t - 1][:, None] + trans_mat + emit_mat[t][None, :] + beta[t][None, :] - logZ)
+            for y1 in range(K):
+                for y2 in range(K):
+                    grad[fid(("TRANS", STATES[y1], STATES[y2]))] += marg_edge[y1, y2] - (1.0 if (y1 == ys_idx[t - 1] and y2 == ys_idx[t]) else 0.0)
+    return nll + 0.5 * l2 * np.sum(w ** 2), grad + l2 * w
+
+w_memm = minimize(memm_nll_grad, np.zeros(D), jac=True, method="L-BFGS-B").x
+w_crf = minimize(crf_nll_grad, np.zeros(D), jac=True, method="L-BFGS-B").x
+```
+
+```python
+def decode_memm(w, xs):
+    T = len(xs)
+    dp, bp = np.zeros((T, K)), np.zeros((T, K), dtype=int)
+    l0 = np.array([w[fid(("START", STATES[y]))] + w[fid(("EMIT", STATES[y], xs[0]))] for y in range(K)])
+    dp[0] = l0 - float(logsumexp(l0))
+    for t in range(1, T):
+        step = np.zeros((K, K))
+        for yp in range(K):
+            lt = np.array([w[fid(("TRANS", STATES[yp], STATES[y]))] + w[fid(("EMIT", STATES[y], xs[t]))] for y in range(K)])
+            step[yp] = lt - float(logsumexp(lt))
+        cand = dp[t - 1][:, None] + step
+        bp[t] = cand.argmax(axis=0)
+        dp[t] = cand.max(axis=0)
+    path = [int(dp[-1].argmax())]
+    for t in range(T - 1, 0, -1):
+        path.append(int(bp[t, path[-1]]))
+    return [STATES[i] for i in path[::-1]], float(np.exp(dp[-1].max()))
+
+def decode_crf(w, xs):
+    T = len(xs)
+    trans_mat = np.array([[w[fid(("TRANS", STATES[y1], STATES[y2]))] for y2 in range(K)] for y1 in range(K)])
+    start_vec = np.array([w[fid(("START", STATES[y]))] for y in range(K)])
+    emit_mat = np.array([[w[fid(("EMIT", STATES[y], xs[t]))] for y in range(K)] for t in range(T)])
+    alpha = np.zeros((T, K))
+    alpha[0] = start_vec + emit_mat[0]
+    for t in range(1, T):
+        alpha[t] = logsumexp(alpha[t - 1][:, None] + trans_mat, axis=0) + emit_mat[t]
+    logZ = float(logsumexp(alpha[-1]))
+    dp, bp = np.zeros((T, K)), np.zeros((T, K), dtype=int)
+    dp[0] = start_vec + emit_mat[0]
+    for t in range(1, T):
+        cand = dp[t - 1][:, None] + trans_mat + emit_mat[t][None, :]
+        bp[t] = cand.argmax(axis=0)
+        dp[t] = cand.max(axis=0)
+    path = [int(dp[-1].argmax())]
+    for t in range(T - 1, 0, -1):
+        path.append(int(bp[t, path[-1]]))
+    return [STATES[i] for i in path[::-1]], float(np.exp(dp[-1].max() - logZ))
+
+print("=== MEMM の局所遷移確率（分岐数の違いによる偏り） ===")
+for prev, x in [("L1", "b"), ("M1", "b"), ("L2", "y"), ("M2", "y")]:
+    lt = np.array([w_memm[fid(("TRANS", prev, STATES[y]))] + w_memm[fid(("EMIT", STATES[y], x))] for y in range(K)])
+    ps = np.exp(lt - float(logsumexp(lt)))
+    top = sorted(((round(float(ps[i]), 3), STATES[i]) for i in range(K) if ps[i] > 0.02), reverse=True)
+    print(f"  P(y | {prev}, x={x!r}) = {top}")
+
+print("\n=== 復号結果の比較 ===")
+tests = [(["a", "b", "x"], ["L1", "L2", "L3"]), (["a", "b", "y"], ["M1", "M2", "M3"]), (["a", "b", "z"], ["M1", "M4", "M5"])]
+memm_ok = crf_ok = 0
+for xs, gold in tests:
+    pm, pm_p = decode_memm(w_memm, xs)
+    pc, pc_p = decode_crf(w_crf, xs)
+    memm_ok += pm == gold
+    crf_ok += pc == gold
+    print(f"入力 {xs} / 正解 {gold}")
+    print(f"  MEMM: {pm} (P={pm_p:.3f}) {'OK' if pm == gold else 'NG'}")
+    print(f"  CRF : {pc} (P={pc_p:.3f}) {'OK' if pc == gold else 'NG'}")
+print(f"系列正解率: MEMM {memm_ok}/{len(tests)} vs CRF {crf_ok}/{len(tests)}")
+```
+
+- MEMM では各時刻で直前の状態ごとに確率の和が 1 になるよう局所正規化するため、遷移先が 1 通りしかない状態 (`L1` → `L2`) には確率約 0.994 が集中し、2 通りに分岐する状態 (`M1` → `M2`/`M4`) はそれぞれ約 0.496 へ割り引かれる。その結果、末尾の観測 `y`/`z` を見ても先頭の優位を覆せず、MEMM はすべて `L1 → L2 → L3` と誤る（ラベルバイアス問題。Lafferty ら 2001）。
+- 線形鎖 CRF は系列全体のすべてのラベル列にわたる分配関数 $Z(\mathbf{x})$ で大域正規化するため、末尾の観測 `y`/`z` の証拠が前向き・後ろ向き計算を通じて系列全体に伝わり、3 パターンすべてを高い確信度で正しく復号できる。
+- 日本語単語分割で CRF を使う実例は、この付録の「単語分割を文字単位の系列ラベリングとして解く」を参照。
 
 ## BPE を 30 行で自作して仕組みを理解する {bpe_scratch}
 
@@ -847,6 +1015,57 @@ for h in np.argsort(-degree)[:5]:
 - 少数の例から語の集合を広げるブートストラッピングでも、ハブ（一般的な語）を通って無関係な語に広がる「意味ドリフト」が起きる（語の意味と意味の変化の章の「ブートストラッピングの意味ドリフトを観察して抑える」）。
 - 実務でライブラリを使って同じことをする版は、テキスト分類の章の「少数のラベルをグラフで広げて分類する（scikit-learn の LabelSpreading）」。
 
+## 適合率・再現率・F1 を自分で計算する（micro と macro） {prf_scratch}
+ライブラリに頼らず、適合率・再現率・F1 を定義から計算して、micro 平均と macro 平均の違いを理解したい。
+
+```python
+from collections import Counter
+
+gold = ["A", "A", "A", "A", "A", "A", "B", "B", "B", "C"]
+pred = ["A", "A", "A", "A", "A", "B", "B", "B", "A", "A"]
+
+labels = sorted(set(gold) | set(pred))
+tp, fp, fn = Counter(), Counter(), Counter()
+for g, p in zip(gold, pred):
+    if g == p:
+        tp[g] += 1
+    else:
+        fp[p] += 1     # p と予測したが違った
+        fn[g] += 1     # g を見逃した
+
+def prf(tp, fp, fn):
+    p = tp / (tp + fp) if tp + fp else 0.0
+    r = tp / (tp + fn) if tp + fn else 0.0
+    f = 2 * p * r / (p + r) if p + r else 0.0
+    return p, r, f
+
+per_class = {}
+for c in labels:
+    per_class[c] = prf(tp[c], fp[c], fn[c])
+    print(f"{c}: P = {per_class[c][0]:.3f}  R = {per_class[c][1]:.3f}  F1 = {per_class[c][2]:.3f}  (TP {tp[c]}, FP {fp[c]}, FN {fn[c]})")
+
+macro_f1 = sum(f for _, _, f in per_class.values()) / len(labels)        # クラスごとの F1 の単純平均
+micro = prf(sum(tp.values()), sum(fp.values()), sum(fn.values()))         # 全クラスの TP/FP/FN を合算してから計算
+print(f"macro-F1 = {macro_f1:.3f}   micro-F1 = {micro[2]:.3f}   正解率 = {sum(tp.values()) / len(gold):.3f}")
+```
+
+```python
+from sklearn.metrics import precision_recall_fscore_support
+
+p, r, f, _ = precision_recall_fscore_support(gold, pred, average="macro", zero_division=0)
+print("scikit-learn の macro:", round(p, 3), round(r, 3), round(f, 3))
+
+# 抽出タスク (固有表現抽出など、正解と予測が「集合」の場合) の F1
+gold_set, pred_set = {("山田", "PER"), ("京都", "LOC"), ("ソニー", "ORG")}, {("山田", "PER"), ("京都", "ORG"), ("東京", "LOC")}
+n = len(gold_set & pred_set)
+print("抽出の P/R/F1:", [round(x, 3) for x in prf(n, len(pred_set) - n, len(gold_set) - n)])
+```
+
+- 単一ラベルの多クラス分類では、micro-F1 は正解率と一致する。
+- macro-F1 は少数クラス（ここでは一度も当たっていない C）の影響を強く受ける。クラスの偏りがあるときに、モデルの弱点が見える。
+- 「macro-F1」には「クラスごとの F1 の平均」と「macro 適合率と macro 再現率の調和平均」の 2 つの流儀があり、値が違う。前者が一般的。
+- 実務でライブラリを使って同じことをする版は、評価指標と統計的検定の章の「scikit-learn で適合率・再現率・F1 を集計する（micro / macro 平均と抽出の評価）」。
+
 ## LLM の出力に入れる透かし（green リスト）を自分で実装し、統計的に検出する {llm_watermark_scratch gpu}
 LLM が生成した文章に、読んでもわからない「透かし」（ウォーターマーク）を入れておき、あとから文章だけを見て、自分のモデルが生成したものかを統計的に判定したい。
 
@@ -1332,57 +1551,6 @@ print("ポチは死すべきものである:", prover.prove(read("mortal(pochi)"
 - 手書きの文法が扱える文はごく一部。広い範囲の文を論理式にするには、CCG パーザに基づく ccg2lambda や、AMR などの意味表現へのニューラルなパージングが使われる。
 - 自然言語推論を「埋め込みの類似度」ではなく「証明」で行うアプローチは、否定や数量を含む推論に強い。
 
-## 適合率・再現率・F1 を自分で計算する（micro と macro） {prf_scratch}
-ライブラリに頼らず、適合率・再現率・F1 を定義から計算して、micro 平均と macro 平均の違いを理解したい。
-
-```python
-from collections import Counter
-
-gold = ["A", "A", "A", "A", "A", "A", "B", "B", "B", "C"]
-pred = ["A", "A", "A", "A", "A", "B", "B", "B", "A", "A"]
-
-labels = sorted(set(gold) | set(pred))
-tp, fp, fn = Counter(), Counter(), Counter()
-for g, p in zip(gold, pred):
-    if g == p:
-        tp[g] += 1
-    else:
-        fp[p] += 1     # p と予測したが違った
-        fn[g] += 1     # g を見逃した
-
-def prf(tp, fp, fn):
-    p = tp / (tp + fp) if tp + fp else 0.0
-    r = tp / (tp + fn) if tp + fn else 0.0
-    f = 2 * p * r / (p + r) if p + r else 0.0
-    return p, r, f
-
-per_class = {}
-for c in labels:
-    per_class[c] = prf(tp[c], fp[c], fn[c])
-    print(f"{c}: P = {per_class[c][0]:.3f}  R = {per_class[c][1]:.3f}  F1 = {per_class[c][2]:.3f}  (TP {tp[c]}, FP {fp[c]}, FN {fn[c]})")
-
-macro_f1 = sum(f for _, _, f in per_class.values()) / len(labels)        # クラスごとの F1 の単純平均
-micro = prf(sum(tp.values()), sum(fp.values()), sum(fn.values()))         # 全クラスの TP/FP/FN を合算してから計算
-print(f"macro-F1 = {macro_f1:.3f}   micro-F1 = {micro[2]:.3f}   正解率 = {sum(tp.values()) / len(gold):.3f}")
-```
-
-```python
-from sklearn.metrics import precision_recall_fscore_support
-
-p, r, f, _ = precision_recall_fscore_support(gold, pred, average="macro", zero_division=0)
-print("scikit-learn の macro:", round(p, 3), round(r, 3), round(f, 3))
-
-# 抽出タスク (固有表現抽出など、正解と予測が「集合」の場合) の F1
-gold_set, pred_set = {("山田", "PER"), ("京都", "LOC"), ("ソニー", "ORG")}, {("山田", "PER"), ("京都", "ORG"), ("東京", "LOC")}
-n = len(gold_set & pred_set)
-print("抽出の P/R/F1:", [round(x, 3) for x in prf(n, len(pred_set) - n, len(gold_set) - n)])
-```
-
-- 単一ラベルの多クラス分類では、micro-F1 は正解率と一致する。
-- macro-F1 は少数クラス（ここでは一度も当たっていない C）の影響を強く受ける。クラスの偏りがあるときに、モデルの弱点が見える。
-- 「macro-F1」には「クラスごとの F1 の平均」と「macro 適合率と macro 再現率の調和平均」の 2 つの流儀があり、値が違う。前者が一般的。
-- 実務でライブラリを使って同じことをする版は、評価指標と統計的検定の章の「scikit-learn で適合率・再現率・F1 を集計する（micro / macro 平均と抽出の評価）」。
-
 ## 転置索引を自作してブール検索・フレーズ検索をする {inverted_index_scratch}
 検索エンジンの基本である転置索引を自分で作り、AND / OR / NOT や語順どおりのフレーズで検索したい。
 
@@ -1559,6 +1727,102 @@ for user in ["最近、仕事がつらいです。", "上司に毎日怒られ�
 - 規則に合う入力には確実に意図どおりの応答を返せる。予約受付や定型的な案内では、今でも規則ベースの部分が残っている。
 - 規則の順序が重要。特殊な規則を上に、一般的な規則を下に置く。どれにも合わないときの応答を必ず用意する。
 
+## IBM Model 1 を実装して対訳から単語アライメントを学習する {ibm_model1_scratch}
+
+日英の対訳文ペアから、辞書なしで単語同士の対応（単語アライメント）を見つけたい。EM アルゴリズム（E ステップの事後確率計算と M ステップの翻訳確率 $t(f \mid e)$ の更新）を自分で実装し、対数尤度が反復ごとに単調増加することとアライメント行列の獲得を確かめる。
+
+```python
+import math
+from collections import defaultdict
+import numpy as np
+import pandas as pd
+
+pairs = [
+    (["猫", "が", "魚", "を", "食べる"], ["the", "cat", "eats", "fish"]),
+    (["犬", "が", "肉", "を", "食べる"], ["the", "dog", "eats", "meat"]),
+    (["猫", "は", "小さい"], ["the", "cat", "is", "small"]),
+    (["犬", "は", "大きい"], ["the", "dog", "is", "big"]),
+    (["小さい", "猫", "が", "走る"], ["the", "small", "cat", "runs"]),
+    (["大きい", "犬", "が", "走る"], ["the", "big", "dog", "runs"]),
+    (["鳥", "が", "空", "を", "飛ぶ"], ["the", "bird", "flies", "in", "the", "sky"]),
+    (["小さい", "鳥", "が", "飛ぶ"], ["a", "small", "bird", "flies"]),
+    (["魚", "が", "水", "を", "泳ぐ"], ["the", "fish", "swims", "in", "water"]),
+    (["赤い", "リンゴ", "を", "食べる"], ["eat", "a", "red", "apple"]),
+    (["甘い", "リンゴ", "を", "買う"], ["buy", "a", "sweet", "apple"]),
+    (["青い", "空", "を", "見る"], ["see", "the", "blue", "sky"]),
+    (["青い", "海", "を", "見る"], ["see", "the", "blue", "sea"]),
+    (["子ども", "が", "本", "を", "読む"], ["the", "child", "reads", "a", "book"]),
+    (["学生", "が", "本", "を", "買う"], ["the", "student", "buys", "a", "book"]),
+    (["先生", "が", "本", "を", "読む"], ["the", "teacher", "reads", "a", "book"]),
+    (["学生", "が", "学校", "で", "学ぶ"], ["the", "student", "studies", "at", "school"]),
+    (["先生", "が", "学校", "で", "教える"], ["the", "teacher", "teaches", "at", "school"]),
+    (["猫", "が", "ベッド", "で", "寝る"], ["the", "cat", "sleeps", "on", "the", "bed"]),
+    (["犬", "が", "ベッド", "で", "寝る"], ["the", "dog", "sleeps", "on", "the", "bed"]),
+    (["子ども", "が", "学校", "で", "走る"], ["the", "child", "runs", "at", "school"]),
+    (["私", "は", "赤い", "花", "を", "見る"], ["i", "see", "a", "red", "flower"]),
+    (["私", "は", "甘い", "ケーキ", "を", "食べる"], ["i", "eat", "a", "sweet", "cake"]),
+    (["大きい", "魚", "が", "泳ぐ"], ["a", "big", "fish", "swims"]),
+]
+print("対訳文ペア数:", len(pairs))
+```
+
+```python
+def train_ibm_model1(sentence_pairs, n_iter=15):
+    """EM アルゴリズムで単語翻訳確率 t(f | e) を推定し、各反復の対数尤度を返す"""
+    f_vocab = sorted({f for _, fs in sentence_pairs for f in fs})
+    e_vocab = sorted({e for es, _ in sentence_pairs for e in es} | {"NULL"})
+    t = {(f, e): 1.0 / len(f_vocab) for f in f_vocab for e in e_vocab}
+    log_likelihoods = []
+
+    for _ in range(n_iter):
+        ll = 0.0
+        count, total_e = defaultdict(float), defaultdict(float)
+        for es, fs in sentence_pairs:
+            es_null = ["NULL"] + es
+            norm_const = -math.log(len(es_null))
+            for f in fs:
+                s = sum(t[(f, e)] for e in es_null)
+                ll += norm_const + math.log(s)
+                for e in es_null:
+                    post = t[(f, e)] / s           # E ステップ: 事後アライメント確率
+                    count[(f, e)] += post
+                    total_e[e] += post
+        log_likelihoods.append(ll)
+        for k in t:                                # M ステップ: 期待頻度から確率を更新
+            t[k] = count[k] / total_e[k[1]] if total_e[k[1]] > 0 else 0.0
+    return t, log_likelihoods
+
+t_table, lls = train_ibm_model1(pairs, n_iter=15)
+print("対数尤度の推移:", [round(x, 2) for x in lls[:5]] + ["..."] + [round(x, 2) for x in lls[-3:]])
+print("単調増加の確認:", all(lls[i] <= lls[i + 1] + 1e-9 for i in range(len(lls) - 1)))
+
+print("\n=== 学習された翻訳確率 t(英語 | 日本語) の上位 ===")
+for ja_w in ["猫", "犬", "食べる", "赤い", "学校", "本"]:
+    top = sorted(((p, f) for (f, e), p in t_table.items() if e == ja_w and p > 0.1), reverse=True)[:3]
+    print(f"  {ja_w:4s} → {[(f, round(p, 3)) for p, f in top]}")
+```
+
+```python
+# 学習済みモデルで文対の単語アライメント行列と Viterbi アライメントを求める
+es, fs = ["大きい", "猫", "が", "魚", "を", "食べる"], ["the", "big", "cat", "eats", "fish"]
+es_null = ["NULL"] + es
+mat = pd.DataFrame(
+    [[t_table.get((f, e), 0.0) for e in es_null] for f in fs],
+    index=fs, columns=es_null,
+)
+print("=== 翻訳確率行列 t(f | e) ===")
+print(mat.round(2).to_string())
+
+print("\n=== Viterbi アライメント (各英単語に最も確からしい日本語語彙) ===")
+for f in fs:
+    best_e = mat.loc[f].idxmax()
+    print(f"  {f:5s} ← {best_e} ({mat.loc[f, best_e]:.3f})")
+```
+
+- IBM Model 1 の目的関数（対数尤度）はパラメータに関して凸（厳密に言えば確率分布上で凹）であるため、EM アルゴリズムは局所解に陥らず、反復ごとに必ず単調増加して大域最適解へ収束する。
+- 日本語の助詞（「が」「を」）や英語の冠詞 (`the`, `a`) は相手側に対応する語がないことも多く、`NULL` や共起頻度の高い助詞へ確率が分散する（上の例でも *the* は「が」や `NULL` に割り当てられる）。
+- 語順を考慮しないため、長い文では遠い位置への誤った対応が起きやすい。実務の統計的機械翻訳では IBM Model 1 の結果を初期値にして位置モデルを含む HMM や IBM Model 4（`fast_align` など）へ進み、日→英と英→日の双方向アライメントを対称化して使う（機械翻訳の章の「Moses で統計的機械翻訳システムを作る」を参照）。
+
 ## 文埋め込みから翻訳の評価指標を自分で学習する {mt_metric_regression}
 
 BLEU のような文字列の一致ではなく、意味の近さで翻訳を評価したい。人手評価のデータから、評価指標そのものを学習する。
@@ -1636,8 +1900,232 @@ for r in test[test["chrF"] < 25].sort_values("learned", ascending=False).head(3)
 - 文単位の BLEU は人手評価との相関が低い。文単位で比べたいときは、chrF か学習型の指標を使う。
 - 実用では、自分で学習するより公開されている COMET を使う（機械翻訳の章の「COMET で翻訳の品質を評価する」）。ここでの目的は、学習型の指標が何をしているかを理解すること。
 
+## BLEU と ROUGE を定義式から実装する {bleu_rouge_scratch}
+
+機械翻訳と要約の標準的な評価指標である BLEU と ROUGE (ROUGE-1 / ROUGE-2 / ROUGE-L) を定義式から自分で実装し、ライブラリ（`sacrebleu` と `rouge-score`）の出力と完全に一致することを確かめたい。
+
+```python
+!pip install -q sacrebleu rouge-score
+```
+
+```python
+import math
+from collections import Counter
+import sacrebleu
+from rouge_score import rouge_scorer
+
+def ngrams(tokens, n):
+    return Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
+
+def bleu_scratch(hyps_tok, refs_tok, max_n=4):
+    """上限クリッピング付き修正 n-gram 適合率と簡潔性ペナルティ (BP) によるコーパス BLEU"""
+    clipped_total, cand_total = [0] * max_n, [0] * max_n
+    hyp_len = ref_len = 0
+    for hyp, refs in zip(hyps_tok, refs_tok):
+        hyp_len += len(hyp)
+        # 候補長に最も近い参照訳の長さ（同距離なら短いほう）を選ぶ
+        ref_len += min((abs(len(r) - len(hyp)), len(r)) for r in refs)[1]
+        for n in range(1, max_n + 1):
+            h_ng = ngrams(hyp, n)
+            max_ref_ng = Counter()
+            for r in refs:
+                for k, v in ngrams(r, n).items():
+                    if v > max_ref_ng[k]:
+                        max_ref_ng[k] = v
+            clipped_total[n - 1] += sum(min(cnt, max_ref_ng[k]) for k, cnt in h_ng.items())
+            cand_total[n - 1] += max(len(hyp) - n + 1, 0)
+    precisions = [c / t if t > 0 else 0.0 for c, t in zip(clipped_total, cand_total)]
+    bp = 1.0 if hyp_len > ref_len else (math.exp(1.0 - ref_len / hyp_len) if hyp_len > 0 else 0.0)
+    if min(precisions) == 0.0:
+        return 0.0, precisions, bp
+    geo_mean = math.exp(sum(math.log(p) for p in precisions) / max_n)
+    return 100.0 * bp * geo_mean, precisions, bp
+
+def lcs_length(a, b):
+    """動的計画法で 2 系列の最長共通部分列 (LCS) の長さを求める"""
+    dp = [0] * (len(b) + 1)
+    for ai in a:
+        prev = 0
+        for j, bj in enumerate(b, 1):
+            cur = dp[j]
+            dp[j] = prev + 1 if ai == bj else max(dp[j], dp[j - 1])
+            prev = cur
+    return dp[-1]
+
+def rouge_n_scratch(ref_tok, hyp_tok, n):
+    r_ng, h_ng = ngrams(ref_tok, n), ngrams(hyp_tok, n)
+    overlap = sum((r_ng & h_ng).values())
+    p = overlap / sum(h_ng.values()) if h_ng else 0.0
+    r = overlap / sum(r_ng.values()) if r_ng else 0.0
+    f = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    return p, r, f
+
+def rouge_l_scratch(ref_tok, hyp_tok):
+    lcs = lcs_length(ref_tok, hyp_tok)
+    p = lcs / len(hyp_tok) if hyp_tok else 0.0
+    r = lcs / len(ref_tok) if ref_tok else 0.0
+    f = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+    return p, r, f
+```
+
+```python
+hyps = ["the cat sat on the mat", "he went to tokyo yesterday", "the quick brown fox jumps over the lazy dog"]
+refs = ["the cat is sitting on the mat", "yesterday he went to tokyo", "a quick brown fox jumped over a lazy dog"]
+
+mine_bleu, precs, bp = bleu_scratch([h.split() for h in hyps], [[r.split()] for r in refs])
+lib_bleu = sacrebleu.corpus_bleu(hyps, [refs], tokenize="none")
+print(f"BLEU: 自作={mine_bleu:.6f} / sacrebleu={lib_bleu.score:.6f} / 差={abs(mine_bleu - lib_bleu.score):.2e}")
+print("  各 n-gram 適合率:", [round(p * 100, 3) for p in precs], "BP:", round(bp, 4))
+
+scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=False)
+for i, (h, r) in enumerate(zip(hyps, refs)):
+    lib = scorer.score(r, h)
+    r1 = rouge_n_scratch(r.split(), h.split(), 1)
+    r2 = rouge_n_scratch(r.split(), h.split(), 2)
+    rl = rouge_l_scratch(r.split(), h.split())
+    print(f"文 {i}: R1={r1[2]:.4f}(差{abs(r1[2] - lib['rouge1'].fmeasure):.1e}) "
+          f"R2={r2[2]:.4f}(差{abs(r2[2] - lib['rouge2'].fmeasure):.1e}) "
+          f"RL={rl[2]:.4f}(差{abs(rl[2] - lib['rougeL'].fmeasure):.1e})")
+```
+
+```python
+# 定義式の性質を確かめる極端な例
+cases = [
+    ("単語の重複 (" + "the " * 6 + ")", ["the"] * 6, ["the", "cat", "sat", "on", "the", "mat"]),
+    ("短すぎる出力 (BP で減点)", ["the", "cat"], ["the", "cat", "sat", "on", "the", "mat"]),
+    ("語順を逆転 (R1=1.0 だが RL が低下)", ["mat", "the", "on", "sat", "cat", "the"], ["the", "cat", "sat", "on", "the", "mat"]),
+]
+for label, h_tok, r_tok in cases:
+    b, _, bp_c = bleu_scratch([h_tok], [[r_tok]])
+    r1_f = rouge_n_scratch(r_tok, h_tok, 1)[2]
+    rl_f = rouge_l_scratch(r_tok, h_tok)[2]
+    print(f"{label:34s} | BLEU={b:5.1f} (BP={bp_c:.3f}) | R1={r1_f:.3f} | RL={rl_f:.3f}")
+```
+
+- 上限クリッピング（参照訳に出現する最大回数で頭打ち）がないと `"the the the..."` のような同じ語の繰り返しで適合率が 100% になってしまう。また、短い出力だけで適合率を稼ぐのを防ぐために簡潔性ペナルティ (BP) が掛かる。
+- BLEU は 1〜4-gram 適合率の幾何平均をとるため、コーパス全体で 4-gram の一致が 1 件でもゼロになるとスコア全体が 0 になる（文単位の BLEU で平滑化が必要な理由）。
+- ROUGE-1 は語順を見ないため語順を逆にしても 1.000 のままになるが、動的計画法による LCS を使う ROUGE-L は語順の崩れを捉えて低下する。実務での利用は、機械翻訳の章の「機械翻訳を BLEU で評価する (sacreBLEU)」と要約と平易化の章の「要約を ROUGE で評価する（日本語対応）」を参照。
+
+## TextRank と LexRank を自分で実装して抽出型要約を作る {textrank_lexrank_scratch}
+
+文間の共通語グラフ (TextRank) と TF-IDF コサイン類似度グラフ (LexRank) をゼロから組み立て、減衰係数 $d = 0.85$ の確率遷移行列に対するべき乗法で定常分布（PageRank スコア）を求めて抽出型要約を作りたい。冗長な文の重複を避ける MMR による選択も確かめる。
+
+```python
+!pip install -q fugashi unidic-lite networkx
+```
+
+```python
+import math
+from collections import Counter
+import networkx as nx
+import numpy as np
+from fugashi import Tagger
+
+sents = [
+    "自然言語処理は人間の言葉をコンピュータで理解・生成する技術である。",
+    "自然言語処理は人間の言葉をコンピュータで扱うための重要な技術だ。",
+    "近年は大規模言語モデルの登場により自然言語処理の性能が大きく向上した。",
+    "大規模言語モデルは大量のテキストデータを用いた事前学習によって作られる。",
+    "要約システムは長い文書から要点を抜き出して短い文章にまとめる。",
+    "抽出型要約では文同士の類似度グラフを使って重要な文を選ぶ。",
+    "グラフの中心性を計算することで文書全体を代表する文が見つかる。",
+    "ところで昨日の昼ごはんは駅前の店でカレーを食べた。",
+]
+
+tagger = Tagger()
+tokenize = lambda s: [w.feature.orthBase or w.surface for w in tagger(s)
+                      if w.feature.pos1 in ("名詞", "動詞", "形容詞") and w.feature.pos2 != "非自立可能"]
+tokenized = [tokenize(s) for s in sents]
+```
+
+```python
+def textrank_matrix(toks_list):
+    """TextRank: 2 文の共通語の数を log(|S_i|) + log(|S_j|) で正規化した類似度行列"""
+    N = len(toks_list)
+    W = np.zeros((N, N))
+    sets = [set(ws) for ws in toks_list]
+    for i in range(N):
+        for j in range(i + 1, N):
+            if len(sets[i]) > 1 and len(sets[j]) > 1:
+                denom = math.log(len(sets[i])) + math.log(len(sets[j]))
+                W[i, j] = W[j, i] = len(sets[i] & sets[j]) / denom if denom > 0 else 0.0
+    return W
+
+def tfidf_matrix(toks_list):
+    """TF-IDF ベクトル（L2 正規化済み）を自前で組み立てる"""
+    N = len(toks_list)
+    vocab = sorted({w for ws in toks_list for w in ws})
+    v2i = {w: i for i, w in enumerate(vocab)}
+    df = Counter(w for ws in toks_list for w in set(ws))
+    idf = np.array([math.log((N + 1) / (df[w] + 1)) + 1.0 for w in vocab])
+    X = np.zeros((N, len(vocab)))
+    for i, ws in enumerate(toks_list):
+        for w, cnt in Counter(ws).items():
+            X[i, v2i[w]] = cnt * idf[v2i[w]]
+    norms = np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-12)
+    return X / norms
+
+def pagerank_power(W, d=0.85, tol=1e-9, max_iter=200):
+    """減衰係数 d=0.85 の確率遷移行列を作り、べき乗法で定常分布を求める"""
+    N = W.shape[0]
+    W = W.copy()
+    np.fill_diagonal(W, 0.0)
+    row_sums = W.sum(axis=1, keepdims=True)
+    # 孤立ノード（行和が 0）は全ノードへ一様確率 1/N で遷移させる
+    P = np.where(row_sums > 0, W / np.where(row_sums > 0, row_sums, 1.0), 1.0 / N)
+    pi = np.full(N, 1.0 / N)
+    for it in range(1, max_iter + 1):
+        pi_next = (1.0 - d) / N + d * (pi @ P)
+        if np.abs(pi_next - pi).sum() < tol:
+            return pi_next, it
+        pi = pi_next
+    return pi, max_iter
+
+W_tr = textrank_matrix(tokenized)
+X_tfidf = tfidf_matrix(tokenized)
+sim_cos = X_tfidf @ X_tfidf.T
+W_lr = sim_cos.copy()
+W_lr[W_lr < 0.05] = 0.0
+np.fill_diagonal(W_lr, 0.0)
+
+pi_tr, it_tr = pagerank_power(W_tr)
+pi_lr, it_lr = pagerank_power(W_lr)
+nx_tr = np.array(list(nx.pagerank(nx.from_numpy_array(W_tr), alpha=0.85, weight="weight").values()))
+nx_lr = np.array(list(nx.pagerank(nx.from_numpy_array(W_lr), alpha=0.85, weight="weight").values()))
+print(f"べき乗法 vs networkx 最大差: TextRank={np.max(np.abs(pi_tr - nx_tr)):.2e} ({it_tr} 回), LexRank={np.max(np.abs(pi_lr - nx_lr)):.2e} ({it_lr} 回)")
+```
+
+```python
+def select_mmr(scores, sim_mat, k=3, lam=0.5):
+    """MMR (Maximal Marginal Relevance): 重要度と既選択文との非類似度のバランスで文を選ぶ"""
+    selected, cand = [], list(range(len(scores)))
+    s_norm = scores / scores.max()
+    while len(selected) < k and cand:
+        if not selected:
+            best = max(cand, key=lambda i: s_norm[i])
+        else:
+            best = max(cand, key=lambda i: lam * s_norm[i] - (1 - lam) * max(sim_mat[i, j] for j in selected))
+        selected.append(best)
+        cand.remove(best)
+    return sorted(selected)
+
+for i, s in enumerate(sents):
+    print(f"[{i}] TR={pi_tr[i]:.3f} LR={pi_lr[i]:.3f} | {s}")
+
+top_raw = sorted(np.argsort(-pi_lr)[:3].tolist())
+top_mmr = select_mmr(pi_lr, sim_cos, k=3, lam=0.5)
+print("\n上位 3 文そのまま (LexRank):", top_raw, "→ 0 番と 1 番の重複を両方選択")
+print("MMR (λ=0.5) で選択         :", top_mmr, "→ 冗長な文を避けて要約を構成")
+for i in top_mmr:
+    print("・", sents[i])
+```
+
+- どの文とも語が重ならない無関係な文（7 番「ところで昨日の昼ごはん…」）はグラフの辺を持たないため、定常分布のスコアはテレポート項の $(1 - d) / N = 0.15 / 8 \approx 0.019$ 付近に落ちる。
+- ほぼ同じ意味の 2 文（0 番と 1 番）があると、中心性スコアの上位をそのまま取るだけでは両方とも選ばれて要約が重複する。MMR を組み合わせると、高い重要度を保ちつつ既選択の文と似ている文にペナルティを与えて多様な要点を拾える。
+- 実務でライブラリを使って抽出型要約を作る場合は、要約と平易化の章の「重要な文を選んで抽出型要約を作る (LexRank)」を参照。
+
 ## 編集距離と単語の頻度で英語のスペル誤りを訂正する（Norvig 方式を自分で実装） {spelling_correction_scratch}
-英語のつづりの誤りを見つけて訂正したい。編集距離と単語の頻度による古典的な方法を作り、文脈を使う方法と比べる（ライブラリで手軽に直すだけなら、文法誤り訂正と言語教育の章の「英語のスペルミスをライブラリで直す (pyspellchecker)」）。
+英語のつづりの誤りを見つけて訂正したい。編集距離と単語の頻度による古典的な方法を作り、文脈を使う方法と比べる（ライブラリで手軽に直すだけなら、文法誤り訂正と文章校正の章の「英語のスペルミスをライブラリで直す (pyspellchecker)」）。
 
 ```python
 !pip install -q symspellpy
@@ -1741,5 +2229,5 @@ for sentence, position in [("I want a peace of cake .", 3), ("He will except the
 - 弱点は 3 つ: 辞書にない語は正解にできない、頻度だけで選ぶので文脈に合わない語を選ぶことがある、そして実在する別の語になってしまった誤り (peace / piece) には気付けない。
 - 文脈を使うと、実在する語への打ち間違い (real-word error) も直せる（peace → piece、whether → weather）。こうした取り違えは編集距離 2 のことが多いので、候補を距離 2 まで広げる。正しい語まで書き換えてしまう危険が増えるので、元の語から離れるほどペナルティを付け、正しい文（books、cat）が変わらないことも確かめる。
 - 学習者のスペル誤りは、打ち間違いとは傾向が違う（発音に引きずられる、母語の影響を受ける）。編集操作ごとの起こりやすさを学習者のデータから推定すると、精度が上がる。
-- 日本語には分かち書きがなく、スペル誤りにあたるのは誤変換や脱字。日本語入力の章と、文法誤り検出のレシピを参照。
-- 実務でライブラリを使って同じことをする版は、文法誤り訂正と言語教育の章の「symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す」。
+- 日本語には分かち書きがなく、スペル誤りにあたるのは誤変換や脱字。日本語入力の章と、文法誤り訂正と文章校正の章の文法誤り検出のレシピを参照。
+- 実務でライブラリを使って同じことをする版は、文法誤り訂正と文章校正の章の「symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す」。
