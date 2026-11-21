@@ -404,7 +404,7 @@ print("起きにくい遷移:", [(a, b, round(w, 1)) for (a, b), w in trans.most
 
 ```python
 import json, urllib.request
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 
 # ストックマーク社の Wikipedia 固有表現データセット (CC BY-SA 3.0)
 url = "https://raw.githubusercontent.com/stockmarkteam/ner-wikipedia-dataset/main/ner.json"
@@ -416,7 +416,11 @@ labels = ["O"] + [f"{p}-{t}" for t in types for p in ("B", "I")]
 label2id = {l: i for i, l in enumerate(labels)}
 ds = Dataset.from_list([{"text": d["text"], "starts": [e["span"][0] for e in d["entities"]],
                          "ends": [e["span"][1] for e in d["entities"]], "types": [e["type"] for e in d["entities"]]} for d in data])
-ds = ds.train_test_split(test_size=0.2, seed=0)
+# テストを先に確保し、残りから開発用を取り分ける（学習・開発・テストは約 70・10・20%）
+holdout = ds.train_test_split(test_size=0.2, seed=0)
+train_dev = holdout["train"].train_test_split(test_size=0.125, seed=0)
+ds = DatasetDict(train=train_dev["train"], dev=train_dev["test"], test=holdout["test"])
+print(ds)
 ```
 
 ```python
@@ -467,12 +471,14 @@ def compute_metrics(eval_pred):
 
 args = TrainingArguments(
     output_dir="ner-out", num_train_epochs=5, learning_rate=5e-5, warmup_steps=60, weight_decay=0.01,
-    per_device_train_batch_size=32, per_device_eval_batch_size=64, eval_strategy="epoch", save_strategy="no",
+    per_device_train_batch_size=32, per_device_eval_batch_size=64,
+    eval_strategy="epoch", save_strategy="epoch", save_total_limit=1, load_best_model_at_end=True, metric_for_best_model="f1",
     fp16=True, logging_steps=50, report_to="none", seed=0,
 )
-trainer = Trainer(model=model, args=args, train_dataset=tokenized["train"], eval_dataset=tokenized["test"],
+trainer = Trainer(model=model, args=args, train_dataset=tokenized["train"], eval_dataset=tokenized["dev"],
                   data_collator=DataCollatorForTokenClassification(tokenizer), compute_metrics=compute_metrics)
 trainer.train()
+# 開発セットの F1 が最も高かったモデルで、テストセットを 1 回だけ評価する
 out = trainer.predict(tokenized["test"])
 print(classification_report(*to_tags(out.predictions, out.label_ids), digits=3))
 ```
@@ -480,13 +486,14 @@ print(classification_report(*to_tags(out.predictions, out.label_ids), digits=3))
 ```python
 from transformers import pipeline
 
-ner = pipeline("token-classification", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=0)
+ner = pipeline("token-classification", model=trainer.model, tokenizer=tokenizer, aggregation_strategy="simple", device=0)
 text = "ソニーグループの吉田憲一郎会長は、東京都港区の本社で新型プレイステーションを発表した。"
 for e in ner(text):
     print(text[e["start"]:e["end"]], e["entity_group"], round(float(e["score"]), 2))
 ```
 
-- T4 GPU で 5 エポック約 5 分、エンティティ単位の F1 は 0.83 前後。
+- データを学習・開発・テスト（約 70・10・20%）に 3 分割し、各エポックの後に開発セットのエンティティ F1 を計算して最良のチェックポイント（ここでは 5 エポック目、開発 F1 0.812）を復元し、テストセットは最後に 1 回だけ評価した。
+- 検証環境の L4 GPU では 5 エポックの学習に約 2 分かかり、テストセットでは micro F1 が 0.825、macro F1 が 0.805（人名 0.907、地名 0.864、法人名 0.844 など）だった。
 - ここではサブワードすべてにラベルを付けている（先頭だけに付けて残りを -100 にする流儀もある）。評価は本来、単語や文字の単位に戻して行うのが厳密。
 - XLM-R のトークナイザは、文頭や空白の後に単独の `▁` トークンを置き、その文字位置を次の文字と同じ `(0, 1)` のように返す。そのまま位置で判定すると `▁` と次のトークンの両方が `B-` になり、推論時に「ソ」と「ソニーグループ」のように同じ固有表現が二重に出る。
 - 日本語特化の BERT (`tohoku-nlp/bert-base-japanese-v3`) のほうが精度は高いが、トークナイザが文字位置を返さないので、位置合わせを自分で実装する必要がある。

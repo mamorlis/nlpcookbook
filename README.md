@@ -6,14 +6,15 @@
 - 日本語のテキスト処理を中心に、英語・多言語も扱います。
 - 各ノートブックは上から順に実行するだけで動きます（必要なライブラリのインストールを含む）。
 - 実行結果を埋め込んであるので、GitHub 上で眺めるだけでも使えます。
+- 理論や背景を体系的に学びたい方は、姉妹編の [自然言語処理の教科書](https://github.com/mamorlis/nlpbook) もあわせてご覧ください。
 
 ## 初めての方へ
 
 次の3件は CPU で試せます。リンク先で実行例を読み、自分の文章で試すときは「Open In Colab」を開いてください。
 
-- [全角・半角の表記をそろえる](notebooks/02_string/nfkc.ipynb)
-- [Janome で日本語の文を単語に分ける](notebooks/03_japanese_tokenization/janome.ipynb)
-- [記事名を指定して Wikipedia の本文を取得する](notebooks/01_data_io/wikipedia_api.ipynb)
+- 02-03 [Unicode 正規化 (NFKC) で全角英数・半角カナを揃える](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/02_string/nfkc.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/02_string/nfkc.ipynb)
+- 03-18 [Janome で形態素解析する (Pure Python)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/janome.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/janome.ipynb)
+- 01-02 [Wikipedia の記事本文を API で取得する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/01_data_io/wikipedia_api.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/01_data_io/wikipedia_api.ipynb)
 
 目次の ⚡ は GPU ランタイム推奨、🔑 は API キーが必要なレシピです。
 
@@ -383,7 +384,7 @@ API で大きなモデルを使う。Colab の組み込み AI、無料枠のあ�
 
 ### 16. LLM の評価と分析
 
-LLM を比べ、その性質を調べる。日本語のベンチマークでの比較、LLM に生成文を採点させる方法（LLM-as-a-judge）、量子化による性能の低下、データ汚染の確認、自信のない誤答の検出、名前や属性による判断の偏り、有害な依頼の拒否と過剰な拒否、LLM が生成した文章の検出と透かし。
+LLM を比べ、その性質を調べる。日本語のベンチマークでの比較、LLM に生成文を採点させる方法 (LLM-as-a-judge)、量子化による性能の低下、データ汚染の確認、自信のない誤答の検出、名前や属性による判断の偏り、有害な依頼の拒否と過剰な拒否、LLM が生成した文章の検出と透かし。
 
 | # | やりたいこと | Colab |
 |---|---|---|

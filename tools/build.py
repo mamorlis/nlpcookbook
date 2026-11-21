@@ -15,6 +15,7 @@ import concurrent.futures as cf
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -25,6 +26,18 @@ SRC = ROOT / "recipes"
 OUT = ROOT / "notebooks"
 REPO = "mamorlis/nlpcookbook"
 BRANCH = "main"
+COLAB_BADGE = "https://colab.research.google.com/assets/colab-badge.svg"
+STARTER_SLUGS = ("nfkc", "janome", "wikipedia_api")
+README_FOOTER = (
+    "\n\n## 使い方\n\n"
+    "- **Colab で開く**: 目次のバッジをクリックします。自分用に書き換えるときは「ドライブにコピーを保存」してください。\n"
+    "- **Google Drive に置く**: `notebooks/` 以下を Drive の `Colab Notebooks/nlpcookbook/` にコピーすれば、Drive から直接開けます。\n\n"
+    "## レシピの追加・修正\n\n"
+    "ノートブックは `recipes/*.md` から自動生成しています。`.ipynb` を直接編集せず、Markdown を編集してから\n"
+    "`python tools/build.py` を実行してください。詳しくは [CONTRIBUTING.md](https://github.com/mamorlis/nlpcookbook/blob/main/CONTRIBUTING.md) を参照。\n\n"
+    "## ライセンス\n\n"
+    "[Apache License 2.0](https://github.com/mamorlis/nlpcookbook/blob/main/LICENSE)\n"
+)
 
 HEAD_RE = re.compile(r"^## (.+?)\s*\{([a-z0-9_]+)((?:\s+[a-z]+)*)\}\s*$")
 FENCE_RE = re.compile(r"^```python\s*$")
@@ -141,7 +154,7 @@ def code_cell(src: str) -> dict:
 
 
 def to_notebook(r: Recipe) -> dict:
-    badge = f"[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)]({r.colab_url})"
+    badge = f"[![Open In Colab]({COLAB_BADGE})]({r.colab_url})"
     notes = []
     if "gpu" in r.tags:
         notes.append("GPU ランタイム推奨（ランタイム → ランタイムのタイプを変更 → T4 GPU）")
@@ -243,7 +256,6 @@ def execute(r: Recipe, timeout: int) -> tuple[Recipe, dict | None, str]:
 def preinstall(recipes: list[Recipe]) -> None:
     """並列実行中に pip が競合しないよう、必要なパッケージを先にまとめて入れておく。"""
     import shlex
-    import subprocess
 
     for line in sorted({ln.strip() for r in recipes for kind, src in r.cells if kind == "code"
                         for ln in src.splitlines() if ln.startswith("!pip install")}):
@@ -267,7 +279,48 @@ def dump(nb: dict, path: Path) -> None:
     path.write_text(json.dumps(nb, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 
 
-def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
+def cuda_available() -> bool:
+    """実行環境の Python で CUDA が使えるかを 1 回だけ確認する。"""
+    res = subprocess.run(
+        [sys.executable, "-c", "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)"],
+        capture_output=True,
+    )
+    return res.returncode == 0
+
+
+def build_readme(chapters: list[tuple[str, str, list[Recipe]]]) -> str:
+    """README.md 全体（冒頭・初めての方へ・目次・末尾）を組み立てて返す。"""
+    by_slug = {r.slug: r for _, _, rs in chapters for r in rs}
+    starter_lines = []
+    for slug in STARTER_SLUGS:
+        r = by_slug.get(slug)
+        if r is None:
+            raise ValueError(f"スターターレシピが見つかりません: {slug}")
+        badge = f"[![Open In Colab]({COLAB_BADGE})]({r.colab_url})"
+        starter_lines.append(f"- {r.ident} [{r.title}]({r.github_url}) {badge}")
+
+    header_lines = [
+        "# 自然言語処理クックブック",
+        "",
+        "自然言語処理の「やりたいこと」に対して「こうやればいい」をまとめた小ネタ集です。",
+        "1 レシピ = 1 ノートブックで、すべて Google Colab でそのまま実行できます。",
+        "",
+        "- 日本語のテキスト処理を中心に、英語・多言語も扱います。",
+        "- 各ノートブックは上から順に実行するだけで動きます（必要なライブラリのインストールを含む）。",
+        "- 実行結果を埋め込んであるので、GitHub 上で眺めるだけでも使えます。",
+        "- 理論や背景を体系的に学びたい方は、姉妹編の [自然言語処理の教科書](https://github.com/mamorlis/nlpbook) もあわせてご覧ください。",
+        "",
+        "## 初めての方へ",
+        "",
+        "次の3件は CPU で試せます。リンク先で実行例を読み、自分の文章で試すときは「Open In Colab」を開いてください。",
+        "",
+        *starter_lines,
+        "",
+        "目次の ⚡ は GPU ランタイム推奨、🔑 は API キーが必要なレシピです。",
+        "",
+        "## 目次",
+    ]
+
     total = sum(len(rs) for _, _, rs in chapters)
     main_total = sum(len(rs) for _, _, rs in chapters if rs and isinstance(rs[0].chapter_no, int))
     count = f"全 {main_total} レシピ（付録を含めると {total} レシピ）" if main_total != total else f"全 {total} レシピ"
@@ -286,18 +339,24 @@ def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
         lines += ["| # | やりたいこと | Colab |", "|---|---|---|"]
         for r in rs:
             mark = "".join(m for t, m in (("gpu", " ⚡"), ("key", " 🔑")) if t in r.tags)
-            badge = f"[![Colab](https://colab.research.google.com/assets/colab-badge.svg)]({r.colab_url})"
+            badge = f"[![Colab]({COLAB_BADGE})]({r.colab_url})"
             lines.append(f"| {r.ident} | [{r.title}]({r.github_url}){mark} | {badge} |")
     lines += ["", "⚡ = GPU ランタイム推奨、🔑 = API キーが必要"]
     block = "\n".join(lines)
+
     readme = ROOT / "README.md"
-    text = readme.read_text(encoding="utf-8")
-    start, end = "<!-- INDEX:START -->", "<!-- INDEX:END -->"
-    if start not in text:
-        raise SystemExit("README.md に INDEX マーカーがありません")
-    pre, rest = text.split(start, 1)
-    post = rest.split(end, 1)[1]
-    readme.write_text(f"{pre}{start}\n{block}\n{end}{post}", encoding="utf-8")
+    end = "<!-- INDEX:END -->"
+    if readme.exists():
+        text = readme.read_text(encoding="utf-8")
+        post = text.split(end, 1)[1] if end in text else README_FOOTER
+    else:
+        post = README_FOOTER
+    header = "\n".join(header_lines)
+    return f"{header}\n\n<!-- INDEX:START -->\n{block}\n{end}{post}"
+
+
+def write_index(chapters: list[tuple[str, str, list[Recipe]]]) -> None:
+    (ROOT / "README.md").write_text(build_readme(chapters), encoding="utf-8")
 
 
 def chapter_heading(no: int | str, title: str) -> str:
@@ -320,6 +379,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", action="store_true", help="レシピを実行して出力を埋め込む")
     ap.add_argument("--force", action="store_true", help="実行済みでも再実行する")
+    ap.add_argument("--allow-cpu-for-gpu", action="store_true", help="CPU 環境でも gpu タグのレシピを実行する")
     ap.add_argument("-k", default="", help="スラッグまたは章ディレクトリ名の部分一致で絞り込む")
     ap.add_argument("-j", type=int, default=3, help="並列数")
     ap.add_argument("--timeout", type=int, default=1200)
@@ -332,6 +392,8 @@ def main() -> None:
     if dup:
         raise SystemExit(f"スラッグが重複しています: {sorted(dup)}")
 
+    has_cuda = cuda_available() if args.run and not args.allow_cpu_for_gpu else False
+
     todo: list[Recipe] = []
     wanted = set()
     for r in recipes:
@@ -343,10 +405,13 @@ def main() -> None:
         selected = args.k in r.slug or args.k in r.chapter_dir
         runnable = "norun" not in r.tags and "key" not in r.tags
         if args.run and runnable and selected and (args.force or not reusable):
-            todo.append(r)
-            if not old:
-                dump(to_notebook(r), path)
-            continue
+            if "gpu" in r.tags and not args.allow_cpu_for_gpu and not has_cuda:
+                print(f"skip {r.ident} {r.slug} (gpu recipe on CPU host; pass --allow-cpu-for-gpu to override)")
+            else:
+                todo.append(r)
+                if not old:
+                    dump(to_notebook(r), path)
+                continue
         nb = to_notebook(r)
         if reusable:  # コードが同じなら実行済みの出力を引き継ぐ
             code_old = [c for c in old["cells"] if c["cell_type"] == "code"]

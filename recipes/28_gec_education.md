@@ -1578,7 +1578,7 @@ for q in kept:
 
 ## 作文を自動で採点する {essay_scoring}
 
-学習者の作文に、人が付けるのと近い点数を自動で付けたい。特徴量による回帰と文埋め込みによる回帰を比べ、採点者間の一致度と同じ指標 (QWK) で評価する。
+学習者の作文に、人が付けるのと近い点数を自動で付けたい。手作りの特徴量による回帰と文埋め込みによる回帰（および両者の結合）を比べ、四捨五入と分位点による境界推定の違いも確かめながら、採点者間の一致度と同じ指標 (QWK) で評価する。
 
 ```python
 !pip install -q datasets sentence-transformers
@@ -1596,10 +1596,9 @@ print(df.groupby("essay_set")["domain1_score"].agg(["count", "min", "max", "mean
 ```
 
 ```python
-essays = df[df["essay_set"] == 1].dropna(subset=["domain1_score"]).sample(frac=1, random_state=0).reset_index(drop=True)     # 課題 1 (意見文、2〜12 点)
+essays = df[df["essay_set"] == 1].dropna(subset=["domain1_score"]).sample(frac=1, random_state=0).reset_index(drop=True)     # 課題 1（意見文、2〜12 点）
 essays["score"] = essays["domain1_score"].astype(int)
-train, test = essays.iloc[:1000], essays.iloc[1000:]
-print(len(train), "件で学習 /", len(test), "件で評価")
+print(len(essays), "件の作文を 5 分割交差検証で評価")
 
 def handcrafted(text):
     words = re.findall(r"[A-Za-z']+", text.lower())
@@ -1608,44 +1607,75 @@ def handcrafted(text):
             len(sentences), len(words) / (len(sentences) + 1), text.count(","), sum(len(w) >= 8 for w in words) / (len(words) + 1)]
 
 names = ["語数", "log 語数", "異なり語の割合", "平均語長", "文数", "平均文長", "コンマの数", "長い語の割合"]
-X_train, X_test = np.array([handcrafted(t) for t in train["essay"]]), np.array([handcrafted(t) for t in test["essay"]])
-print(pd.Series({n: np.corrcoef(X_train[:, i], train["score"])[0, 1] for i, n in enumerate(names)}).round(3).to_string())
+X = np.array([handcrafted(t) for t in essays["essay"]])
+y = essays["score"].to_numpy()
+print(pd.Series({n: np.corrcoef(X[:, i], y)[0, 1] for i, n in enumerate(names)}).round(3).to_string())
 ```
 
 ```python
 from sentence_transformers import SentenceTransformer
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import RidgeCV
 from sklearn.metrics import cohen_kappa_score
-from sklearn.pipeline import make_pipeline
+from sklearn.model_selection import KFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
 
 def qwk(y_true, y_pred):
     """重み付き κ 係数 (quadratic weighted kappa): 点数の差が大きい食い違いほど重く罰する。作文採点の標準的な指標"""
-    y_pred = np.clip(np.rint(y_pred), y_true.min(), y_true.max()).astype(int)
     return cohen_kappa_score(y_true, y_pred, weights="quadratic")
 
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
-E_train = embedder.encode(train["essay"].tolist(), batch_size=32, normalize_embeddings=True)
-E_test = embedder.encode(test["essay"].tolist(), batch_size=32, normalize_embeddings=True)
+E = embedder.encode(essays["essay"].tolist(), batch_size=32, normalize_embeddings=True, show_progress_bar=False)
 
-y_train, y_test = train["score"].to_numpy(), test["score"].to_numpy()
-models = {
-    "語数だけ": (X_train[:, :2], X_test[:, :2]),
-    "手作りの特徴量": (X_train, X_test),
-    "文埋め込み": (E_train, E_test),
-    "特徴量 + 文埋め込み": (np.hstack([X_train, E_train * 10]), np.hstack([X_test, E_test * 10])),
-}
-for label, (a, b) in models.items():
-    pred = make_pipeline(StandardScaler(), Ridge(alpha=10.0)).fit(a, y_train).predict(b)
-    print(f"{label}: QWK = {qwk(y_test, pred):.3f} / 平均絶対誤差 = {np.abs(pred - y_test).mean():.2f}")
+alphas = np.logspace(-1, 3, 9)
+cv = KFold(5, shuffle=True, random_state=0)
+labels = ["語数だけ", "手作りの特徴量", "文埋め込み", "特徴量 + 文埋め込み"]
+oof_cont = {k: np.empty(len(y)) for k in labels}
+oof_cut = {k: np.empty(len(y), dtype=int) for k in labels}
+s_min, s_max = int(y.min()), int(y.max())
+
+# 手作りの特徴量 (X) だけを訓練データで標準化し、L2 正規化済みの文埋め込み (E) はそのまま結合して重みを保つ
+for tr, te in cv.split(X):
+    X_train, X_test, E_train, E_test, y_train = X[tr], X[te], E[tr], E[te], y[tr]
+    scaler = StandardScaler().fit(X_train)
+    Xtr_s, Xte_s = scaler.transform(X_train), scaler.transform(X_test)
+    qs = [(y_train <= k).mean() for k in range(int(y_train.min()), int(y_train.max()))]
+    feats = {
+        "語数だけ": (Xtr_s[:, :2], Xte_s[:, :2]),
+        "手作りの特徴量": (Xtr_s, Xte_s),
+        "文埋め込み": (E_train, E_test),
+        "特徴量 + 文埋め込み": (np.hstack([Xtr_s, E_train]), np.hstack([Xte_s, E_test])),
+    }
+    for label, (a, b) in feats.items():
+        reg = RidgeCV(alphas=alphas).fit(a, y_train)
+        pred_test = reg.predict(b)
+        oof_cont[label][te] = pred_test
+        # 回帰の予測は平均の側に縮むため、訓練データの交差検証予測から正解分布に合う分位点境界を決める
+        pred_train = cross_val_predict(RidgeCV(alphas=alphas), a, y_train, cv=cv)
+        cuts = np.quantile(pred_train, qs)
+        oof_cut[label][te] = np.digitize(pred_test, cuts) + int(y_train.min())
+
+rows = []
+for label in labels:
+    pred_rint = np.clip(np.rint(oof_cont[label]), s_min, s_max).astype(int)
+    rows.append({
+        "特徴量": label,
+        "QWK（四捨五入）": qwk(y, pred_rint),
+        "QWK（分位点）": qwk(y, oof_cut[label]),
+        "平均絶対誤差": np.abs(oof_cont[label] - y).mean(),
+        "標準偏差（連続）": oof_cont[label].std(),
+        "標準偏差（分位点）": oof_cut[label].std(),
+    })
+print(pd.DataFrame(rows).set_index("特徴量").round(3).to_string())
+print(f"正解の標準偏差 = {y.std():.3f}")
 
 human = essays.dropna(subset=["rater1_domain1", "rater2_domain1"])
-print("参考: 人の採点者 2 人の間の QWK =", round(cohen_kappa_score(human["rater1_domain1"].astype(int), human["rater2_domain1"].astype(int), weights="quadratic"), 3))
+print("参考: 人の採点者 2 人の間の QWK =", round(qwk(human["rater1_domain1"].astype(int), human["rater2_domain1"].astype(int)), 3))
 ```
 
-- 作文の長さだけで、点数のかなりの部分が説明できてしまう。新しい手法は、必ず「語数だけ」のベースラインと比べる。長さだけを見るモデルは、意味のない長文に高得点を付けてしまう。
-- この課題の点数は 2 人の採点者の点数の合計なので、1 人の採点者どうしの一致度 (QWK 0.70) より、モデルと合計点の一致度のほうが高く出る。人と同等以上に見えても、比べている対象が違う点に注意する。
-- 文埋め込みは、この課題では手作りの特徴量より大きく劣った。一般的な文埋め込みは文章の話題を表すもので、文章の巧拙はあまり反映しない。
+- 作文の長さだけで、点数のかなりの部分が説明できてしまう。新しい手法は、必ず「語数だけ」のベースライン (QWK 0.788) と比べる。長さだけを見るモデルは、意味のない長文に高得点を付けてしまう。
+- この課題の点数は 2 人の採点者の点数の合計なので、1 人の採点者どうしの一致度 (QWK 0.704) より、モデルと合計点の一致度のほうが高く出る。人と同等以上に見えても、比べている対象が違う点に注意する。
+- 特徴量と文埋め込みを混ぜるときは、スケールの揃え方に注意する。手作りの特徴量 (X) と L2 正規化済みの文埋め込み (E) をまとめて `StandardScaler` に掛けると、384 次元の埋め込みすべての分散が 1 に引き伸ばされて（合計分散が約 384 対 8 になり）、手作りの特徴量が埋もれてしまう（さらに列単位の標準化なので、結合前に定数倍しても打ち消される）。ここでは `X_train` だけを `StandardScaler` で標準化し、`E` は L2 正規化したまま結合して `RidgeCV` で正則化の強さを選ぶことで、「特徴量 + 文埋め込み」（QWK 0.839、平均絶対誤差 0.602）が「手作りの特徴量」（QWK 0.834、平均絶対誤差 0.608）と「文埋め込み」（QWK 0.636、平均絶対誤差 0.905）の両方を上回った。
+- 回帰の予測値は平均の側へ縮むため（たとえば「文埋め込み」では連続予測の標準偏差が 0.980 と正解の 1.503 よりかなり小さい）、単純に `np.rint` で四捨五入すると中央の点数に偏りやすい。訓練データ内での交差検証予測を使い、訓練データの正解分布と同じ累積割合の分位点を `np.quantile` で求めて `np.digitize` で離散化すると、予測の散らばりが正解分布に近づき、すべての手法で QWK が上がった（特に縮みの大きい「文埋め込み」では 0.590 から 0.636 へ +0.046 改善）。
 - 評価には QWK（重み付き κ）を使う。人の採点者どうしの一致度と同じ物差しなので、「人と同じくらい一致している」かどうかを直接比べられる。
 - 課題（プロンプト）ごとに採点基準も点数の範囲も違う。ある課題で学習したモデルは、別の課題にはそのまま使えない。
 - 自動採点は、内容の正しさや論理の一貫性をほとんど見ていない。重要な判定に使うときは、人の採点と併用し、極端な入力（丸写し、無関係な文章）への挙動を確かめる。
