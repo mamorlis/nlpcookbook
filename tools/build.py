@@ -181,8 +181,21 @@ def to_notebook(r: Recipe) -> dict:
 
 
 MAX_LINES = 60
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ANSI_RE = re.compile(r"\x1b\[\??[0-9;]*[A-Za-z]")
 WIDGET_RE = re.compile(r"\d+%\|| \[00:00<|^(Text|IntSlider|Output|HBox|VBox)\(")
+INSTALL_PREFIXES = (
+    "!pip install",
+    "%pip install",
+    "!apt install",
+    "!apt-get install",
+    "!python -m spacy download",
+)
+
+
+def is_install_cell(source: str | list[str]) -> bool:
+    """空行とコメント行を除いたすべての行がインストール専用コマンドか判定する。"""
+    lines = [ln.strip() for ln in "".join(source).splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    return bool(lines) and all(ln.startswith(INSTALL_PREFIXES) for ln in lines)
 
 
 def clean_outputs(nb: dict) -> None:
@@ -195,7 +208,7 @@ def clean_outputs(nb: dict) -> None:
         cell["execution_count"] = count
         cell["metadata"] = {}
         outs = []
-        if "".join(cell["source"]).lstrip().startswith(("!pip", "%pip", "!apt", "!python -m spacy download")):
+        if is_install_cell(cell["source"]):
             cell["outputs"] = []  # インストールのログは残さない
             continue
         for o in cell.get("outputs", []):

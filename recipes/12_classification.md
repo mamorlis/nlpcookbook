@@ -1,6 +1,6 @@
 # テキスト分類
 
-文書にラベルを付ける。古典的な TF-IDF と分類結果の分析、その応用として文体の特徴から書き手を推定する方法（計量文体学）から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、LLM による学習データの合成、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニングと知識蒸留、言語間転移、感情分析（学習済みモデル、評価極性辞書、8 つの感情の強さ、観点ごとの極性）、有害な表現の検出まで。
+文書にラベルを付ける。古典的な TF-IDF と分類結果の分析、その応用として文体の特徴から書き手を推定する方法（計量文体学）から、文埋め込みによる分類とゼロショット分類、少ないラベルで学習する方法（データ拡張、LLM による学習データの合成、能動学習、弱教師あり学習、ラベル誤りの検出、グラフによる半教師あり学習）、BERT のファインチューニングと知識蒸留、言語間転移、感情分析（学習済みモデル、評価極性辞書、8 つの感情の強さ、観点ごとの極性）、有害な表現の検出まで。テキスト分類の手法やデータ整備については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章・第 5 章も参照。
 
 ## TF-IDF とロジスティック回帰で日本語のニュース記事を分類する {tfidf_logreg_ja}
 
@@ -432,7 +432,7 @@ import nltk
 nltk.download("reuters", quiet=True)
 from nltk.corpus import reuters
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, hamming_loss
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.svm import LinearSVC
@@ -454,13 +454,54 @@ clf = OneVsRestClassifier(LinearSVC(C=1)).fit(X_train, Y_train)   # ラベルご
 pred = clf.predict(X_test)
 print("micro-F1:", round(f1_score(Y_test, pred, average="micro"), 3),
       " macro-F1:", round(f1_score(Y_test, pred, average="macro", zero_division=0), 3),
+      " samples-F1:", round(f1_score(Y_test, pred, average="samples", zero_division=0), 3),
+      " hamming_loss:", round(hamming_loss(Y_test, pred), 4),
       " 完全一致率:", round((pred == Y_test).all(axis=1).mean(), 3))
 for i in range(3):
     print("正解:", mlb.inverse_transform(Y_test[i:i + 1])[0], " 予測:", mlb.inverse_transform(pred[i:i + 1])[0])
 ```
 
+```python
+# 訓練データの 3 分割交差検証で予測確率を求め、学習側だけでしきい値を選ぶ
+import warnings
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_predict
+
+def predict_with_fallback(proba, threshold):
+    """しきい値以上のラベルを選び、全ラベルが未満の文書には最大確率の 1 ラベルを割り当てる"""
+    pred = (proba >= threshold).astype(int)
+    empty = pred.sum(axis=1) == 0
+    if empty.any():
+        pred[empty, proba[empty].argmax(axis=1)] = 1
+    return pred
+
+lr = OneVsRestClassifier(LogisticRegression(C=10, solver="liblinear"))
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", UserWarning)   # 分割の片側で正例が 0 件になる稀なラベルの警告を抑える
+    proba_cv = cross_val_predict(lr, X_train, Y_train, cv=3, method="predict_proba")
+
+thresholds = np.round(np.arange(0.15, 0.56, 0.05), 2)
+best_th = max(thresholds, key=lambda th: f1_score(Y_train, predict_with_fallback(proba_cv, th), average="micro"))
+print(f"CV で選んだしきい値: {best_th:.2f} (CV micro-F1 = {f1_score(Y_train, predict_with_fallback(proba_cv, best_th), average='micro'):.3f})")
+
+lr.fit(X_train, Y_train)
+proba_test = lr.predict_proba(X_test)
+for name, pred_lr in [("既定 (0.50)", (proba_test >= 0.50).astype(int)),
+                      (f"CV 選択 ({best_th:.2f})", predict_with_fallback(proba_test, best_th))]:
+    print(f"{name:14} micro-F1: {f1_score(Y_test, pred_lr, average='micro'):.3f}"
+          f"  macro-F1: {f1_score(Y_test, pred_lr, average='macro', zero_division=0):.3f}"
+          f"  samples-F1: {f1_score(Y_test, pred_lr, average='samples', zero_division=0):.3f}"
+          f"  hamming_loss: {hamming_loss(Y_test, pred_lr):.4f}"
+          f"  完全一致率: {(pred_lr == Y_test).all(axis=1).mean():.3f}"
+          f"  空予測: {int((pred_lr.sum(axis=1) == 0).sum())} 件")
+```
+
 - micro-F1 は頻出ラベルに、macro-F1 は稀なラベルに引っ張られる。両者の差が大きいのは、稀なラベルが当たっていない証拠。
+- `Samples-F1` (`average="samples"`) は各文書の正解集合と予測集合の F1 を文書全体で平均した値で、文書単位の取りこぼしが見えやすい。`Hamming Loss` (`hamming_loss`) は全「文書 × ラベル」のうち誤った割合を表し、小さいほど良い（ラベル数に対して正解ラベルが少ないデータでは 0 に近い小さな値になるため、F1 や完全一致率とあわせて比べる）。
+- ラベル数が多いマルチラベル分類では、既定のしきい値 `0.50` のままだとどのラベルも基準を超えない空予測が増えやすい。訓練データの交差検証 (CV) で得た予測確率から学習側だけでしきい値を選び、すべて未満になった文書に最大確率の 1 ラベルを割り当てるフォールバックを入れると、空予測を防いで性能を改善できる（テストデータを見てしきい値を決めないこと）。
 - BERT でやる場合は `AutoModelForSequenceClassification(..., problem_type="multi_label_classification")` とし、ラベルを float の 0/1 ベクトルで与える（損失が BCE になる）。
+- 評価指標の比較や訓練 CV による閾値選択の詳細は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 2 章の [多クラス分類と多ラベル分類（評価指標と訓練 CV による閾値選択）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch2_multilabel.ipynb) も参照。
 
 ## 学習した分類器を保存・読み込みする {save_sklearn_model}
 

@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd のような辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -555,6 +555,7 @@ for s in ["附属病院でシュミレーションを行なう", "付属病院�
 ```
 
 - `dictionary_form()` は活用を戻すだけ、`normalized_form()` は表記ゆれまで統一する。頻度集計や検索では後者が便利。
+- 専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
 
 ## Janome で形態素解析する (Pure Python) {janome}
 
@@ -616,6 +617,7 @@ print(list(t.tokenize(text, wakati=True)))
 ```
 
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
+- `SudachiPy` で専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
 - 辞書を作らずに済ませるなら、この章の「連続する名詞をつなげて複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
 ## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
@@ -1359,6 +1361,9 @@ for s in split_sentences(text):
 # 括弧を気にしなくてよいなら 1 行で書ける
 print(re.findall(r"[^。！？]+[。！？]*", "今日は晴れ。明日は雨？そうかも！"))
 ```
+
+- 単純な規則では、括弧内の句点だけでなく「モーニング娘。」のように句点を含む固有名詞や、略語・小数点などでも誤って文を切ってしまうことがある（背景や開発サイクルでの扱いは姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 1 章の [自然言語処理システムの開発サイクル](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch1_design_cycle.ipynb) を参照）。
+- 改行・絵文字・小数点・URL などにも対応した既存ライブラリの比較は、次のレシピ「日本語の文分割をライブラリで行って比べる」を参照。
 
 ## 日本語の文分割をライブラリで行って比べる {sentence_split_libs}
 
