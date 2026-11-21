@@ -1,6 +1,6 @@
 # サブワードとトークナイザ
 
-SentencePiece や Hugging Face のトークナイザを学習・利用し、モデルに入れる ID 列を作る。BPE を自分で実装して仕組みを確かめるレシピは、付録の「仕組みを理解するための実装」にある。
+SentencePiece や Hugging Face のトークナイザを学習・利用し、モデルに入れる ID 列を作る。BPE を自分で実装して仕組みを確かめるレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析やサブワード分割の理論と演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [形態素解析とサブワード分割](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_morphology_ner.ipynb)（Subword Regularization 演習を含む）も参照。
 
 ## SentencePiece でサブワードモデルを学習する {sentencepiece_train}
 
@@ -87,6 +87,7 @@ for pieces in sp.nbest_encode(text, nbest_size=3, out_type=str):
 
 - `alpha` が小さいほど多様な（確率の低い）分割が出る。`nbest_size=-1` は全候補からサンプリング。
 - 学習時だけサンプリングし、評価時は最尤分割を使う。
+- サブワード分割と Subword Regularization を扱う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [形態素解析とサブワード分割](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_morphology_ner.ipynb)（Subword Regularization 演習を含む）も参照。
 
 ## Hugging Face tokenizers で BPE / WordPiece を学習する {tokenizers_train}
 

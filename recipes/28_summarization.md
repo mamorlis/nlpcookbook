@@ -48,6 +48,7 @@ for s in summary:
 - 類似度の計算を TF-IDF から文埋め込みに替えると、言い換えにも強くなる。
 - ニュース記事では「先頭の 3 文を取る」(Lead-3) が非常に強いベースラインになる。要約手法を評価するときは必ず比較する（この章の「先頭の数文を要約とする (Lead-3) ベースラインと比べる」を参照）。
 - 英語を含む各種の抽出型要約アルゴリズムは `sumy` にまとまっている。
+- Lead や TF-IDF・TextRank などの抽出型ベースラインから Pointer-Generator の抽象型要約、ROUGE による評価までを一貫して試す実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [文書要約のベースライン・抽象型要約・ROUGE とハルシネーション](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_summarization.ipynb)（抽出型・Pointer-Generator の抽象型要約・ハルシネーションと ROUGE の限界を含む）も参照。
 
 ## 要約を ROUGE で評価する（日本語対応） {rouge_ja}
 
@@ -357,6 +358,7 @@ for label, summary in summaries.items():
 - この例では、NLI は「費用は年間約 60 億円…」の文を矛盾 0.95 と判定し、桁違いの数値（6 億と 60 億）の誤りを見つけた。ただし、数値の誤りをいつも見つけられるとは限らない。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
 - 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
 - 忠実であることと、良い要約であることは別。重要な内容を落としていないか（網羅性）は、参照要約との比較や人手で確かめる。
+- 生成型要約におけるハルシネーションの事例分析や ROUGE の限界を検証する実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [文書要約のベースライン・抽象型要約・ROUGE とハルシネーション](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_summarization.ipynb)（抽出型・Pointer-Generator の抽象型要約・ハルシネーションと ROUGE の限界を含む）も参照。
 
 ## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
 

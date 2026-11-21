@@ -1,6 +1,6 @@
 # 仕組みを理解するための実装
 
-ライブラリを使えば数行で済む処理を、あえて自分で実装して仕組みを確かめるレシピ。単語分割と品詞タグ付け（系列ラベリング、HMM、ビタビアルゴリズム、MEMM と線形鎖 CRF によるラベルバイアス問題）、BPE、n-gram 言語モデル、カウントベースの単語ベクトル、GPT の事前学習の学習ループ、SimCSE、ラベル伝播と適合率・再現率・F1、LLM の透かし、構文解析のアルゴリズム、論理式による意味表現、転置索引と BM25、規則によるチャットボット、IBM Model 1 と翻訳の評価指標（BLEU・ROUGE・学習型指標）、抽出型要約（TextRank・LexRank）、スペル訂正。実務で使うときのライブラリ版がある場合は、各レシピの注意書きに本文のレシピを挙げた。各手法の理論や定義式の解説については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の各章の実装演習も参照。
+ライブラリを使えば数行で済む処理を、あえて自分で実装して仕組みを確かめるレシピ。単語分割と品詞タグ付け（系列ラベリング、HMM、ビタビアルゴリズム、MEMM と線形鎖 CRF によるラベルバイアス問題）、BPE、n-gram 言語モデル、カウントベースの単語ベクトル、GPT の事前学習の学習ループ、SimCSE、ラベル伝播と適合率・再現率・F1、構文解析のアルゴリズム、論理式による意味表現、転置索引と BM25、LLM の透かし、規則によるチャットボット、IBM Model 1 と翻訳の評価指標（BLEU・ROUGE・学習型指標）、抽出型要約（TextRank・LexRank）、スペル訂正。実務で使うときのライブラリ版がある場合は、各レシピの注意書きに本文のレシピを挙げた。各手法の理論や定義式の解説については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の各章の実装演習も参照。
 
 ## 単語分割を文字単位の系列ラベリングとして解く {char_segmentation}
 
@@ -1066,211 +1066,6 @@ print("抽出の P/R/F1:", [round(x, 3) for x in prf(n, len(pred_set) - n, len(g
 - 「macro-F1」には「クラスごとの F1 の平均」と「macro 適合率と macro 再現率の調和平均」の 2 つの流儀があり、値が違う。前者が一般的。
 - 実務でライブラリを使って同じことをする版は、評価指標と統計的検定の章の「scikit-learn で適合率・再現率・F1 を集計する（micro / macro 平均と抽出の評価）」。
 
-## LLM の出力に入れる透かし（green リスト）を自分で実装し、統計的に検出する {llm_watermark_scratch gpu}
-LLM が生成した文章に、読んでもわからない「透かし」（ウォーターマーク）を入れておき、あとから文章だけを見て、自分のモデルが生成したものかを統計的に判定したい。
-
-```python
-# Colab の T4 で 2 分程度
-import math
-import re
-import numpy as np
-import pandas as pd
-import sentencepiece as spm
-import torch
-from huggingface_hub import hf_hub_download
-from tokenizers import models
-from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
-
-BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-DTYPE = torch.bfloat16 if BF16 else torch.float16
-name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # SB Intuitions、MIT ライセンス
-
-def fix_sarashina_tokenizer(tokenizer, name):
-    """transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
-    元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）"""
-    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
-    tokenizer.backend_tokenizer.model = models.Unigram(
-        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-    return tokenizer
-
-tokenizer = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(name), name)   # 詳しくは大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書き
-tokenizer.padding_side = "left"
-model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="cuda").eval()
-
-KEY = 15485863   # 透かしの鍵。transformers の WatermarkingConfig の既定値で公開されている値。実際には乱数で選んで秘密にする
-
-def is_green(prev, cur, gamma, key=KEY):
-    """直前のトークン prev と鍵から決まる擬似乱数で、次のトークン cur が green かどうかを決める（語彙の約 γ が green）"""
-    x = (prev * 1_000_003 + cur + key) & 0xFFFFFFFF
-    for _ in range(3):                                   # 整数のハッシュ（ビットをよく混ぜる）
-        x = ((x ^ (x >> 16)) * 0x45D9F3B) & 0xFFFFFFFF
-    return x.double() / 2**32 < gamma
-
-class GreenListWatermark(LogitsProcessor):
-    """green のトークンのロジットに δ を足して、green のトークンを選ばれやすくする"""
-    def __init__(self, gamma, delta):
-        self.gamma, self.delta = gamma, delta
-    def __call__(self, input_ids, scores):
-        vocab = torch.arange(scores.shape[1], device=scores.device)
-        green = is_green(input_ids[:, -1:], vocab[None, :], self.gamma)    # （バッチ, 語彙）の green / red の表
-        return scores + self.delta * green.to(scores.dtype)
-
-def hf_encode(text):
-    return tokenizer(text, add_special_tokens=False)["input_ids"]
-
-def detect(text, gamma, encode=hf_encode):
-    """文章だけから green のトークンの割合を数え、z 検定をする（モデルもプロンプトも要らない。鍵と、生成時と同じトークン化とハッシュが要る）"""
-    ids = torch.tensor(encode(text))
-    T = len(ids) - 1                                    # 最初のトークンは直前のトークンがないので数えない
-    if T < 1:
-        return float("nan")
-    n_green = int(is_green(ids[:-1], ids[1:], gamma).sum())
-    return (n_green - gamma * T) / math.sqrt(T * gamma * (1 - gamma))   # 透かしがなければ、ほぼ標準正規分布に従う
-
-TOPICS = ["猫", "富士山", "コーヒー", "地震", "梅雨", "将棋", "新幹線", "お盆", "俳句", "温泉", "桜", "寿司", "台風", "図書館", "自転車",
-          "歌舞伎", "火山", "味噌", "電子レンジ", "マラソン", "民泊", "花粉症", "城", "相撲", "お茶", "漫画", "雪", "米作り", "神社", "地下鉄",
-          "太陽光発電", "折り紙", "盆栽", "海水浴", "コンビニ", "ラーメン", "囲碁", "書道", "花火", "動物園", "灯台", "鉄道模型", "紅葉", "納豆",
-          "宇宙ステーション", "博物館", "天気予報", "選挙", "郵便", "高齢化", "リサイクル", "睡眠", "ワクチン", "プログラミング", "翻訳", "辞書",
-          "敬語", "方言", "水族館", "キャンプ"]
-prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{t}」について、400 字程度で説明してください。"}],
-                                         add_generation_prompt=True, tokenize=False) for t in TOPICS]
-
-@torch.no_grad()
-def generate(gamma=0.25, delta=0.0, seed=0, max_new_tokens=200):
-    torch.manual_seed(seed)
-    enc = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
-    # generate に渡した処理は、generate が作る温度の処理より前に適用される。温度で割ったあとに δ を足したいので、温度の処理を自分で先に置き、
-    # generate 側は temperature=1.0 にする。モデルの generation_config (temperature 0.7, top_p 0.9, repetition_penalty 1.05) も明示して打ち消す
-    procs = [TemperatureLogitsWarper(0.7)] + ([GreenListWatermark(gamma, delta)] if delta > 0 else [])
-    out = model.generate(**enc, do_sample=True, temperature=1.0, top_p=1.0, top_k=0, repetition_penalty=1.0, max_new_tokens=max_new_tokens,
-                         logits_processor=LogitsProcessorList(procs), pad_token_id=tokenizer.pad_token_id)
-    gen = out[:, enc["input_ids"].shape[1]:]
-    return tokenizer.batch_decode(gen, skip_special_tokens=True), gen
-
-plain, _ = generate()                                      # 透かしなし
-marked, marked_ids = generate(gamma=0.25, delta=2.0)       # 透かしあり (γ = 0.25, δ = 2)
-for label, text in [("透かしなし", plain[0]), ("透かしあり", marked[0])]:
-    print(f"[{label}] z = {detect(text, 0.25):.2f}\n{text[:150]}…\n")
-```
-
-```python
-# 60 件ずつの z スコアの分布を比べる。z > 4 なら「透かしあり」と判定する（偶然 z > 4 になる確率は約 3e-5）
-z_plain = np.array([detect(t, 0.25) for t in plain])
-z_marked = np.array([detect(t, 0.25) for t in marked])
-print(pd.DataFrame({"透かしなし": z_plain, "透かしあり": z_marked}).describe().round(2).T.to_string())
-print(f"z > 4 の割合: 透かしなし {np.mean(z_plain > 4):.2f} / 透かしあり {np.mean(z_marked > 4):.2f}")
-
-# 生成したトークン列のまま数えると z はもっと高い。文章に直してトークン化し直すと、分割が変わる箇所があり、透かしが弱まる
-def generated_tokens(row):
-    return [i for i in row.tolist() if i not in (tokenizer.pad_token_id, tokenizer.eos_token_id)]
-def z_ids(ids, gamma=0.25):
-    ids = torch.tensor(ids)
-    T = len(ids) - 1
-    return (int(is_green(ids[:-1], ids[1:], gamma).sum()) - gamma * T) / math.sqrt(T * gamma * (1 - gamma))
-
-raw_tokenizer = AutoTokenizer.from_pretrained(name)          # 比較用: 直さない（transformers 5 のまま）トークナイザー
-gen_ids = [generated_tokens(row) for row in marked_ids]
-fixed_ids = [hf_encode(t) for t in marked]
-raw_ids = [raw_tokenizer(t, add_special_tokens=False)["input_ids"] for t in marked]
-z_raw = np.array([z_ids(i) for i in raw_ids])
-print(f"z の平均: 生成したトークン列 {np.mean([z_ids(g) for g in gen_ids]):.2f} / 直したトークナイザー {z_marked.mean():.2f} / transformers 5 のまま {z_raw.mean():.2f}")
-print(f"z > 4 の割合: 直したトークナイザー {np.mean(z_marked > 4):.2f} / transformers 5 のまま {np.mean(z_raw > 4):.2f}")
-print(f"生成と同じトークン列に戻った文章の割合: 直したトークナイザー {np.mean([g == f for g, f in zip(gen_ids, fixed_ids)]):.2f}"
-      f" / transformers 5 のまま {np.mean([g == r for g, r in zip(gen_ids, raw_ids)]):.2f}")
-j = next(j for j, (g, f) in enumerate(zip(gen_ids, fixed_ids)) if g != f)       # 直しても同じ列に戻らない文章の例
-k = next(i for i, (a, b) in enumerate(zip(gen_ids[j], fixed_ids[j])) if a != b)
-print("生成:", tokenizer.convert_ids_to_tokens(gen_ids[j][k - 2:k + 4]), "\nトークン化し直し:", tokenizer.convert_ids_to_tokens(fixed_ids[j][k - 2:k + 4]))
-```
-
-```python
-# δ と γ を変えて、検出のしやすさと文章の質（大きなモデルで測ったパープレキシティ）の釣り合いを見る。Colab の T4 で 5〜10 分程度（3B のモデルのダウンロードを含む）
-oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価用の大きなモデル（SB Intuitions、MIT ライセンス）
-oracle_tok = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(oracle_name), oracle_name)
-oracle_tok.padding_side = "left"
-oracle = AutoModelForCausalLM.from_pretrained(oracle_name, dtype=DTYPE, device_map="cuda").eval()
-
-@torch.no_grad()
-def perplexity(prompt, text):
-    """プロンプトを条件にしたときの、生成部分のパープレキシティ"""
-    p = oracle_tok(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    c = oracle_tok(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
-    ids = torch.cat([p, c], dim=1).to(oracle.device)
-    logp = oracle(ids).logits[0, p.shape[1] - 1:-1].float().log_softmax(-1)
-    return math.exp(-logp.gather(1, ids[0, p.shape[1]:, None]).mean().item())
-
-rows = []
-for gamma, delta in [(0.25, 0.0), (0.25, 1.0), (0.25, 2.0), (0.25, 4.0), (0.25, 8.0), (0.5, 1.0), (0.5, 2.0), (0.5, 4.0), (0.5, 8.0)]:
-    texts = plain if delta == 0 else marked if (gamma, delta) == (0.25, 2.0) else generate(gamma, delta)[0]
-    z = np.array([detect(t, gamma) for t in texts])
-    ppl = np.array([perplexity(p, t) for p, t in zip(prompts, texts)])
-    rows.append({"γ": gamma, "δ": delta, "z の平均": z.mean(), "z の最小": z.min(), "z>4 の割合": np.mean(z > 4), "PPL の中央値": np.median(ppl),
-                 "英単語を含む割合": np.mean([bool(re.search(r"[A-Za-z]{3,}", t)) for t in texts]), "例": texts[1][:30]})
-print(pd.DataFrame(rows).round(2).to_string(index=False))
-```
-
-```python
-# 頑健さ (1): 文章を短くする。同じ green の割合でも、トークン数 T が少ないと z (∝ √T) が小さく、検出できない
-for n_chars in [25, 50, 100, 200, None]:
-    z = np.array([detect(t[:n_chars], 0.25) for t in marked])
-    n_tok = np.mean([len(tokenizer(t[:n_chars], add_special_tokens=False)["input_ids"]) for t in marked])
-    print(f"先頭 {n_chars or '全部'} 文字 (平均 {n_tok:.0f} トークン): z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
-```
-
-```python
-# 頑健さ (2): 透かしのない別のモデル (3B) で、文を 1 つずつ言い換える。全体の半分の文だけ言い換えた場合と、全部言い換えた場合を比べる。T4 で 3〜5 分
-@torch.no_grad()
-def paraphrase(sentences, batch_size=32):
-    outs = []
-    for i in range(0, len(sentences), batch_size):
-        batch = [oracle_tok.apply_chat_template([{"role": "user", "content": f"次の文を、意味を変えずに別の言葉で言い換えてください。言い換えた文だけを出力してください。\n\n{s}"}],
-                                                add_generation_prompt=True, tokenize=False) for s in sentences[i:i + batch_size]]
-        enc = oracle_tok(batch, return_tensors="pt", padding=True, add_special_tokens=False).to(oracle.device)
-        out = oracle.generate(**enc, max_new_tokens=120, do_sample=False, repetition_penalty=1.0, pad_token_id=oracle_tok.pad_token_id)
-        outs += [s.strip().split("\n")[0] for s in oracle_tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
-    return outs
-
-split = [re.findall(r"[^。]+。?", t) for t in marked]                # 句点で文に分ける
-flat = [s for ss in split for s in ss]
-para = iter(paraphrase(flat))
-para_split = [[next(para) for _ in ss] for ss in split]
-half = ["".join(p if i % 2 else s for i, (s, p) in enumerate(zip(ss, ps))) for ss, ps in zip(split, para_split)]   # 2 文目、4 文目… だけ言い換える
-full = ["".join(ps) for ps in para_split]
-print("元の文章:", marked[2][:100], "\n全部言い換え:", full[2][:100])
-for label, texts in [("言い換えなし", marked), ("半分の文を言い換え", half), ("全部の文を言い換え", full), ("(参考) 透かしなし", plain)]:
-    z = np.array([detect(t, 0.25) for t in texts])
-    print(f"{label}: z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
-```
-
-```python
-# transformers に組み込みの透かし (WatermarkingConfig) と検出器 (WatermarkDetector)。鍵の値は同じだが green の決め方が違うので、互いに検出できない
-from transformers import WatermarkDetector, WatermarkingConfig
-
-wm_config = WatermarkingConfig(bias=2.0, greenlist_ratio=0.25, seeding_scheme="lefthash")   # bias が δ、greenlist_ratio が γ
-torch.manual_seed(0)
-enc = tokenizer(prompts[:20], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
-out = model.generate(**enc, watermarking_config=wm_config, do_sample=True, temperature=0.7, top_p=1.0, top_k=0, repetition_penalty=1.0,
-                     max_new_tokens=200, pad_token_id=tokenizer.pad_token_id)
-builtin = tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
-
-detector = WatermarkDetector(model_config=model.config, device=model.device, watermarking_config=wm_config)   # 生成と同じデバイスで（乱数がデバイスで変わる）
-def builtin_z(texts):
-    return np.array([detector(torch.tensor([tokenizer(t, add_special_tokens=False)["input_ids"]], device=model.device), return_dict=True).z_score[0] for t in texts])
-print(f"組み込みの透かし → 組み込みの検出器: z の平均 {builtin_z(builtin).mean():.2f} / 自作の検出器: {np.mean([detect(t, 0.25) for t in builtin]):.2f}")
-print(f"自作の透かし     → 組み込みの検出器: z の平均 {builtin_z(marked[:20]).mean():.2f} / 自作の検出器: {z_marked[:20].mean():.2f}")
-print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
-```
-
-
-
-- Kirchenbauer らの方法 (Kirchenbauer et al., 2023, "A Watermark for Large Language Models")。検出には、鍵と、生成時と同じトークン化とハッシュの方式があればよく、モデルもプロンプトも要らない。z が 4 を超えたら透かしありとする（論文の基準。透かしのない文章が偶然超える確率は約 3e-5）。原論文は直前のトークンのハッシュを乱数の種にして green のトークンを γ|V| 個選ぶが、ここでは（直前のトークン, 次のトークン, 鍵）のハッシュ値で直接決める簡略版にした（green の数は平均して γ|V|）。
-- 60 件（約 200 トークン）で、透かしなしの z は平均 0.15（最大 2.33）、γ = 0.25、δ = 2 の透かしありは平均 5.32 で、z > 4 は 88% だった。60 件なので、割合には ±10 ポイント余りの幅がある。
-- 検出は文章をトークン化し直して行うので、生成時と分割が同じでないと透かしが弱まる。sarashina2.2 のトークナイザーを transformers 5 のまま使うと分割が大きく変わり（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書き）、z の平均は 3.86、z > 4 は 45% まで下がった。直したトークナイザーでは 5.32 で、生成したトークン列のままの 5.43 とほとんど変わらない。それでも同じトークン列に戻ったのは 43% で（「読み取り / やすい」→「を読み / 取りやすい」のように、同じ文字列に分割が複数ありうる）、その分だけ目減りは残る。
-- δ を大きくすると検出しやすくなるが、文章の質が落ちる。γ = 0.25 で δ を 0, 1, 2, 4, 8 と上げると、z の平均は 0.15, 2.57, 5.32, 11.29, 18.33、3B のモデルで測ったパープレキシティの中央値は 9.5, 10.6, 11.4, 23.2, 82.6 になった。同じ δ では γ = 0.25 のほうが γ = 0.5 より z が高い。パープレキシティは同じ系列のモデルで測ったので、目安と考える。
-- 短い文章では検出できない。z は green の割合が同じでも √T に比例するので、先頭 100 文字（約 44 トークン）に切ると z > 4 は 7%、200 文字（約 89 トークン）で 35% だった。また、次のトークンがほぼ決まっている箇所（エントロピーが低い箇所）では、δ を足しても選ばれるトークンが変わらず、透かしが入りにくい（原論文）。
-- 言い換えに弱い。透かしのない 3B のモデルで半分の文を言い換えると z の平均は 3.35（z > 4 は 27%）、全部だと 1.03 (2%) になった。上の例のように元の語句を多く残していても、隣り合うトークンの組が変われば判定も変わる。同じグループの続編の研究 (Kirchenbauer et al., ICLR 2024) は、言い換えた文章にも元の断片が残るので、長くすれば検出できると報告している（人が強く言い換えた場合で、偽陽性率 1e-5 には平均 800 トークン程度）。透かしの入っていない文章を、文章の統計だけで見分ける方法は、LLM の評価と分析の章の「LLM が生成した文章を見分ける（パープレキシティ、Binoculars、分類器）」を参照。
-- transformers には同じ方式の `WatermarkingConfig` / `WatermarkDetector` が組み込まれている（SynthID Text 用の `SynthIDTextWatermarkingConfig` もある）。上の `KEY` は `hashing_key` の既定値と同じだが、green の決め方が違うので互いに検出できない（z の平均 0.15 と −0.32）。透かしは生成する側が協力して入れておく仕組みで、生成した側の協力なしに AI が書いた文章かどうかを推定する方法とは別物である。
-- 実務でライブラリを使って同じことをする版は、LLM の評価と分析の章の「LLM の出力に透かしを入れて検出する（transformers の WatermarkingConfig と SynthID）」。
-
 ## 遷移型の依存構造解析の動きを追う (arc-standard) {transition_parsing}
 
 スタックとバッファを使って、左から 1 語ずつ読みながら依存構造木を組み立てる「遷移型解析」の仕組みを、手を動かして理解したい。
@@ -1688,6 +1483,211 @@ print(mine.round(2).tolist(), np.argsort(-mine).tolist())
 - k1 を 0 にすると出現回数を無視する（含むか含まないかだけ）。大きくすると、同じ語を繰り返す文書ほど高くなる。
 - b を 0 にすると文書の長さを無視し、1 にすると長さに比例して割り引く。長い文書は語を多く含みやすいので、その有利さを打ち消している。
 - 既定値（k1=1.2〜2.0、b=0.75）は多くの場合そのままでよい。タイトルのような短い文書ばかりなら b を小さくする。
+
+## LLM の出力に入れる透かし（green リスト）を自分で実装し、統計的に検出する {llm_watermark_scratch gpu}
+LLM が生成した文章に、読んでもわからない「透かし」（ウォーターマーク）を入れておき、あとから文章だけを見て、自分のモデルが生成したものかを統計的に判定したい。
+
+```python
+# Colab の T4 で 2 分程度
+import math
+import re
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor, LogitsProcessorList, TemperatureLogitsWarper
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # SB Intuitions、MIT ライセンス
+
+def fix_sarashina_tokenizer(tokenizer, name):
+    """transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）"""
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+tokenizer = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(name), name)   # 詳しくは大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書き
+tokenizer.padding_side = "left"
+model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="cuda").eval()
+
+KEY = 15485863   # 透かしの鍵。transformers の WatermarkingConfig の既定値で公開されている値。実際には乱数で選んで秘密にする
+
+def is_green(prev, cur, gamma, key=KEY):
+    """直前のトークン prev と鍵から決まる擬似乱数で、次のトークン cur が green かどうかを決める（語彙の約 γ が green）"""
+    x = (prev * 1_000_003 + cur + key) & 0xFFFFFFFF
+    for _ in range(3):                                   # 整数のハッシュ（ビットをよく混ぜる）
+        x = ((x ^ (x >> 16)) * 0x45D9F3B) & 0xFFFFFFFF
+    return x.double() / 2**32 < gamma
+
+class GreenListWatermark(LogitsProcessor):
+    """green のトークンのロジットに δ を足して、green のトークンを選ばれやすくする"""
+    def __init__(self, gamma, delta):
+        self.gamma, self.delta = gamma, delta
+    def __call__(self, input_ids, scores):
+        vocab = torch.arange(scores.shape[1], device=scores.device)
+        green = is_green(input_ids[:, -1:], vocab[None, :], self.gamma)    # （バッチ, 語彙）の green / red の表
+        return scores + self.delta * green.to(scores.dtype)
+
+def hf_encode(text):
+    return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+def detect(text, gamma, encode=hf_encode):
+    """文章だけから green のトークンの割合を数え、z 検定をする（モデルもプロンプトも要らない。鍵と、生成時と同じトークン化とハッシュが要る）"""
+    ids = torch.tensor(encode(text))
+    T = len(ids) - 1                                    # 最初のトークンは直前のトークンがないので数えない
+    if T < 1:
+        return float("nan")
+    n_green = int(is_green(ids[:-1], ids[1:], gamma).sum())
+    return (n_green - gamma * T) / math.sqrt(T * gamma * (1 - gamma))   # 透かしがなければ、ほぼ標準正規分布に従う
+
+TOPICS = ["猫", "富士山", "コーヒー", "地震", "梅雨", "将棋", "新幹線", "お盆", "俳句", "温泉", "桜", "寿司", "台風", "図書館", "自転車",
+          "歌舞伎", "火山", "味噌", "電子レンジ", "マラソン", "民泊", "花粉症", "城", "相撲", "お茶", "漫画", "雪", "米作り", "神社", "地下鉄",
+          "太陽光発電", "折り紙", "盆栽", "海水浴", "コンビニ", "ラーメン", "囲碁", "書道", "花火", "動物園", "灯台", "鉄道模型", "紅葉", "納豆",
+          "宇宙ステーション", "博物館", "天気予報", "選挙", "郵便", "高齢化", "リサイクル", "睡眠", "ワクチン", "プログラミング", "翻訳", "辞書",
+          "敬語", "方言", "水族館", "キャンプ"]
+prompts = [tokenizer.apply_chat_template([{"role": "user", "content": f"「{t}」について、400 字程度で説明してください。"}],
+                                         add_generation_prompt=True, tokenize=False) for t in TOPICS]
+
+@torch.no_grad()
+def generate(gamma=0.25, delta=0.0, seed=0, max_new_tokens=200):
+    torch.manual_seed(seed)
+    enc = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+    # generate に渡した処理は、generate が作る温度の処理より前に適用される。温度で割ったあとに δ を足したいので、温度の処理を自分で先に置き、
+    # generate 側は temperature=1.0 にする。モデルの generation_config (temperature 0.7, top_p 0.9, repetition_penalty 1.05) も明示して打ち消す
+    procs = [TemperatureLogitsWarper(0.7)] + ([GreenListWatermark(gamma, delta)] if delta > 0 else [])
+    out = model.generate(**enc, do_sample=True, temperature=1.0, top_p=1.0, top_k=0, repetition_penalty=1.0, max_new_tokens=max_new_tokens,
+                         logits_processor=LogitsProcessorList(procs), pad_token_id=tokenizer.pad_token_id)
+    gen = out[:, enc["input_ids"].shape[1]:]
+    return tokenizer.batch_decode(gen, skip_special_tokens=True), gen
+
+plain, _ = generate()                                      # 透かしなし
+marked, marked_ids = generate(gamma=0.25, delta=2.0)       # 透かしあり (γ = 0.25, δ = 2)
+for label, text in [("透かしなし", plain[0]), ("透かしあり", marked[0])]:
+    print(f"[{label}] z = {detect(text, 0.25):.2f}\n{text[:150]}…\n")
+```
+
+```python
+# 60 件ずつの z スコアの分布を比べる。z > 4 なら「透かしあり」と判定する（偶然 z > 4 になる確率は約 3e-5）
+z_plain = np.array([detect(t, 0.25) for t in plain])
+z_marked = np.array([detect(t, 0.25) for t in marked])
+print(pd.DataFrame({"透かしなし": z_plain, "透かしあり": z_marked}).describe().round(2).T.to_string())
+print(f"z > 4 の割合: 透かしなし {np.mean(z_plain > 4):.2f} / 透かしあり {np.mean(z_marked > 4):.2f}")
+
+# 生成したトークン列のまま数えると z はもっと高い。文章に直してトークン化し直すと、分割が変わる箇所があり、透かしが弱まる
+def generated_tokens(row):
+    return [i for i in row.tolist() if i not in (tokenizer.pad_token_id, tokenizer.eos_token_id)]
+def z_ids(ids, gamma=0.25):
+    ids = torch.tensor(ids)
+    T = len(ids) - 1
+    return (int(is_green(ids[:-1], ids[1:], gamma).sum()) - gamma * T) / math.sqrt(T * gamma * (1 - gamma))
+
+raw_tokenizer = AutoTokenizer.from_pretrained(name)          # 比較用: 直さない（transformers 5 のまま）トークナイザー
+gen_ids = [generated_tokens(row) for row in marked_ids]
+fixed_ids = [hf_encode(t) for t in marked]
+raw_ids = [raw_tokenizer(t, add_special_tokens=False)["input_ids"] for t in marked]
+z_raw = np.array([z_ids(i) for i in raw_ids])
+print(f"z の平均: 生成したトークン列 {np.mean([z_ids(g) for g in gen_ids]):.2f} / 直したトークナイザー {z_marked.mean():.2f} / transformers 5 のまま {z_raw.mean():.2f}")
+print(f"z > 4 の割合: 直したトークナイザー {np.mean(z_marked > 4):.2f} / transformers 5 のまま {np.mean(z_raw > 4):.2f}")
+print(f"生成と同じトークン列に戻った文章の割合: 直したトークナイザー {np.mean([g == f for g, f in zip(gen_ids, fixed_ids)]):.2f}"
+      f" / transformers 5 のまま {np.mean([g == r for g, r in zip(gen_ids, raw_ids)]):.2f}")
+j = next(j for j, (g, f) in enumerate(zip(gen_ids, fixed_ids)) if g != f)       # 直しても同じ列に戻らない文章の例
+k = next(i for i, (a, b) in enumerate(zip(gen_ids[j], fixed_ids[j])) if a != b)
+print("生成:", tokenizer.convert_ids_to_tokens(gen_ids[j][k - 2:k + 4]), "\nトークン化し直し:", tokenizer.convert_ids_to_tokens(fixed_ids[j][k - 2:k + 4]))
+```
+
+```python
+# δ と γ を変えて、検出のしやすさと文章の質（大きなモデルで測ったパープレキシティ）の釣り合いを見る。Colab の T4 で 5〜10 分程度（3B のモデルのダウンロードを含む）
+oracle_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # 評価用の大きなモデル（SB Intuitions、MIT ライセンス）
+oracle_tok = fix_sarashina_tokenizer(AutoTokenizer.from_pretrained(oracle_name), oracle_name)
+oracle_tok.padding_side = "left"
+oracle = AutoModelForCausalLM.from_pretrained(oracle_name, dtype=DTYPE, device_map="cuda").eval()
+
+@torch.no_grad()
+def perplexity(prompt, text):
+    """プロンプトを条件にしたときの、生成部分のパープレキシティ"""
+    p = oracle_tok(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    c = oracle_tok(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+    ids = torch.cat([p, c], dim=1).to(oracle.device)
+    logp = oracle(ids).logits[0, p.shape[1] - 1:-1].float().log_softmax(-1)
+    return math.exp(-logp.gather(1, ids[0, p.shape[1]:, None]).mean().item())
+
+rows = []
+for gamma, delta in [(0.25, 0.0), (0.25, 1.0), (0.25, 2.0), (0.25, 4.0), (0.25, 8.0), (0.5, 1.0), (0.5, 2.0), (0.5, 4.0), (0.5, 8.0)]:
+    texts = plain if delta == 0 else marked if (gamma, delta) == (0.25, 2.0) else generate(gamma, delta)[0]
+    z = np.array([detect(t, gamma) for t in texts])
+    ppl = np.array([perplexity(p, t) for p, t in zip(prompts, texts)])
+    rows.append({"γ": gamma, "δ": delta, "z の平均": z.mean(), "z の最小": z.min(), "z>4 の割合": np.mean(z > 4), "PPL の中央値": np.median(ppl),
+                 "英単語を含む割合": np.mean([bool(re.search(r"[A-Za-z]{3,}", t)) for t in texts]), "例": texts[1][:30]})
+print(pd.DataFrame(rows).round(2).to_string(index=False))
+```
+
+```python
+# 頑健さ (1): 文章を短くする。同じ green の割合でも、トークン数 T が少ないと z (∝ √T) が小さく、検出できない
+for n_chars in [25, 50, 100, 200, None]:
+    z = np.array([detect(t[:n_chars], 0.25) for t in marked])
+    n_tok = np.mean([len(tokenizer(t[:n_chars], add_special_tokens=False)["input_ids"]) for t in marked])
+    print(f"先頭 {n_chars or '全部'} 文字 (平均 {n_tok:.0f} トークン): z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
+```
+
+```python
+# 頑健さ (2): 透かしのない別のモデル (3B) で、文を 1 つずつ言い換える。全体の半分の文だけ言い換えた場合と、全部言い換えた場合を比べる。T4 で 3〜5 分
+@torch.no_grad()
+def paraphrase(sentences, batch_size=32):
+    outs = []
+    for i in range(0, len(sentences), batch_size):
+        batch = [oracle_tok.apply_chat_template([{"role": "user", "content": f"次の文を、意味を変えずに別の言葉で言い換えてください。言い換えた文だけを出力してください。\n\n{s}"}],
+                                                add_generation_prompt=True, tokenize=False) for s in sentences[i:i + batch_size]]
+        enc = oracle_tok(batch, return_tensors="pt", padding=True, add_special_tokens=False).to(oracle.device)
+        out = oracle.generate(**enc, max_new_tokens=120, do_sample=False, repetition_penalty=1.0, pad_token_id=oracle_tok.pad_token_id)
+        outs += [s.strip().split("\n")[0] for s in oracle_tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return outs
+
+split = [re.findall(r"[^。]+。?", t) for t in marked]                # 句点で文に分ける
+flat = [s for ss in split for s in ss]
+para = iter(paraphrase(flat))
+para_split = [[next(para) for _ in ss] for ss in split]
+half = ["".join(p if i % 2 else s for i, (s, p) in enumerate(zip(ss, ps))) for ss, ps in zip(split, para_split)]   # 2 文目、4 文目… だけ言い換える
+full = ["".join(ps) for ps in para_split]
+print("元の文章:", marked[2][:100], "\n全部言い換え:", full[2][:100])
+for label, texts in [("言い換えなし", marked), ("半分の文を言い換え", half), ("全部の文を言い換え", full), ("(参考) 透かしなし", plain)]:
+    z = np.array([detect(t, 0.25) for t in texts])
+    print(f"{label}: z の平均 {z.mean():.2f}, z>4 の割合 {np.mean(z > 4):.2f}")
+```
+
+```python
+# transformers に組み込みの透かし (WatermarkingConfig) と検出器 (WatermarkDetector)。鍵の値は同じだが green の決め方が違うので、互いに検出できない
+from transformers import WatermarkDetector, WatermarkingConfig
+
+wm_config = WatermarkingConfig(bias=2.0, greenlist_ratio=0.25, seeding_scheme="lefthash")   # bias が δ、greenlist_ratio が γ
+torch.manual_seed(0)
+enc = tokenizer(prompts[:20], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+out = model.generate(**enc, watermarking_config=wm_config, do_sample=True, temperature=0.7, top_p=1.0, top_k=0, repetition_penalty=1.0,
+                     max_new_tokens=200, pad_token_id=tokenizer.pad_token_id)
+builtin = tokenizer.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+
+detector = WatermarkDetector(model_config=model.config, device=model.device, watermarking_config=wm_config)   # 生成と同じデバイスで（乱数がデバイスで変わる）
+def builtin_z(texts):
+    return np.array([detector(torch.tensor([tokenizer(t, add_special_tokens=False)["input_ids"]], device=model.device), return_dict=True).z_score[0] for t in texts])
+print(f"組み込みの透かし → 組み込みの検出器: z の平均 {builtin_z(builtin).mean():.2f} / 自作の検出器: {np.mean([detect(t, 0.25) for t in builtin]):.2f}")
+print(f"自作の透かし     → 組み込みの検出器: z の平均 {builtin_z(marked[:20]).mean():.2f} / 自作の検出器: {z_marked[:20].mean():.2f}")
+print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+
+
+- Kirchenbauer らの方法 (Kirchenbauer et al., 2023, "A Watermark for Large Language Models")。検出には、鍵と、生成時と同じトークン化とハッシュの方式があればよく、モデルもプロンプトも要らない。z が 4 を超えたら透かしありとする（論文の基準。透かしのない文章が偶然超える確率は約 3e-5）。原論文は直前のトークンのハッシュを乱数の種にして green のトークンを γ|V| 個選ぶが、ここでは（直前のトークン, 次のトークン, 鍵）のハッシュ値で直接決める簡略版にした（green の数は平均して γ|V|）。
+- 60 件（約 200 トークン）で、透かしなしの z は平均 0.15（最大 2.33）、γ = 0.25、δ = 2 の透かしありは平均 5.32 で、z > 4 は 88% だった。60 件なので、割合には ±10 ポイント余りの幅がある。
+- 検出は文章をトークン化し直して行うので、生成時と分割が同じでないと透かしが弱まる。sarashina2.2 のトークナイザーを transformers 5 のまま使うと分割が大きく変わり（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書き）、z の平均は 3.86、z > 4 は 45% まで下がった。直したトークナイザーでは 5.32 で、生成したトークン列のままの 5.43 とほとんど変わらない。それでも同じトークン列に戻ったのは 43% で（「読み取り / やすい」→「を読み / 取りやすい」のように、同じ文字列に分割が複数ありうる）、その分だけ目減りは残る。
+- δ を大きくすると検出しやすくなるが、文章の質が落ちる。γ = 0.25 で δ を 0, 1, 2, 4, 8 と上げると、z の平均は 0.15, 2.57, 5.32, 11.29, 18.33、3B のモデルで測ったパープレキシティの中央値は 9.5, 10.6, 11.4, 23.2, 82.6 になった。同じ δ では γ = 0.25 のほうが γ = 0.5 より z が高い。パープレキシティは同じ系列のモデルで測ったので、目安と考える。
+- 短い文章では検出できない。z は green の割合が同じでも √T に比例するので、先頭 100 文字（約 44 トークン）に切ると z > 4 は 7%、200 文字（約 89 トークン）で 35% だった。また、次のトークンがほぼ決まっている箇所（エントロピーが低い箇所）では、δ を足しても選ばれるトークンが変わらず、透かしが入りにくい（原論文）。
+- 言い換えに弱い。透かしのない 3B のモデルで半分の文を言い換えると z の平均は 3.35（z > 4 は 27%）、全部だと 1.03 (2%) になった。上の例のように元の語句を多く残していても、隣り合うトークンの組が変われば判定も変わる。同じグループの続編の研究 (Kirchenbauer et al., ICLR 2024) は、言い換えた文章にも元の断片が残るので、長くすれば検出できると報告している（人が強く言い換えた場合で、偽陽性率 1e-5 には平均 800 トークン程度）。透かしの入っていない文章を、文章の統計だけで見分ける方法は、LLM の評価と分析の章の「LLM が生成した文章を見分ける（パープレキシティ、Binoculars、分類器）」を参照。
+- transformers には同じ方式の `WatermarkingConfig` / `WatermarkDetector` が組み込まれている（SynthID Text 用の `SynthIDTextWatermarkingConfig` もある）。上の `KEY` は `hashing_key` の既定値と同じだが、green の決め方が違うので互いに検出できない（z の平均 0.15 と −0.32）。透かしは生成する側が協力して入れておく仕組みで、生成した側の協力なしに AI が書いた文章かどうかを推定する方法とは別物である。
+- 実務でライブラリを使って同じことをする版は、LLM の評価と分析の章の「LLM の出力に透かしを入れて検出する（transformers の WatermarkingConfig と SynthID）」。
 
 ## 規則だけでチャットボットを作る（ELIZA 方式） {eliza_rule}
 

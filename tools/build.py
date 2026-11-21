@@ -224,6 +224,16 @@ def clean_outputs(nb: dict) -> None:
                 had_widget = any("widget" in k for k in data)
                 for k in [k for k in data if "widget" in k or k == "application/javascript"]:
                     del data[k]
+                if "text/html" in data:
+                    html = "".join(data["text/html"])
+                    if "<progress" in html:
+                        html = re.sub(r"\s*<div>\s*<progress\b[^>]*>.*?</progress>.*?</div>\s*", "", html, flags=re.DOTALL)
+                        if html.strip():
+                            data["text/html"] = html.splitlines(keepends=True) if isinstance(data["text/html"], list) else html
+                        else:
+                            del data["text/html"]
+                    elif not html.strip():
+                        del data["text/html"]
                 plain = "".join(data.get("text/plain", ""))
                 if set(data) <= {"text/plain"} and (had_widget or WIDGET_RE.search(plain)):
                     continue  # ウィジェットや進捗バーの残骸
