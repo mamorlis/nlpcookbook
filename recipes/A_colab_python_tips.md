@@ -1,6 +1,6 @@
 # Colab と Python の小技
 
-Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。
+Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章（5-5 ツールキットの作成）も参照。
 
 ## Google Drive をマウントしてファイルを読み書きする {colab_drive norun}
 
@@ -288,6 +288,7 @@ _ = pstats.Stats(profiler).sort_stats("cumulative").print_stats(5)
 - GPU の処理は非同期なので、正確に測るには計測の前後で `torch.cuda.synchronize()` を呼ぶ。
 - 初回の実行は、モデルの読み込みやキャッシュの作成で遅い。2 回目以降を測る。
 - Colab の無料枠は実行のたびに CPU や GPU の割り当てが変わる。異なるセッションで測った時間は比較できない。
+- `subprocess` の都度起動と常駐 `Popen` パイプのオーバーヘッド比較、NumPy/BLAS・疎行列演算による高速化、および `cProfile` を用いた I/O バウンド・計算バウンドの切り分けとアムダールの法則の実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [パイプラインの高速化・スケーラビリティとボトルネック計測](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_toolkit_benchmark.ipynb) も参照。
 
 ## 進捗バーを表示する (tqdm) {tqdm_progress}
 
@@ -524,6 +525,7 @@ print(open("results.jsonl", encoding="utf-8").read())
 
 - CSV と違って、改行・カンマ・引用符を含むテキストやリスト・入れ子の構造を安全に扱える。NLP のデータ交換では事実上の標準。
 - 1 行ずつ読めるので、メモリに載らない巨大なファイルも処理できる。`.jsonl.gz` のまま `gzip.open(path, "rt")` で読める。
+- JSON Lines (`jsonl`) 通信による 4 段階 Unix フィルタパイプラインの分割、中間出力差分による原因ステージの局所化、スキーマ検証・ゴールデン回帰テストの実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [パイプライン処理のモジュール分割と前後処理・デバッグ](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_toolkit_pipeline.ipynb) も参照。
 
 ## CSV / TSV の文字化けと列ずれを避ける {csv_io}
 
@@ -616,3 +618,4 @@ print(reservoir_sample(read_lines("corpus.txt.gz"), 3))
 - `f.readlines()` や `f.read().split("\n")` は全体をメモリに載せるので、大きなファイルでは使わない。
 - 行数だけ知りたいなら `!zcat corpus.txt.gz | wc -l`、先頭を見たいなら `!zcat corpus.txt.gz | head` が速い。
 - 表形式なら `pd.read_csv(path, chunksize=100_000)`、Hugging Face Datasets なら `streaming=True` が同じ役割をする。
+- 常駐ワーカーへの `stdin`/`stdout` ストリーミング処理やバッファ付き I/O によるボトルネック解消、I/O vs 計算プロファイリングとアムダールの法則の実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [パイプラインの高速化・スケーラビリティとボトルネック計測](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_toolkit_benchmark.ipynb) も参照。

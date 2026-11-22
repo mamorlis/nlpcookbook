@@ -21,7 +21,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 422 レシピ（付録を含めると 461 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 424 レシピ（付録を含めると 463 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
@@ -46,10 +46,10 @@
 - [21. 大規模言語モデル (LLM)](#21-大規模言語モデル-llm) (16)
 - [22. LLM の API（Gemini と Claude）](#22-llm-の-apigemini-と-claude) (11)
 - [23. LLM の評価と分析](#23-llm-の評価と分析) (10)
-- [24. LLM の学習と調整](#24-llm-の学習と調整) (5)
+- [24. LLM の学習と調整](#24-llm-の学習と調整) (6)
 - [25. RAG（検索拡張生成）](#25-rag検索拡張生成) (14)
 - [26. 対話システム](#26-対話システム) (12)
-- [27. 機械翻訳](#27-機械翻訳) (18)
+- [27. 機械翻訳](#27-機械翻訳) (19)
 - [28. 要約と平易化](#28-要約と平易化) (16)
 - [29. 文法誤り訂正と文章校正](#29-文法誤り訂正と文章校正) (15)
 - [30. 言語教育・リーダビリティ・自動採点](#30-言語教育リーダビリティ自動採点) (8)
@@ -537,7 +537,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 24. LLM の学習と調整
 
-小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
+小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)、学習した複数のアダプタを重みの足し引きで合成・調整するタスク算術（モデルマージ）。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -546,6 +546,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 | 24-03 | [選好データから報酬モデルを学習して応答を採点する（Bradley-Terry モデル）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_model_train.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_model_train.ipynb) |
 | 24-04 | [報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) |
 | 24-05 | [正解を判定できる課題で LLM を強化学習する (GRPO)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) |
+| 24-06 | [学習した複数のアダプタを重みの足し引きで合成・調整する（タスク算術とモデルマージ）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/task_arithmetic_merge.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/task_arithmetic_merge.ipynb) |
 
 ### 25. RAG（検索拡張生成）
 
@@ -589,7 +590,7 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 
 ### 27. 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -608,9 +609,10 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 | 27-13 | [擬似対訳データを往復翻訳の一致度でふるいにかける](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/pseudo_parallel_filter.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/pseudo_parallel_filter.ipynb) |
 | 27-14 | [漢字を部品に分解して日本語と中国語で共有する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subcharacter_decomposition.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subcharacter_decomposition.ipynb) |
 | 27-15 | [タグを付けて訳文の文体を制御する（丁寧さの制御）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/controlled_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/controlled_translation.ipynb) |
-| 27-16 | [1 つの原文から多様な訳を複数出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) |
-| 27-17 | [古文を現代語に訳す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) |
-| 27-18 | [動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) |
+| 27-16 | [用語集（対訳辞書）の定訳を守らせて翻訳する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/terminology_constrained_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/terminology_constrained_translation.ipynb) |
+| 27-17 | [1 つの原文から多様な訳を複数出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) |
+| 27-18 | [古文を現代語に訳す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) |
+| 27-19 | [動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) |
 
 ### 28. 要約と平易化
 
@@ -706,7 +708,7 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 
 ### 付録 A. Colab と Python の小技
 
-Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。
+Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章（5-5 ツールキットの作成）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|

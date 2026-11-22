@@ -1,6 +1,6 @@
 # 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
 
 ## 対訳コーパスを取得して中身を確認する {parallel_corpus}
 
@@ -1078,6 +1078,332 @@ for tag in ["<polite>", "<plain>"]:
 - 文体を変えると、訳の内容まで変わってしまうことがある。制御の成功率だけでなく、BLEU などで翻訳の質が落ちていないかも確かめる。
 - LLM による翻訳なら、プロンプトで「です・ます調で」と指示するだけで同じことができる。専用の翻訳モデルを使う場面（速度、コスト、機密性）では、タグによる制御が今も有効。
 - 1 つの言語の中で文体を書き換えるレシピは、要約と平易化の章の「文体を変換する（です・ます調、だ・である調、敬語）」にある。
+
+## 用語集（対訳辞書）の定訳を守らせて翻訳する {terminology_constrained_translation gpu}
+
+機械翻訳で社内用語や専門用語を、あらかじめ定めた定訳（対訳辞書）どおりに統一して訳させたい。NLLB のプレースホルダ置換と、LLM への動的用語集プロンプト注入および違反検出・再試行を比べ、用語遵守率と翻訳品質を確かめる。
+
+```python
+!pip install -q "sacrebleu[ja]" sentencepiece sacremoses
+```
+
+```python
+import gc, re, time
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from sacrebleu.metrics import BLEU, CHRF
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+set_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+
+# 20 語の英日技術用語集（一般的なカタカナ訳ではなく、指定の定訳を強制する例）
+GLOSSARY = {
+    "context window": ("文脈長上限", r"\bcontext windows?\b"),
+    "fine-tuning": ("追加学習", r"\bfine-tuning\b"),
+    "batch size": ("一括処理数", r"\bbatch sizes?\b"),
+    "hallucination": ("幻覚出力", r"\bhallucinations?\b"),
+    "quantization": ("量子化圧縮", r"\bquantization\b"),
+    "checkpoint": ("中間保存点", r"\bcheckpoints?\b"),
+    "throughput": ("処理能力", r"\bthroughput\b"),
+    "tokenizer": ("分割器", r"\btokenizers?\b"),
+    "embedding": ("分散表現", r"\bembeddings?\b"),
+    "guardrail": ("安全制御網", r"\bguardrails?\b"),
+    "alignment": ("整合調整", r"\balignment\b"),
+    "inference": ("推論実行", r"\binference\b"),
+    "retrieval": ("情報検索", r"\bretrieval\b"),
+    "pipeline": ("処理基盤", r"\bpipelines?\b"),
+    "fallback": ("代替経路", r"\bfallbacks?\b"),
+    "latency": ("応答遅延", r"\blatenc(?:y|ies)\b"),
+    "prompt": ("指示文", r"\bprompts?\b"),
+    "agent": ("自律処理系", r"\bagents?\b"),
+    "cache": ("一時記憶", r"\bcaches?\b"),
+    "token": ("字句単位", r"\btokens?\b"),
+}
+
+BENCHMARK = [
+    ("High latency during peak hours degrades the user experience.",
+     "ピーク時間帯の大きな応答遅延は、利用者体験を低下させる。", ["latency"]),
+    ("Always validate the user prompt before sending it to the model.",
+     "モデルへ渡す前に、利用者からの指示文を必ず検証してください。", ["prompt"]),
+    ("Clearing the cache resolved the stale response issue immediately.",
+     "一時記憶を消去すると、古い応答が返る問題はただちに解消した。", ["cache"]),
+    ("The billing limit depends on the number of generated tokens.",
+     "課金上限は生成された字句単位の数に依存する。", ["token"]),
+    ("Our translation pipeline automatically logs every failed request.",
+     "当社の翻訳処理基盤は、失敗した要求をすべて自動で記録する。", ["pipeline"]),
+    ("The autonomous agent searches internal documents before answering.",
+     "その自律処理系は、回答する前に社内文書を検索する。", ["agent"]),
+    ("Strict citations help reduce hallucination in technical reports.",
+     "厳密な出典明記は、技術報告における幻覚出力の削減に役立つ。", ["hallucination"]),
+    ("Each paragraph is converted into a dense embedding vector.",
+     "各段落は高密度な分散表現ベクトルへと変換される。", ["embedding"]),
+    ("We resumed training from the latest checkpoint after the crash.",
+     "障害発生後、最新の中間保存点から学習を再開した。", ["checkpoint"]),
+    ("Domain fine-tuning significantly improved accuracy on medical texts.",
+     "専門分野での追加学習により、医療文書の精度が大幅に向上した。", ["fine-tuning"]),
+    ("Running inference on quantized weights reduces GPU memory usage.",
+     "量子化された重みで推論実行を行うと、GPUメモリの使用量を減らせる。", ["inference"]),
+    ("Long legal contracts often exceed the model context window.",
+     "長い法務契約書は、しばしばモデルの文脈長上限を超える。", ["context window"]),
+    ("Increasing the batch size improved throughput on our server.",
+     "一括処理数を増やすことで、サーバ上の処理能力が向上した。", ["batch size", "throughput"]),
+    ("After quantization, the model runs within eight gigabytes of memory.",
+     "量子化圧縮の後、そのモデルは8ギガバイト以内のメモリで動作する。", ["quantization"]),
+    ("Configure a reliable fallback when the primary API times out.",
+     "主系のAPIが時間切れになった場合に備え、信頼できる代替経路を設定してください。", ["fallback"]),
+    ("Every external response passes through a safety guardrail first.",
+     "外部向けの応答はすべて、最初に安全制御網を通過する。", ["guardrail"]),
+    ("A buggy tokenizer split rare kanji into unexpected byte sequences.",
+     "不具合のある分割器が、珍しい漢字を予期せぬバイト列へ分割した。", ["tokenizer"]),
+    ("Hybrid retrieval combines keyword matching with vector similarity.",
+     "ハイブリッド情報検索は、キーワード一致とベクトル類似度を組み合わせる。", ["retrieval"]),
+    ("Human feedback guides model alignment toward helpful behavior.",
+     "人手によるフィードバックが、有益な振る舞いに向けたモデルの整合調整を導く。", ["alignment"]),
+    ("The agent uses a shared cache for prompts to cut inference latency in half.",
+     "その自律処理系は指示文の共有の一時記憶を使い、推論実行の応答遅延を半減させる。", ["agent", "cache", "prompt", "inference", "latency"]),
+    ("Keep the prompt concise so enough tokens remain inside the context window.",
+     "文脈長上限の内部に十分な字句単位が残るよう、指示文は簡潔に保ってください。", ["prompt", "token", "context window"]),
+    ("Our retrieval pipeline filters documents using embedding similarity and a guardrail.",
+     "当社の情報検索の処理基盤は、分散表現の類似度と安全制御網を用いて文書を絞り込む。", ["retrieval", "pipeline", "embedding", "guardrail"]),
+    ("During fine-tuning, save a checkpoint every thousand steps.",
+     "追加学習の実行中は、1000ステップごとに中間保存点を保存してください。", ["fine-tuning", "checkpoint"]),
+    ("Lower quantization bit widths increase throughput at the cost of slight alignment drift.",
+     "量子化圧縮のビット幅を下げると処理能力は上がるが、わずかな整合調整のずれを招く。", ["quantization", "throughput", "alignment"]),
+    ("When the cache misses, the fallback pipeline invokes the slower model.",
+     "一時記憶に該当がない場合、代替経路の処理基盤がより低速なモデルを呼び出す。", ["cache", "fallback", "pipeline"]),
+    ("Adjust the batch size and tokenizer settings before benchmarking latency.",
+     "応答遅延の計測前に、一括処理数と分割器の設定を調整してください。", ["batch size", "tokenizer", "latency"]),
+    ("Hallucination drops when retrieval supplies verified passages in the prompt.",
+     "情報検索が検証済みの節を指示文へ供給すると、幻覚出力は減少する。", ["hallucination", "retrieval", "prompt"]),
+    ("The alignment stage updates weights initialized from the SFT checkpoint.",
+     "整合調整の段階では、SFTの中間保存点から初期化された重みを更新する。", ["alignment", "checkpoint"]),
+    ("Sharing one embedding cache across agents avoids redundant inference.",
+     "複数の自律処理系で1つの分散表現の一時記憶を共有すれば、重複した推論実行を防げる。", ["embedding", "cache", "agent", "inference"]),
+    ("Extending the context window requires smaller batch size values during fine-tuning.",
+     "文脈長上限を拡張するには、追加学習時の一括処理数を小さくする必要がある。", ["context window", "batch size", "fine-tuning"]),
+]
+
+def extract_terms(en_text):
+    """長い用語を優先し、単語境界で重複なく一致した用語を抽出する"""
+    found, occupied = [], []
+    for en_key, (ja_term, pat) in sorted(GLOSSARY.items(), key=lambda kv: -len(kv[0])):
+        for m in re.finditer(pat, en_text, flags=re.IGNORECASE):
+            s, e = m.span()
+            if not any(not (e <= os or s >= oe) for os, oe in occupied):
+                occupied.append((s, e))
+                found.append((s, e, en_key, ja_term, m.group(0)))
+    found.sort(key=lambda x: x[0])
+    return found
+
+sent_terms = []
+for en, ja, exp in BENCHMARK:
+    matches = extract_terms(en)
+    assert {m[2] for m in matches} == set(exp) and all(m[3] in ja for m in matches)
+    sent_terms.append(list(dict.fromkeys((m[2], m[3]) for m in matches)))
+print(f"評価文数: {len(BENCHMARK)} / カバー用語数: {len({k for ps in sent_terms for k, _ in ps})}/{len(GLOSSARY)} / 総出現回数: {sum(len(ps) for ps in sent_terms)}")
+
+# 手法 1・2: NLLB (ベースラインとプレースホルダ置換)
+nllb_name = "facebook/nllb-200-distilled-600M"
+nllb_tok = AutoTokenizer.from_pretrained(nllb_name, src_lang="eng_Latn")
+nllb = AutoModelForSeq2SeqLM.from_pretrained(nllb_name, dtype=DTYPE, device_map="auto").eval()
+JA_ID = nllb_tok.convert_tokens_to_ids("jpn_Jpan")
+
+@torch.no_grad()
+def nllb_translate(texts, bs=15):
+    outs = []
+    for i in range(0, len(texts), bs):
+        enc = nllb_tok(texts[i:i + bs], return_tensors="pt", padding=True, truncation=True, max_length=128).to(nllb.device)
+        gen = nllb.generate(**enc, forced_bos_token_id=JA_ID, num_beams=4, max_new_tokens=128)
+        outs.extend(nllb_tok.batch_decode(gen, skip_special_tokens=True))
+    return outs
+
+_ = nllb_translate(["Warmup sentence."])   # GPU カーネルの初回遅延を除く
+t0 = time.time()
+nllb_base = nllb_translate([en for en, _, _ in BENCHMARK])
+t_nllb_base = time.time() - t0
+
+ph_inputs, ph_maps = [], []
+for en, _, _ in BENCHMARK:
+    buf, cur, mapping = [], 0, {}
+    for idx, (s, e, _, ja_term, _) in enumerate(extract_terms(en)):
+        ph = f"__TERM{idx}__"
+        buf.append(en[cur:s] + ph)
+        mapping[ph] = ja_term
+        cur = e
+    buf.append(en[cur:])
+    ph_inputs.append("".join(buf))
+    ph_maps.append(mapping)
+
+t0 = time.time()
+nllb_ph_raw = nllb_translate(ph_inputs)
+t_nllb_ph = time.time() - t0
+
+nllb_ph_restored, ph_total, ph_survived = [], 0, 0
+for raw_out, mapping in zip(nllb_ph_raw, ph_maps):
+    restored = raw_out
+    for ph, ja_term in mapping.items():
+        ph_total += 1
+        if ph in restored:
+            ph_survived += 1
+            restored = restored.replace(ph, ja_term)
+    nllb_ph_restored.append(restored)
+print(f"NLLB プレースホルダ残存率: {ph_survived}/{ph_total} ({ph_survived / ph_total:.3f})")
+
+del nllb
+gc.collect(); torch.cuda.empty_cache()
+```
+
+```python
+# 手法 3〜5: オープン LLM (用語集なし / 動的用語集注入 / 違反検出+再試行)
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+llm_name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # MIT License
+llm_tok = load_tokenizer(llm_name)
+llm = AutoModelForCausalLM.from_pretrained(llm_name, dtype=DTYPE, device_map="auto").eval()
+
+@torch.no_grad()
+def llm_generate(prompts, bs=15, max_new_tokens=128):
+    outs = []
+    for i in range(0, len(prompts), bs):
+        msgs = [[{"role": "user", "content": p}] for p in prompts[i:i + bs]]
+        enc = llm_tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True).to(llm.device)
+        gen = llm.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=llm_tok.pad_token_id)
+        dec = llm_tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+        outs.extend([d.strip().splitlines()[0].strip() if d.strip() else "" for d in dec])
+    return outs
+
+_ = llm_generate(["次の英文を日本語に訳してください。訳文のみを1行で出力してください。\n\n英文: Hello."])
+
+# 手法 3: 用語集なし
+p_plain = [f"次の英文を自然な日本語に翻訳してください。訳文のみを1行で出力してください。\n\n英文: {en}" for en, _, _ in BENCHMARK]
+t0 = time.time()
+llm_base = llm_generate(p_plain)
+t_llm_base = time.time() - t0
+
+# 手法 4: 文に出現した用語だけを動的に注入
+p_gloss = []
+for (en, _, _), pairs in zip(BENCHMARK, sent_terms):
+    g_lines = "\n".join(f"- {ek} -> {jv}" for ek, jv in pairs)
+    p_gloss.append(
+        "次の英文を自然な日本語に翻訳してください。指定された用語集の訳語を必ずそのまま使い、訳文のみを1行で出力してください。\n\n"
+        f"用語集:\n{g_lines}\n\n英文: {en}"
+    )
+t0 = time.time()
+llm_gloss = llm_generate(p_gloss)
+t_llm_gloss = time.time() - t0
+
+# 手法 5: 用語集の違反を自動検出し、漏れた用語だけを指定して 1 回再試行
+t0 = time.time()
+llm_retry = list(llm_gloss)
+retry_indices, retry_prompts = [], []
+for i, (hyp, pairs, (en, _, _)) in enumerate(zip(llm_gloss, sent_terms, BENCHMARK)):
+    missing = [(ek, jv) for ek, jv in pairs if jv not in hyp]
+    if missing:
+        retry_indices.append(i)
+        m_lines = "\n".join(f"- {ek} -> {jv}" for ek, jv in missing)
+        retry_prompts.append(
+            "次の日本語訳には指定用語の未反映があります。抜けている指定用語を必ずそのまま含めて訳文を修正し、修正後の訳文のみを1行で出力してください。\n\n"
+            f"英文: {en}\n現在の訳文: {hyp}\n未反映の指定用語:\n{m_lines}"
+        )
+if retry_prompts:
+    for idx, fixed_hyp in zip(retry_indices, llm_generate(retry_prompts)):
+        llm_retry[idx] = fixed_hyp
+t_llm_retry = t_llm_gloss + (time.time() - t0)
+
+after_viol = sum(any(jv not in llm_retry[i] for _, jv in sent_terms[i]) for i in range(len(BENCHMARK)))
+print(f"再試行対象（違反文数）: {len(retry_indices)}/{len(BENCHMARK)} → 再試行後の残存違反文数: {after_viol}/{len(BENCHMARK)}")
+print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+del llm
+gc.collect(); torch.cuda.empty_cache()
+```
+
+```python
+# 5 手法の定量比較と代表例の表示
+refs = [ja for _, ja, _ in BENCHMARK]
+chrf_metric, bleu_metric = CHRF(), BLEU(tokenize="ja-mecab")
+rng = np.random.default_rng(0)
+
+def rate_ci(arr):
+    boot = arr[rng.integers(0, len(arr), (2000, len(arr)))].mean(1)
+    return f"{arr.mean():.3f} [{np.percentile(boot, 2.5):.3f}, {np.percentile(boot, 97.5):.3f}]"
+
+rows = []
+for label, hyps, elapsed in [
+    ("NLLB（ベースライン）", nllb_base, t_nllb_base),
+    ("NLLB + プレースホルダ", nllb_ph_restored, t_nllb_ph),
+    ("LLM（用語集なし）", llm_base, t_llm_base),
+    ("LLM + 動的用語集", llm_gloss, t_llm_gloss),
+    ("LLM + 用語集 + 再試行", llm_retry, t_llm_retry),
+]:
+    term_hits, term_total, sent_pass = 0, 0, []
+    for hyp, pairs in zip(hyps, sent_terms):
+        ok = [jv in hyp for _, jv in pairs]
+        term_hits += sum(ok); term_total += len(ok); sent_pass.append(float(all(ok)))
+    rows.append({
+        "手法": label,
+        "用語一致率": f"{term_hits / term_total:.3f}",
+        "文単位完全遵守率 (95% CI)": rate_ci(np.array(sent_pass)),
+        "chrF": round(chrf_metric.corpus_score(hyps, [refs]).score, 1),
+        "BLEU": round(bleu_metric.corpus_score(hyps, [refs]).score, 1),
+        "秒/文": round(elapsed / len(BENCHMARK), 3),
+    })
+print(pd.DataFrame(rows).to_string(index=False))
+
+print("\n--- NLLB プレースホルダ破損の例 ---")
+shown = 0
+for i, (raw_out, restored, mapping) in enumerate(zip(nllb_ph_raw, nllb_ph_restored, ph_maps)):
+    if any(ph not in raw_out for ph in mapping):
+        print(f"[{i}] 入力: {ph_inputs[i]}\n    出力: {raw_out} → 復元後: {restored}")
+        shown += 1
+        if shown >= 3:
+            break
+
+print("\n--- 翻訳結果の比較例 ---")
+show_ids = retry_indices[:2] + [i for i in range(len(BENCHMARK)) if any(jv not in llm_retry[i] for _, jv in sent_terms[i])][:1]
+for i in list(dict.fromkeys(show_ids)):
+    print(f"[{i}] EN: {BENCHMARK[i][0]}")
+    print(f"    NLLB基本   : {nllb_base[i]}")
+    print(f"    NLLB置換   : {nllb_ph_restored[i]}")
+    print(f"    LLMなし    : {llm_base[i]}")
+    print(f"    LLM用語集  : {llm_gloss[i]}")
+    print(f"    LLM再試行  : {llm_retry[i]}")
+    print(f"    参照訳     : {BENCHMARK[i][1]}")
+```
+
+### 実行結果の分析
+
+- 用語遵守率と翻訳品質の全体比較（30 文・20 用語・総出現 55 回、カッコ内は 95% ブートストラップ信頼区間）: 定訳を指定しない `NLLB（ベースライン）`（用語一致率 0.000、文単位完全遵守率 0.000 [0.000, 0.000]、chrF 18.2、BLEU 9.9、0.032 秒/文）と `LLM（用語集なし）`（同 0.000、0.000 [0.000, 0.000]、chrF 24.6、BLEU 18.0、0.228 秒/文）は、一般訳（「トークン」「量子化」「キャッシュ」「エージェント」など）を出力するため指定定訳を 1 回も満たさなかった。
+- NLLB + プレースホルダ置換の挙動と限界: `__TERM0__` へ置換すると用語一致率 0.891・文単位完全遵守率 0.833 [0.700, 0.967]・chrF 34.9・BLEU 26.4（0.038 秒/文）まで改善するが、プレースホルダの残存率は 49/55 (0.891) にとどまった。破損例では `[0]` の `High __TERM0__` が `高 TERM0__`、`[8]` の `latest __TERM0__` が `最新のTERM0__` のように先頭の `__` が削られ、`[12]` では `Increasing the __TERM0__ improved __TERM1__` から `__TERM0__` が丸ごと脱落して `サーバーのTERM1__を向上させました` となった。また復元できても `[24]` の `代替経路 処理基盤が遅いモデル` のように助詞が抜けて不自然になりやすい。
+- LLM + 動的用語集 + 違反検出再試行の効果: 文中に現れた用語だけをプロンプトに注入する `LLM + 動的用語集` は chrF 43.8・BLEU 36.1（0.165 秒/文）と NLLB より流暢な訳を出したが、7/30 文で用語漏れが起き、用語一致率 0.855・文単位完全遵守率 0.767 [0.600, 0.900] にとどまった。未反映の用語だけを指摘して 1 回再試行する `LLM + 用語集 + 再試行` では、違反文が 7/30 から 1/30 へ減り、用語一致率 0.964・文単位完全遵守率 0.967 [0.900, 1.000]・chrF 45.3・BLEU 38.8（0.204 秒/文）を達成した。
+- 具体例の分析: `[3]` では初回の `LLM + 動的用語集` が `token` を未訳のまま残した（`billing 制限は生成された token 数に依存する。`）が再試行で `字句単位` に直り、`[13]` も `量子化後` から `量子化圧縮後` へ修正された。一方、再試行後も残った唯一の違反例 `[24]` (`When the cache misses, the fallback pipeline invokes the slower model.`) では、`cache misses` を慣用的な「キャッシュミス」のまま残し、再試行時に `代替処理基盤` を `代替経路` (fallback) へ直した代わりに `処理基盤` (pipeline) を落とすトレードオフが見られた（GPU メモリの最大使用量は 7.19 GB）。
+
+### 実務上の指針
+
+- 用語集が大きい（数百〜数千語）実務では、プロンプトに全用語を並べるのではなく、まず原文側を最長一致・単語境界で照合して該当文に現れる用語ペアだけを動的に注入すると、プロンプト長と誤誘導を抑えられる。
+- 3B クラスの小型 LLM でも、1 パス目の動的用語集注入だけでは約 2〜3 割の文で用語漏れが起きるため、生成後に指定訳語の部分文字列チェックを行い、違反文のみに「漏れた用語ペア」と「現在の訳文」を渡して再試行する 2 段階構成が有効である（今回の追加コストは 0.165 → 0.204 秒/文と約 +24% に収まった）。
+- 再試行では別の指定語が抜けたり、非用語の英単語（上の `billing` や `slower`）が残ったりする現象も起きるため、再試行後も再度ルール検証を通して未達文だけ人手確認・後編集へ回す運用にする。プレースホルダ置換は専用翻訳モデル（NLLB など）を低遅延で使う場面に向くが、アンダースコア記法がトークン分割やビーム探索で壊れやすいため、出力後の残存チェックを必須にする。
+
+### 関連レシピ
+
+- NLLB の基本構成と商用ライセンスの注意 (CC BY-NC) については、この章の「多言語翻訳モデル NLLB で翻訳する」を参照。
+- タグによる文体制御や、LLM による古文の語釈注入との比較は、この章の「タグを付けて訳文の文体を制御する（丁寧さの制御）」および「古文を現代語に訳す」を参照。
+- 翻訳品質の自動評価指標 (BLEU, chrF) と意味ベース評価 (COMET) の使い分けは、この章の「機械翻訳を BLEU で評価する (sacreBLEU)」「chrF と TER で翻訳を評価する」「COMET で翻訳の品質を評価する」を参照。
+- 過去の承認済み対訳を使う翻訳メモリ (TM) のあいまい一致検索と用語統一チェックの演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 5 節）も参照。
 
 ## 1 つの原文から多様な訳を複数出す {diverse_translation}
 

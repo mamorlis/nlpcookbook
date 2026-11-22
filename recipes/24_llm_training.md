@@ -1,6 +1,6 @@
 # LLM の学習と調整
 
-小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
+小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)、学習した複数のアダプタを重みの足し引きで合成・調整するタスク算術（モデルマージ）。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
 
 ## ベースモデルを LoRA で指示チューニングする (SFT) {lora_finetune gpu}
 
@@ -1096,3 +1096,323 @@ for label, hits in [("形が直った", ~b_strict & b_loose & a_strict), ("学�
 - 大規模言語モデルの章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」との関係: 指示文はそのレシピの「CoT (0-shot)」と同じで、推論を書かせてから答えさせる。GRPO は推論の過程には報酬を与えず、最後の答えだけを判定する。推論の書き方は、正解に結びつくかどうかを通じて間接的に学ばれるだけで、途中の計算が正しいかどうかは確かめていない。上の「学習後に間違えた例」では、学習後の応答は「答えは〇〇です。」の形は守っているが、途中でマフィンに使った 4 個を引き忘れ、13 個 × 2 ドル = 26 ドルとしている（文の途中に英語も混じる）。そのレシピでは、形の違う答えも取り出せるように取り出し方を工夫したが、ここでは答えの形そのものを LoRA の重みに覚えさせた。正解の判定には、そのレシピの取り出し方より厳しい「決まった形」を使っている。取り出し方が緩いと、途中に出てきた数値がたまたま正解と一致しただけの応答にも報酬を与えてしまう。
 - 時間とメモリ: 検証に使った GPU（T4 と同じ float16 の経路）では学習が 342 秒、全体で約 8 分、GPU メモリの最大使用量は 10.5GB だった（時間は GPU のほかの負荷で変わり、別の実行では学習が 736 秒、全体で約 17 分だった）。T4 では応答の生成が遅いので、この 2〜2.5 倍程度かかると見込んでいる（T4 では測っていない）。応答の生成は `use_vllm=True` で vLLM を使うと速くなるとされるが、Colab の torch などを入れ替えることになるので、ここでは使っていない（確かめていない）。`GRPOConfig` は trl 1.18.0 では `beta=0`（参照モデルとの KL の罰則なし、参照モデルを読み込まない）、学習率 1e-6、`bf16=True`、`gradient_checkpointing=True`、`loss_type="dapo"` が既定で、版によって変わることがある。
 - データ: 学習用の SakanaAI/gsm8k-ja-test_250-1319 (Apache 2.0) は、データセットカードによると GPT-4 (gpt-4-0125-preview) で訳したもので、評価用の MGSM と重ならないように GSM8K のテストの 251 問目以降だけを使っている。どちらも GSM8K のテストの問題なので、ここで学習したモデルを GSM8K で評価すると、学習した問題で評価することになる。MGSM のライセンスと、評価データが事前学習に含まれている可能性については、大規模言語モデルの章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の注意書きを参照。トークナイザーの修正については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## 学習した複数のアダプタを重みの足し引きで合成・調整する（タスク算術とモデルマージ） {task_arithmetic_merge gpu}
+
+異なる課題向けに学習した複数の LoRA アダプタから重み差分（タスクベクトル）を取り出し、スカラー倍で効果の強弱や打ち消しを調整したり、単一のモデルへ統合（マージ）したりしたい。単純な線形加算で干渉が起きる場合と、TIES-Merging で符号の衝突を解消して合成する場合を比べる。
+
+```python
+!pip install -q peft
+```
+
+```python
+import gc, json, random, re, time
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from peft import LoraConfig, get_peft_model
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup, set_seed
+
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+set_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+MODEL_NAME = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # MIT License
+tokenizer = load_tokenizer(MODEL_NAME)
+
+# 課題 A: 社内通知の正規化 JSON 抽出（学習・評価で ID、取引先、文型を完全に分離）
+TRAIN_A_IDS = ["AX104", "BK209", "CM315", "DL422", "EN530", "FP641", "GR752", "HS863"]
+TEST_A_IDS = ["JT910", "KU118", "LV227", "MW336", "NX445", "PY554"]
+TRAIN_A_CLIENTS = ["青葉商事", "北星電機", "中央物流", "東都製薬", "富士通信", "明和工業", "新日本食品", "大和重工"]
+TEST_A_CLIENTS = ["桜井製作所", "星野メディカル", "南風運輸", "京浜ソフト", "緑川出版", "高田精密"]
+A_CATS = [
+    ("order", ["特急配送の発注を受領しました", "追加発注の手続きが完了しました", "新規注文の登録を受け付けました", "商品のご注文を確認しました"]),
+    ("support", ["稼働障害の調査依頼を受け付けました", "不具合対応のチケットを起票しました", "保守窓口へトラブル相談が入りました", "操作エラーの問い合わせを受領しました"]),
+    ("billing", ["月次請求書を発行しました", "利用料金の清算通知を送信しました", "口座振替の引き落とし案内を送りました", "当月分の請求明細を確定しました"]),
+]
+
+def build_task_a(n, rng, ids, clients, test_mode=False):
+    items = []
+    for i in range(n):
+        cid = f"{rng.choice(ids)}-{rng.randint(10, 99)}"
+        client = rng.choice(clients)
+        cat_code, phrases = rng.choice(A_CATS)
+        phrase = rng.choice(phrases[2:]) if test_mode else rng.choice(phrases[:2])
+        if rng.random() < 0.5:
+            k, h = rng.randint(1, 9), rng.randint(1, 9) * 100
+            amt, amt_str = k * 10000 + h, f"{k}万{h}円"
+        else:
+            amt = rng.randint(12, 980) * 100
+            amt_str = f"{amt:,}円"
+        urgent = rng.choice([True, False])
+        urg_txt = rng.choice(["【至急】", "緊急対応が必要です。", "優先度：高。"]) if urgent else rng.choice(["通常進行です。", "急ぎではありません。", "標準処理とします。"])
+        m, d = rng.randint(1, 12), rng.randint(1, 28)
+        templates = [
+            f"{m}月{d}日、{client}（管理番号{cid}）から{phrase}。金額は{amt_str}です。{urg_txt}",
+            f"管理番号{cid}：{client}の件、{m}月{d}日に{phrase}（{amt_str}）。{urg_txt}",
+            f"【連絡】{client}（ID:{cid}）について{m}月{d}日付で{phrase}。関連金額は{amt_str}、{urg_txt}",
+            f"{client}（管理番号:{cid}）：{m}月{d}日付けで{phrase}。対象金額{amt_str}。{urg_txt}",
+        ]
+        text = templates[2 + (i % 2)] if test_mode else templates[i % 2]
+        prompt = f"次の社内通知を所定の正規化 JSON（1 行のみ、余分な説明やコードブロックなし）に変換してください。\n通知: {text}"
+        gold = {"code": cid, "client": client, "category": cat_code, "date": f"2026-{m:02d}-{d:02d}", "amount_jpy": amt, "urgent": urgent}
+        items.append({"prompt": prompt, "completion": json.dumps(gold, ensure_ascii=False), "gold": gold})
+    return items
+
+# 課題 B: 障害報告の丁寧な 3 行箇条書き要約（です・ます調、重要事実の保持）
+TRAIN_B_SYS = ["認証基盤", "決済ゲートウェイ", "検索エンジン", "通知キュー", "在庫API", "画像変換基盤"]
+TEST_B_SYS = ["配送管理システム", "請求バッチ", "ログ集計基盤", "予約エンジン"]
+TRAIN_B_CAUSE = ["メモリ上限の超過", "接続プールの枯渇", "設定値の反映漏れ", "期限設定の誤り", "証明書の期限切れ"]
+TEST_B_CAUSE = ["一時記憶の肥大化", "通信帯域の逼迫", "索引更新の競合"]
+TRAIN_B_ACT = ["設定の修正と再起動", "上限値の2倍拡張", "旧版への切り戻し", "監視閾値の調整"]
+TEST_B_ACT = ["再試行間隔の延長", "並列数の制限", "修正パッチの適用"]
+TRAIN_B_DATES = ["11月4日", "11月12日", "11月19日", "12月2日", "12月9日", "12月18日"]
+TEST_B_DATES = ["1月15日", "1月23日", "2月6日", "2月14日"]
+
+def build_task_b(n, rng, syss, causes, acts, dates, test_mode=False):
+    items = []
+    for i in range(n):
+        sys_name, cause, act, dt = rng.choice(syss), rng.choice(causes), rng.choice(acts), rng.choice(dates)
+        dur, impact = rng.randint(12, 55), rng.randint(15, 320)
+        templates = [
+            f"{dt}に{sys_name}で{dur}分間の遅延が生じ、約{impact}件の処理が滞った。調査の結果、{cause}が引き金と判明。運用担当が{act}を実施し、現在は平常に戻っている。",
+            f"{sys_name}において{dt}、約{impact}件に影響する{dur}分間の応答低下が発生した。原因は{cause}であり、{act}を行って復旧した。",
+            f"障害報告：{sys_name}で{dt}に{dur}分間の遅延（影響約{impact}件）が起きた。原因は{cause}であり、{act}を実施して現在は復旧している。",
+            f"{dt}、{sys_name}にて{dur}分間の遅延（影響{impact}件）を確認。原因は{cause}で、{act}を行って正常稼働へ戻った。",
+        ]
+        text = templates[2 + (i % 2)] if test_mode else templates[i % 2]
+        prompt = f"次の障害報告を、丁寧な「です・ます調」の箇条書き3行に要約してください。\n報告: {text}"
+        comp = (f"- 【発生】{dt}に{sys_name}で{dur}分間の遅延（影響{impact}件）が発生しました。\n"
+                f"- 【原因】{cause}が原因でした。\n"
+                f"- 【対応】{act}を実施し、現在は復旧しています。")
+        items.append({"prompt": prompt, "completion": comp, "facts": [dt, sys_name, str(dur), str(impact), cause, act]})
+    return items
+
+rng = random.Random(42)
+train_a = build_task_a(160, rng, TRAIN_A_IDS, TRAIN_A_CLIENTS, test_mode=False)
+test_a = build_task_a(24, rng, TEST_A_IDS, TEST_A_CLIENTS, test_mode=True)
+train_b = build_task_b(160, rng, TRAIN_B_SYS, TRAIN_B_CAUSE, TRAIN_B_ACT, TRAIN_B_DATES, test_mode=False)
+test_b = build_task_b(24, rng, TEST_B_SYS, TEST_B_CAUSE, TEST_B_ACT, TEST_B_DATES, test_mode=True)
+print(f"課題 A: 学習 {len(train_a)} 件 / 評価 {len(test_a)} 件 | 課題 B: 学習 {len(train_b)} 件 / 評価 {len(test_b)} 件")
+
+def encode_sft(items):
+    encoded = []
+    for it in items:
+        p_ids = tokenizer.apply_chat_template([{"role": "user", "content": it["prompt"]}], add_generation_prompt=True, tokenize=True, return_dict=False)
+        c_ids = tokenizer(it["completion"], add_special_tokens=False)["input_ids"] + [tokenizer.eos_token_id]
+        encoded.append((p_ids + c_ids, [-100] * len(p_ids) + c_ids))
+    return encoded
+
+TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+def train_lora_delta(train_items, label, seed=0, epochs=2, lr=1e-4, bs=8):
+    """LoRA アダプタを学習し、各線形層の重み差分 ΔW = (α/r)(B @ A) を float32 で抽出する"""
+    set_seed(seed)
+    m = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=DTYPE, device_map="auto")
+    m = get_peft_model(m, LoraConfig(r=16, lora_alpha=32, lora_dropout=0.05, task_type="CAUSAL_LM", target_modules=TARGET_MODULES))
+    enc_data = encode_sft(train_items)
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=lr, weight_decay=0.01)
+    total_steps = ((len(enc_data) + bs - 1) // bs) * epochs
+    sched = get_cosine_schedule_with_warmup(opt, max(1, total_steps // 10), total_steps)
+    m.train()
+    rng_local, pad_id = random.Random(seed), tokenizer.pad_token_id
+    t0 = time.time()
+    losses = []
+    for ep in range(epochs):
+        order = list(range(len(enc_data)))
+        rng_local.shuffle(order)
+        ep_loss = []
+        for i in range(0, len(order), bs):
+            batch = [enc_data[j] for j in order[i:i + bs]]
+            ml = max(len(x) for x, _ in batch)
+            x = torch.tensor([ids + [pad_id] * (ml - len(ids)) for ids, _ in batch], device=m.device)
+            y = torch.tensor([lbl + [-100] * (ml - len(lbl)) for _, lbl in batch], device=m.device)
+            loss = m(input_ids=x, attention_mask=(x != pad_id).long(), labels=y).loss
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+            opt.step(); sched.step(); opt.zero_grad()
+            ep_loss.append(loss.item())
+        losses.append(float(np.mean(ep_loss)))
+    print(f"{label}: 学習時間 {time.time() - t0:.1f} 秒 | エポック別損失 {[round(v, 4) for v in losses]}")
+    deltas = {}
+    for mod_name, mod in m.named_modules():
+        if hasattr(mod, "lora_A") and hasattr(mod, "lora_B") and "default" in mod.lora_A:
+            base_key = mod_name.removeprefix("base_model.model.") + ".weight"
+            A = mod.lora_A["default"].weight.detach().float().cpu()
+            B = mod.lora_B["default"].weight.detach().float().cpu()
+            deltas[base_key] = mod.scaling["default"] * (B @ A)
+    del m, opt, sched
+    gc.collect(); torch.cuda.empty_cache()
+    return deltas
+
+tau_a = train_lora_delta(train_a, "アダプタ A (JSON 抽出)", seed=0)
+tau_b = train_lora_delta(train_b, "アダプタ B (3 行要約)", seed=1)
+
+# 層・モジュール種別ごとのタスクベクトル統計量（L2 ノルム、コサイン類似度、符号衝突率）
+diag_rows = []
+for mod_type in TARGET_MODULES:
+    keys = [k for k in tau_a if f".{mod_type}." in k]
+    va = torch.cat([tau_a[k].flatten() for k in keys])
+    vb = torch.cat([tau_b[k].flatten() for k in keys])
+    nz = (va != 0) & (vb != 0)
+    conflict = ((va[nz] > 0) != (vb[nz] > 0)).float().mean().item()
+    diag_rows.append({"モジュール": mod_type, "層数": len(keys), "||τA||_2": va.norm().item(), "||τB||_2": vb.norm().item(),
+                      "cos(τA, τB)": torch.nn.functional.cosine_similarity(va[None], vb[None]).item(), "符号衝突率": conflict})
+all_a = torch.cat([v.flatten() for v in tau_a.values()])
+all_b = torch.cat([v.flatten() for v in tau_b.values()])
+nz_all = (all_a != 0) & (all_b != 0)
+diag_rows.append({"モジュール": "全対象層合計", "層数": len(tau_a), "||τA||_2": all_a.norm().item(), "||τB||_2": all_b.norm().item(),
+                  "cos(τA, τB)": torch.nn.functional.cosine_similarity(all_a[None], all_b[None]).item(),
+                  "符号衝突率": ((all_a[nz_all] > 0) != (all_b[nz_all] > 0)).float().mean().item()})
+print("\n--- タスクベクトルの層別統計 ---")
+print(pd.DataFrame(diag_rows).round(4).to_string(index=False))
+```
+
+```python
+# スケーリング（タスク算術）とマルチタスク合成（TIES-Merging）の評価
+def score_a(pred, gold):
+    s = pred.strip()
+    if s.startswith("```") or s.endswith("```"):
+        return False
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return False
+    return isinstance(obj, dict) and set(obj.keys()) == set(gold.keys()) and all(obj[k] == gold[k] and type(obj[k]) is type(gold[k]) for k in gold)
+
+POLITE_END = re.compile(r"(です|ます|ました|ません|でした|ください|ましょう)[。.]?$")
+def score_b(pred, facts):
+    lines = [ln.strip() for ln in pred.strip().splitlines() if ln.strip()]
+    prefixes = ("- 【発生】", "- 【原因】", "- 【対応】")
+    return (len(lines) == 3 and all(ln.startswith(p) for ln, p in zip(lines, prefixes))
+            and all(POLITE_END.search(ln) for ln in lines) and all(f in "\n".join(lines) for f in facts))
+
+base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=DTYPE, device_map="auto").eval()
+params = dict(base_model.named_parameters())
+base_w = {k: params[k].detach().clone() for k in tau_a}
+
+def apply_delta(delta_dict, lam=1.0):
+    with torch.no_grad():
+        for k, w0 in base_w.items():
+            d = delta_dict.get(k)
+            params[k].data.copy_(w0 if d is None else (w0.float() + lam * d.to(w0.device)).to(w0.dtype))
+
+@torch.no_grad()
+def eval_task(items, fn, bs=24, max_new_tokens=110):
+    tokenizer.padding_side = "left"
+    prompts = [[{"role": "user", "content": it["prompt"]}] for it in items]
+    outs = []
+    for i in range(0, len(prompts), bs):
+        enc = tokenizer.apply_chat_template(prompts[i:i + bs], add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True).to(base_model.device)
+        gen = base_model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)[:, enc["input_ids"].shape[1]:]
+        outs.extend(tokenizer.batch_decode(gen, skip_special_tokens=True))
+    return np.array([fn(o, it["gold"] if "gold" in it else it["facts"]) for o, it in zip(outs, items)], dtype=float), outs
+
+# 1. タスク算術の係数スケーリング: θ_base + λ * τ_A
+scale_rows, scale_samples = [], {}
+for lam in [-0.5, 0.0, 0.5, 1.0, 1.5]:
+    apply_delta(tau_a, lam=lam)
+    ha, oa = eval_task(test_a, score_a)
+    hb, _ = eval_task(test_b, score_b)
+    scale_rows.append({"λ": lam, "課題 A": ha.mean(), "課題 B": hb.mean()})
+    scale_samples[lam] = oa[0].replace("\n", " ")[:68]
+print("--- タスク算術スケーリング (θ_base + λ τ_A) ---")
+print(pd.DataFrame(scale_rows).round(3).to_string(index=False))
+
+# 2. TIES-Merging (Trim -> Elect Sign -> Disjoint Mean)
+def ties_merge(task_vectors, trim_pct=50.0, lam=1.0):
+    merged = {}
+    for k in task_vectors[0]:
+        trimmed = []
+        for tv in task_vectors:
+            v = tv[k]
+            if trim_pct > 0:
+                thresh = torch.quantile(v.abs().flatten(), trim_pct / 100.0)
+                v = torch.where(v.abs() >= thresh, v, torch.zeros_like(v))
+            trimmed.append(v)
+        T = torch.stack(trimmed, dim=0)
+        elected = torch.sign(T.sum(dim=0))
+        agree = (torch.sign(T) == elected.unsqueeze(0)) & (T != 0)
+        merged[k] = lam * ((T * agree).sum(dim=0) / agree.sum(dim=0).clamp(min=1))
+    return merged
+
+def ci_str(hits, seed=0):
+    boot = hits[np.random.default_rng(seed).integers(0, len(hits), (2000, len(hits)))].mean(1)
+    return f"{hits.mean():.3f} [{np.percentile(boot, 2.5):.3f}, {np.percentile(boot, 97.5):.3f}]"
+
+def avg_ci_str(ha, hb, seed=0):
+    rng_b = np.random.default_rng(seed)
+    ia = rng_b.integers(0, len(ha), (2000, len(ha)))
+    ib = rng_b.integers(0, len(hb), (2000, len(hb)))
+    boot = 0.5 * (ha[ia].mean(1) + hb[ib].mean(1))
+    return f"{0.5 * (ha.mean() + hb.mean()):.3f} [{np.percentile(boot, 2.5):.3f}, {np.percentile(boot, 97.5):.3f}]"
+
+merge_configs = [
+    ("ベースモデル (λ=0)", {}),
+    ("アダプタ A のみ (τA)", tau_a),
+    ("アダプタ B のみ (τB)", tau_b),
+    ("単純加算 (τA + τB)", {k: tau_a[k] + tau_b[k] for k in tau_a}),
+    ("縮小加算 (0.8(τA + τB))", {k: 0.8 * (tau_a[k] + tau_b[k]) for k in tau_a}),
+    ("単純平均 (0.5(τA + τB))", {k: 0.5 * (tau_a[k] + tau_b[k]) for k in tau_a}),
+    ("TIES (trim=50%, λ=1.0)", ties_merge([tau_a, tau_b], 50.0, 1.0)),
+    ("TIES (trim=70%, λ=1.0)", ties_merge([tau_a, tau_b], 70.0, 1.0)),
+]
+merge_rows, saved_outs = [], {}
+for label, tv in merge_configs:
+    apply_delta(tv, 1.0)
+    ha, oa = eval_task(test_a, score_a)
+    hb, ob = eval_task(test_b, score_b)
+    merge_rows.append({"手法": label, "課題 A (95% CI)": ci_str(ha), "課題 B (95% CI)": ci_str(hb), "平均 (95% CI)": avg_ci_str(ha, hb)})
+    saved_outs[label] = (oa, ob)
+print("\n--- マルチタスク統合の比較 (各 N=24) ---")
+print(pd.DataFrame(merge_rows).to_string(index=False))
+```
+
+```python
+# スケーリングとマージによる出力の変化例を表示し、GPU メモリを解放する
+print("--- λ による出力の変化（課題 A 先頭例）---")
+for lam in [-0.5, 0.0, 1.0, 1.5]:
+    print(f"  λ={lam:+.1f}: {scale_samples[lam]}")
+
+print("\n--- マージ手法ごとの生成例（課題 A[0] / 課題 B[0]）---")
+for label in ["ベースモデル (λ=0)", "アダプタ A のみ (τA)", "単純加算 (τA + τB)", "単純平均 (0.5(τA + τB))", "TIES (trim=50%, λ=1.0)"]:
+    print(f"[{label}] A: {saved_outs[label][0][0].replace(chr(10), ' ')[:90]}")
+for label in ["ベースモデル (λ=0)", "アダプタ B のみ (τB)", "単純加算 (τA + τB)", "TIES (trim=50%, λ=1.0)"]:
+    print(f"[{label}] B: {saved_outs[label][1][0].replace(chr(10), ' / ')[:95]}")
+
+print(f"\nGPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+del base_model, base_w, params, tau_a, tau_b
+gc.collect(); torch.cuda.empty_cache()
+```
+
+### 実行結果の分析
+
+- 学習とタスクベクトルの性質: アダプタ A（JSON 抽出、学習 10.1 秒、損失 0.3846 → 0.0005）とアダプタ B（3 行要約、学習 9.1 秒、損失 0.541 → 0.0004）を 168 個の線形層から $\Delta W_t = (\alpha/r)(B_t @ A_t)$ として抽出すると、全対象層合計の L2 ノルムは $\|\tau_A\|_2 = 1.8251$、$\|\tau_B\|_2 = 1.8132$ で、うち MLP 層（`gate_proj` が 1.1165 / 1.1128、`up_proj` が 1.1126 / 1.1020）が注意機構の投影層 (0.3913〜0.5954) より大きな変化を担っていた。両アダプタの全体コサイン類似度は 0.0002 とほぼ直交する一方、非ゼロ座標の符号衝突率は全層合計で 0.4999（モジュール種別ごとでも 0.4999〜0.5000）に達し、約半数の座標で逆向きの更新が起きている。
+- スケーリング（タスク算術 $\theta_{\text{base}} + \lambda \tau_A$）: 課題 A の正解率は $\lambda = 0.0$ の 0.000（```` ```json ```` で囲み日本語キーを出す）から $\lambda = 0.5$ で 0.583、$\lambda = 1.0$ で 1.000（正規化 JSON のみ出力）へ上昇した。逆に $\lambda = -0.5$ では JSON を作らず「社内通知の所定の正規化 JSON形式に変換するために…」という説明文のみを返して課題能力が打ち消され (0.000)、過大な $\lambda = 1.5$ でも末尾のキーや終了制御が崩れて 0.000 に急落した。なお課題 A 用アダプタの適用で課題 B が解けることはなく、どの $\lambda$ でも課題 B は 0.000 のままだった。
+- マルチタスク統合の比較（各 N=24、カッコ内は 95% ブートストラップ信頼区間）: ベースモデルは 0.000 / 0.000（平均 0.000）、単一アダプタ A は 1.000 / 0.000（平均 0.500）、単一アダプタ B は 0.000 / 1.000（平均 0.500）だった。2 つをそのまま足す単純加算 ($\tau_A + \tau_B$) では課題 B は 0.958 [0.875, 1.000] を保つ一方、課題 A が 0.708 [0.541, 0.875] へ低下し（平均 0.833 [0.729, 0.917]）、課題 A の先頭例でも `category` が `"billing"` から `"support"` へ誤反転した。単純平均 ($0.5(\tau_A + \tau_B)$) は課題 B を 1.000 に保ったまま課題 A を 0.083 [0.000, 0.208]（平均 0.542 [0.500, 0.604]）まで大きく落とし、縮小加算 ($0.8(\tau_A + \tau_B)$) は 0.833 / 0.958（平均 0.896 [0.812, 0.979]）だった。
+- TIES-Merging の効果とハイパーパラメータ感度: 下位 50% の微小成分を除去 (Trim) して多数派符号を選び (Elect)、同符号成分のみで平均する `TIES (trim=50%, λ=1.0)` は課題 A 0.875 [0.750, 1.000]、課題 B 1.000 [1.000, 1.000]、平均 0.938 [0.875, 1.000] と最高の統合性能を示し、課題 A 先頭例の `"billing"` 誤判定も解消した。ただし密な低ランク積 $B @ A$ に対して `trim=70%` まで削ると有効な小成分まで失われ、課題 A が 0.583 [0.375, 0.792]（平均 0.792 [0.688, 0.896]）に下がった。GPU メモリの最大使用量は 5.96 GB だった（T4 などの float16 環境では実行時間が長くなる点に注意）。
+
+### 実務上の指針
+
+- LoRA マージを安定させるには、PEFT の高水準マージ API の仕様変化に依存せず、`scaling * (B @ A)` を `float32` で明示計算してベース重みへ加算・調整する方法が確実で、任意の線形結合や TIES-Merging をそのまま実装できる。
+- 単純平均 ($0.5(\tau_A + \tau_B)$) は課題固有パラメータまで半減させるため、$\lambda = 0.5$ 付近で性能が落ちやすい構造化出力タスクを著しく損なう。一方 TIES-Merging の Disjoint Mean は、トリミング後に片方だけ非ゼロになった座標を 1 で割るため課題固有の大きさを保てる。ただしトリミング率が高すぎると密行列の情報が落ちるため、検証データで `trim`（50% 前後）と全体係数 $\lambda$ を調整する。
+- 単一タスクアダプタを過剰適合（エポック数を増やしすぎて損失がほぼ 0 になる状態）させると、$\lambda = 1.0$ 自体が過スケールになりマージ時の干渉が増えやすい。ベースライン・単体アダプタ・統合モデルを同じ評価セットと信頼区間で並べて確認する。
+
+### 関連レシピ
+
+- 単一課題向けの LoRA 学習手順と、モデル `sbintuitions/sarashina2.2-0.5b` の `load_tokenizer` による Unigram 復元については、この章の「ベースモデルを LoRA で指示チューニングする (SFT)」および大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照。
+- 純粋な PyTorch ループでの LoRA 学習（`trl` を使わない構成）は、この章の「選好データから報酬モデルを学習して応答を採点する（Bradley-Terry モデル）」も参照。
+- タスクベクトルのスケーリングと同じようにモデル出力の形式を厳密に制御したい場合は、大規模言語モデルの章の「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」を参照。
