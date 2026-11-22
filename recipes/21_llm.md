@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする（チャットテンプレート） {llm_chat_local}
 
@@ -1295,6 +1295,301 @@ print(f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
 - 強すぎる制約（MGSM の 50 問）: 自由に考えさせて最後の数値を取ると正解率 36%、答えだけの JSON に縛ると 6%（差 −30.0 ポイント [−44.0, −16.0]）だった。同じく `answer` を先に、`reasoning` を後に置くと 4% で、例の問題のように、先に書いた答え (2) と後の推論 (3) が食い違う。`reasoning` を先に置くと 14% まで戻るが、自由な CoT よりはまだ低かった（−22.0 ポイント [−36.0, −6.0]。原因は調べていない）。形式の制約で推論の課題の性能が下がることは Tam et al. (2024) も報告している。推論が要る課題では、自由に考えさせたあとで別の呼び出しで構造化するか、推論のフィールドを先に置く。
 - 速度: バッチ生成では、ステップ数がいちばん長い出力のトークン数で決まるので、表の「1 ステップあたりのミリ秒」で比べる。出力の最大の長さがほぼ同じ MGSM の 2 条件では、`reasoning` → `answer` が 295 ミリ秒、自由な CoT が 61 ミリ秒で、制約ありは 1 ステップが約 5 倍遅かった。各ステップで、バッチの 1 件ずつ索引から許されるトークンのマスクを作り、GPU に送って logits に掛ける処理が加わるためと考えられる（内訳は測っていない）。出力が短い条件はプロンプトの処理などの固定の時間が大きく、1 ステップあたりでは比べにくいが、出力が短くなる分、1 件あたりでは速くなりうる（短い指示の JSON は 0.047 秒、取り出す方式は 0.104 秒）。形式ごとの準備（オートマトンの構築）は 0.3〜0.7 秒だった。時間は共有の GPU で測った目安である。GPU メモリは最大 5.7 GB（T4 と同じ float16 で実行した値）。
 - データは、レビュー 40 件と日付の 12 文をこのレシピのために作り、正解も付けた（neutral の判断などには異論がありうる）。MGSM は先頭の 50 問だけなので、信頼区間の幅は 30 ポイント近くある。モデルは sarashina2.2-1b-instruct（SB Intuitions、MIT ライセンス）。API のモデルでは、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」「Claude に決まった形式（JSON スキーマ）で出力させる」の機能を使う。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる {llm_tool_calling gpu}
+
+手元のオープンな LLM に Python 関数の定義（名前・説明・引数の型）を渡し、運賃照会や為替換算、営業日数の計算を必要に応じて呼び出させて、その実行結果をもとに最終的な回答を作らせたい。ツールを渡さない場合と比べ、数値の正確さや不要な呼び出しが起きないかを確かめる。
+
+```python
+import datetime, inspect, json, re, time, unicodedata
+import numpy as np
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+torch.manual_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+name = "Qwen/Qwen2.5-1.5B-Instruct"                   # Apache 2.0。tools 引数に対応したチャットテンプレートを持つ
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+
+# ツールが参照する固定の運賃表・為替レート表（外部データの代わりに辞書で用意する）
+FARES = {
+    ("東京", "名古屋"): {"自由席": 10560, "指定席": 11300, "グリーン車": 14960, "所要時間_分": 98},
+    ("東京", "京都"): {"自由席": 13320, "指定席": 14170, "グリーン車": 19040, "所要時間_分": 133},
+    ("東京", "新大阪"): {"自由席": 13870, "指定席": 14720, "グリーン車": 19590, "所要時間_分": 148},
+    ("東京", "仙台"): {"自由席": 10560, "指定席": 11410, "グリーン車": 15070, "所要時間_分": 91},
+    ("東京", "金沢"): {"自由席": 13850, "指定席": 14380, "グリーン車": 19450, "所要時間_分": 148},
+    ("新大阪", "博多"): {"自由席": 14750, "指定席": 15600, "グリーン車": 21700, "所要時間_分": 148},
+}
+RATES_TO_JPY = {"JPY": 1.0, "USD": 152.5, "EUR": 164.0, "GBP": 193.5, "KRW": 0.11}
+
+def get_train_fare(origin: str, destination: str, seat_type: str = "指定席") -> dict:
+    """主要区間の新幹線運賃（円）と所要時間（分）を登録表から調べる。
+
+    Args:
+        origin: 出発駅名（例: "東京"）
+        destination: 到着駅名（例: "名古屋"）
+        seat_type: 座席種別（"自由席" / "指定席" / "グリーン車"）
+    """
+    o, d = origin.strip().removesuffix("駅"), destination.strip().removesuffix("駅")
+    key = (o, d) if (o, d) in FARES else (d, o)
+    if key not in FARES:
+        return {"error": f"区間 {origin}->{destination} は登録されていません"}
+    if seat_type not in ("自由席", "指定席", "グリーン車"):
+        return {"error": f"座席種別 '{seat_type}' は自由席・指定席・グリーン車から選んでください"}
+    info = FARES[key]
+    return {"origin": o, "destination": d, "seat_type": seat_type,
+            "fare_jpy": info[seat_type], "duration_min": info["所要時間_分"]}
+
+def convert_currency(amount: float, from_currency: str, to_currency: str = "JPY") -> dict:
+    """固定換算表を使って金額を通貨換算する。対応通貨は USD, EUR, GBP, KRW, JPY。
+
+    Args:
+        amount: 換算する金額
+        from_currency: 元の通貨コード（例: "USD"）
+        to_currency: 換算先の通貨コード（例: "JPY"）
+    """
+    src, dst = from_currency.strip().upper(), to_currency.strip().upper()
+    if src not in RATES_TO_JPY or dst not in RATES_TO_JPY:
+        return {"error": f"未対応の通貨です: {from_currency} -> {to_currency}"}
+    converted = round(float(amount) * RATES_TO_JPY[src] / RATES_TO_JPY[dst], 2)
+    return {"amount": float(amount), "from_currency": src, "to_currency": dst, "converted": converted}
+
+def count_business_days(start_date: str, end_date: str) -> dict:
+    """2 つの日付（両端を含む）の総日数と、土日を除いた営業日数を数える。
+
+    Args:
+        start_date: 開始日（YYYY-MM-DD 形式）
+        end_date: 終了日（YYYY-MM-DD 形式）
+    """
+    try:
+        d1 = datetime.date.fromisoformat(start_date.strip())
+        d2 = datetime.date.fromisoformat(end_date.strip())
+    except ValueError:
+        return {"error": f"日付の形式が不正です: {start_date}, {end_date}（YYYY-MM-DD を使用）"}
+    if d1 > d2:
+        return {"error": f"開始日 {start_date} が終了日 {end_date} より後です"}
+    total = (d2 - d1).days + 1
+    biz = sum(1 for k in range(total) if (d1 + datetime.timedelta(days=k)).weekday() < 5)
+    return {"start_date": start_date, "end_date": end_date, "total_days": total, "business_days": biz}
+
+TOOLS = [get_train_fare, convert_currency, count_business_days]
+TOOL_MAP = {fn.__name__: fn for fn in TOOLS}
+
+# 型ヒントと Google 形式の docstring から <tools> 内の JSON スキーマが自動生成されることを確認する
+prompt_sample = tokenizer.apply_chat_template(
+    [{"role": "user", "content": "東京から名古屋まで指定席で行く運賃は？"}],
+    tools=TOOLS, add_generation_prompt=True, tokenize=False,
+)
+print(prompt_sample)
+```
+
+```python
+SYS_TOOL = (
+    "提供されたツールを使って正確に調べて答えてください。"
+    "前のツールの結果が次の呼び出しに必要なときは 1 回ずつ順に呼び出してください。"
+    "ツールが不要な一般的な質問には直接答えてください。"
+    "ツールが error を返した場合は数値を推測せず、登録がなく案内できないと答えてください。"
+)
+
+def parse_tool_calls(text):
+    """<tool_call>...</tool_call> 内の JSON（name と arguments）を取り出し、成功件数と失敗件数も返す"""
+    calls, n_ok, n_fail = [], 0, 0
+    for block in re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", text, flags=re.DOTALL):
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            n_fail += 1
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and isinstance(obj.get("arguments", {}), dict):
+            calls.append({"name": obj["name"], "arguments": obj.get("arguments", {})})
+            n_ok += 1
+        else:
+            n_fail += 1
+    return calls, n_ok, n_fail
+
+def execute_tool(name, args):
+    """ホワイトリスト辞書 TOOL_MAP と型注釈を使って安全に引数変換・実行する（eval は使わない）"""
+    if name not in TOOL_MAP:
+        return {"error": f"未登録のツールです: {name}"}
+    fn = TOOL_MAP[name]
+    sig = inspect.signature(fn)
+    cleaned = {}
+    for k, v in args.items():
+        if k not in sig.parameters:
+            return {"error": f"不正な引数名です: {k}"}
+        ann = sig.parameters[k].annotation
+        if ann is float:
+            if isinstance(v, bool):
+                return {"error": f"引数 {k} に真偽値は使えません"}
+            try:
+                cleaned[k] = float(v)
+            except (TypeError, ValueError):
+                return {"error": f"引数 {k} は数値である必要があります"}
+        elif ann is str:
+            if not isinstance(v, str):
+                return {"error": f"引数 {k} は文字列である必要があります"}
+            cleaned[k] = v
+        else:
+            cleaned[k] = v
+    try:
+        return fn(**cleaned)
+    except TypeError as e:
+        return {"error": f"引数が不足または不正です: {e}"}
+
+@torch.no_grad()
+def run_with_tools(question, max_steps=4, max_new_tokens=200):
+    messages = [{"role": "system", "content": SYS_TOOL}, {"role": "user", "content": question}]
+    trace, ok_sum, fail_sum = [], 0, 0
+    for step in range(1, max_steps + 1):
+        inputs = tokenizer.apply_chat_template(
+            messages, tools=TOOLS, add_generation_prompt=True, return_tensors="pt", return_dict=True
+        ).to(model.device)
+        # </tool_call> でいったん生成を止め、実行結果を返してから次の判断に進ませる
+        out = model.generate(
+            **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+            stop_strings=["</tool_call>"], tokenizer=tokenizer, pad_token_id=tokenizer.eos_token_id,
+        )
+        text = tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+        calls, n_ok, n_fail = parse_tool_calls(text)
+        ok_sum += n_ok
+        fail_sum += n_fail
+        if not calls:
+            return text, trace, ok_sum, fail_sum
+        messages.append({"role": "assistant", "tool_calls": [{"type": "function", "function": c} for c in calls]})
+        for call in calls:
+            res = execute_tool(call["name"], call["arguments"])
+            trace.append({"step": step, "name": call["name"], "arguments": call["arguments"], "result": res})
+            messages.append({"role": "tool", "name": call["name"], "content": json.dumps(res, ensure_ascii=False)})
+    return text, trace, ok_sum, fail_sum
+
+@torch.no_grad()
+def answer_direct(question, max_new_tokens=200):
+    """比較用: ツール定義を渡さずに直接答えさせる"""
+    messages = [{"role": "system", "content": "簡潔かつ正確に答えてください。"}, {"role": "user", "content": question}]
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
+    out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+demos = [
+    ("1 回の呼び出し", "東京から名古屋まで指定席で行く場合の新幹線運賃と所要時間を教えてください。"),
+    ("複数ステップ", "東京から名古屋までの自由席と、東京から京都までの指定席の運賃をそれぞれ調べ、合計いくらになるか教えてください。"),
+    ("未登録エラー", "東京から札幌まで指定席で行く場合の新幹線運賃を教えてください。"),
+    ("ツール不要", "Python でリストから重複要素を取り除くにはどのデータ型を使いますか。一言で教えてください。"),
+]
+for label, q in demos:
+    ans, tr, _, _ = run_with_tools(q)
+    print(f"[{label}] Q: {q}")
+    for t in tr:
+        print(f"  step {t['step']}: {t['name']}({t['arguments']}) -> {t['result']}")
+    print("  応答:", ans.replace("\n", " "))
+```
+
+```python
+# 定量評価: ツール必須 24 問（運賃 8・為替 8・営業日 8）＋ ツール不要 6 問（計 30 問）
+questions = [
+    ("運賃", "get_train_fare", "東京から名古屋まで指定席で行く場合の新幹線運賃（円）と所要時間（分）を教えてください。", ["11300", "98"]),
+    ("運賃", "get_train_fare", "東京から新大阪まで自由席で行く場合の新幹線運賃と所要時間を教えてください。", ["13870", "148"]),
+    ("運賃", "get_train_fare", "新大阪から博多までグリーン車で行く場合の新幹線運賃と所要時間を教えてください。", ["21700", "148"]),
+    ("運賃", "get_train_fare", "東京から金沢まで指定席で行く場合の新幹線運賃と所要時間を教えてください。", ["14380", "148"]),
+    ("運賃", "get_train_fare", "東京から名古屋までの自由席と、東京から京都までの指定席の運賃をそれぞれ調べ、合計は何円か教えてください。", ["24730"]),
+    ("運賃", "get_train_fare", "東京から仙台までの指定席と、東京から名古屋までの指定席の運賃をそれぞれ調べ、差額は何円か教えてください。", ["110"]),
+    ("運賃", "get_train_fare", "東京から札幌まで指定席で行く場合の新幹線運賃を教えてください。", ["未登録"]),
+    ("運賃", "get_train_fare", "名古屋から博多まで指定席で行く場合の新幹線運賃を教えてください。", ["未登録"]),
+    ("為替", "convert_currency", "200 USD を JPY に換算するといくらになりますか。", ["30500"]),
+    ("為替", "convert_currency", "150 EUR を JPY に換算するといくらになりますか。", ["24600"]),
+    ("為替", "convert_currency", "80 GBP を JPY に換算するといくらになりますか。", ["15480"]),
+    ("為替", "convert_currency", "50000 KRW を JPY に換算するといくらになりますか。", ["5500"]),
+    ("為替", "convert_currency", "30500 JPY を USD に換算するといくらになりますか。", ["200"]),
+    ("為替", "convert_currency", "100 EUR を USD に換算するといくらになりますか。", ["107.54"]),
+    ("為替", "convert_currency", "100 USD と 50 EUR をそれぞれ JPY に換算すると合計は何円ですか。", ["23450"]),
+    ("為替", "convert_currency", "200 GBP と 100 USD をそれぞれ JPY に換算し、両者の差額は何円か教えてください。", ["23450"]),
+    ("営業日", "count_business_days", "2025-05-01 から 2025-05-10 までの総日数と土日を除いた営業日数を教えてください。", ["10", "7"]),
+    ("営業日", "count_business_days", "2025-04-07 から 2025-04-11 までの総日数と営業日数を教えてください。", ["5"]),
+    ("営業日", "count_business_days", "2025-06-02 から 2025-06-15 までの総日数と営業日数を教えてください。", ["14", "10"]),
+    ("営業日", "count_business_days", "2025-07-01 から 2025-07-31 までの総日数と営業日数を教えてください。", ["31", "23"]),
+    ("営業日", "count_business_days", "2025-08-09 から 2025-08-17 までの総日数と営業日数を教えてください。", ["9", "5"]),
+    ("営業日", "count_business_days", "2025-09-01 から 2025-09-12 までの総日数と営業日数を教えてください。", ["12", "10"]),
+    ("営業日", "count_business_days", "2025-04-01 から 2025-04-14 までと、2025-04-15 から 2025-04-28 までの営業日数をそれぞれ教えてください。", ["10"]),
+    ("営業日", "count_business_days", "2025-10-01 から 2025-10-15 までの営業日数を教えてください。", ["11"]),
+    ("一般", None, "Python でリストから重複要素を取り除くにはどのデータ型を使いますか。", ["set", "セット"]),
+    ("一般", None, "HTTP ステータスコード 404 は何を表しますか。", ["見つから", "not found", "存在しない"]),
+    ("一般", None, "水の分子を表す化学式を教えてください。", ["h2o"]),
+    ("一般", None, "TCP と UDP の主な違いを 1 文で説明してください。", ["接続", "信頼", "コネクション", "確実", "再送"]),
+    ("一般", None, "JSON 形式で文字列を囲むのに使う引用符はシングルクォートとダブルクォートのどちらですか。", ["ダブル", '"']),
+    ("一般", None, "1 バイトは何ビットですか。", ["8"]),
+]
+
+def normalize_text(s):
+    s = unicodedata.normalize("NFKC", s).replace(",", "")
+    return re.sub(r"(\d+(?:\.\d+)?)万(\d*)", lambda m: str(round(float(m.group(1)) * 10000) + int(m.group(2) or 0)), s)
+
+def is_correct(kind, ans, keys):
+    s = normalize_text(ans)
+    if kind == "運賃" and keys == ["未登録"]:
+        return ("登録" in s or "案内でき" in s) and not re.search(r"\d{4,}円", s)
+    if kind == "一般":
+        return any(k in s.lower() for k in keys)
+    return all(k in s for k in keys)
+
+torch.cuda.reset_peak_memory_stats()
+records = {}
+for mode in ["ツールなし", "ツールあり"]:
+    t0, rows = time.time(), []
+    for kind, exp_tool, q, keys in questions:
+        if mode == "ツールなし":
+            ans, tr, ok, fail = answer_direct(q), [], 0, 0
+        else:
+            ans, tr, ok, fail = run_with_tools(q)
+        tools_used = [t["name"] for t in tr]
+        rows.append({
+            "種別": kind, "質問": q, "正解": is_correct(kind, ans, keys),
+            "ツール選択一致": (exp_tool in tools_used) if exp_tool else (len(tools_used) == 0),
+            "呼び出し回数": len(tr), "パース成功": ok, "パース失敗": fail,
+            "呼び出し履歴": tools_used, "応答": ans,
+        })
+    elapsed = time.time() - t0
+    df = pd.DataFrame(rows)
+    records[mode] = df
+    req, gen = df[df["種別"] != "一般"], df[df["種別"] == "一般"]
+    n_parse = req["パース成功"].sum() + req["パース失敗"].sum()
+    print(f"[{mode}] 所要 {elapsed:.1f} 秒 | ツール必須 24 問正解率 {req['正解'].mean():.3f} ({req['正解'].sum()}/24) | "
+          f"ツール選択 {req['ツール選択一致'].mean():.3f} | 複数回呼び出し {(req['呼び出し回数'] >= 2).mean():.3f} | "
+          f"JSON パース {req['パース成功'].sum()}/{n_parse or 1}")
+    print(f"             ツール不要 6 問: 正解率 {gen['正解'].mean():.3f} ({gen['正解'].sum()}/6) | "
+          f"不要な誤発火 {(gen['呼び出し回数'] > 0).mean():.3f}")
+
+# 対応のあるブートストラップでツール必須 24 問の正解率差の 95% 信頼区間を求める
+x = records["ツールあり"].loc[records["ツールあり"]["種別"] != "一般", "正解"].to_numpy(float)
+y = records["ツールなし"].loc[records["ツールなし"]["種別"] != "一般", "正解"].to_numpy(float)
+idx = np.random.default_rng(0).integers(0, len(x), (2000, len(x)))
+boot = x[idx].mean(1) - y[idx].mean(1)
+print(f"正解率の差（ツールあり − ツールなし）: {(x.mean() - y.mean()) * 100:+.1f} ポイント "
+      f"[{np.percentile(boot, 2.5) * 100:+.1f}, {np.percentile(boot, 97.5) * 100:+.1f}]")
+
+print("\n--- ツールありでの失敗例 ---")
+for _, r in records["ツールあり"].query("not 正解").iterrows():
+    print(f"  [{r['種別']}] {r['質問'][:34]}... | 呼出={r['呼び出し履歴']} | {r['応答'][:75].replace(chr(10), ' ')}")
+print("\n--- ツールなしとの対比（成功例） ---")
+for i in [0, 8, 16]:
+    a = records["ツールあり"].iloc[i]
+    b = records["ツールなし"].iloc[i]
+    print(f"  Q: {a['質問'][:36]}...")
+    print(f"    ツールなし: {b['応答'][:70].replace(chr(10), ' ')}")
+    print(f"    ツールあり: {a['応答'][:70].replace(chr(10), ' ')}")
+print(f"\nGPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+- ツール必須 24 問の正解率は、ツールなし 0.083 (2/24) からツールあり 0.833 (20/24) へ上がり、差は +75.0 ポイント [+58.3, +91.7]（対応のあるブートストラップによる 95% 信頼区間）だった。ツールなしでは登録表の運賃と独自レートの為替換算を 1 問も当てられず (0/16)、営業日数も両端を含む数え方や曜日判定を外して 2/8 にとどまった。
+- ツールありでは 24 問すべてで期待したツールが選ばれ（選択率 1.000）、`<tool_call>` 内の JSON 引数パースも 27/27 が成功した。複数回呼び出しは 24 問中 3 問 (0.125) で起き、動作トレースの 2 区間比較では step 1（東京→名古屋）と step 2（東京→京都）を順に呼び出して合計 24,730 円を正しく答えた。ツール不要な一般質問 6 問では不要な誤発火が 0 件 (0.000)、正解率も 1.000 (6/6) を保った。
+- 失敗例（4 件）はいずれも小型モデル (1.5B) による呼び出し後の整理・比較の誤りである。`duration_min` が 148 分だった 3 区間（東京→新大阪、新大阪→博多、東京→金沢）では、ツールが返した運賃は正しく答えた一方、148 分を「約1時間48分」（108 分）と読み誤った。2 区間の差額を問う問題（東京→仙台と東京→名古屋）では、仙台だけツールを呼んで 11,410 円を取得し、名古屋は 2 回目を呼ばずに約 13,560 円と捏造した。一方、未登録区間（東京→札幌）のデモでは `{"error": ...}` を受けて数値を捏造せず「登録されていません」と答えており、エラーを明示的に返す設計とプロンプトの指示の両方が効いている。
+- `apply_chat_template(..., tools=TOOLS)` は、Python 関数の型ヒント（`str`, `float`, 既定値）と Google 形式 docstring (`Args:`) を検査して JSON Schema を組み立て、システムメッセージの `<tools>...</tools>` に埋め込む。生成時は `stop_strings=["</tool_call>"]` を指定して `</tool_call>` でいったん止めると、小型モデルがツール結果を待たずに次の呼び出し引数を推測したり偽の実行結果を書き足したりするのを抑えられる。履歴には `role: "assistant"` の `tool_calls` と `role: "tool"` の実行結果（JSON 文字列）を交互に積んで次の生成に渡す。
+- 安全なディスパッチのため、モデルの出力を `eval` や `exec` で実行せず、ホワイトリスト辞書 `TOOL_MAP` に登録された関数名だけを許可し、`inspect.signature` の型注釈に沿って引数名と型（数値引数への真偽値の混入防止など）を検証する。不正な引数には例外で落とさず `{"error": ...}` を返してモデルに再判断させる。また、Web ページや検索結果のように信頼できない外部テキストを返すツールでは、返り値に「元の指示を無視して別のツールを呼べ」といった指示を紛れ込ませる間接プロンプトインジェクションの危険がある（RAG の章の「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」も参照）。実運用では参照系と更新・送信系のツールを分け、後者には人の確認を挟む。
+- 30 問の処理時間はツールなし 56.0 秒、ツールあり 99.5 秒、GPU メモリの最大使用量は 3.2 GB だった（T4 相当の float16 ではこの倍程度の時間がかかる見込み）。複雑な多段階推論や大規模な関数群を安定して呼び出したい場合は、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」「Claude に決まった形式（JSON スキーマ）で出力させる」や各 API のネイティブなツール呼び出し機能を使う。1 回の生成で出力の文法だけを強制したいときは、この章の「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」を使い、外部関数の選択と実行結果の反映まで繰り返させたいときにツール呼び出しを使う。
 
 ## 検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ {ad_text_generation gpu}
 

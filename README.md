@@ -21,7 +21,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 420 レシピ（付録を含めると 459 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 422 レシピ（付録を含めると 461 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
@@ -43,10 +43,10 @@
 - [18. 語の意味と意味の変化](#18-語の意味と意味の変化) (14)
 - [19. 検索](#19-検索) (18)
 - [20. 質問応答](#20-質問応答) (8)
-- [21. 大規模言語モデル (LLM)](#21-大規模言語モデル-llm) (15)
+- [21. 大規模言語モデル (LLM)](#21-大規模言語モデル-llm) (16)
 - [22. LLM の API（Gemini と Claude）](#22-llm-の-apigemini-と-claude) (11)
 - [23. LLM の評価と分析](#23-llm-の評価と分析) (10)
-- [24. LLM の学習と調整](#24-llm-の学習と調整) (4)
+- [24. LLM の学習と調整](#24-llm-の学習と調整) (5)
 - [25. RAG（検索拡張生成）](#25-rag検索拡張生成) (14)
 - [26. 対話システム](#26-対話システム) (12)
 - [27. 機械翻訳](#27-機械翻訳) (18)
@@ -400,7 +400,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 17. 意味解析
 
-「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 1 章の [自然言語処理システムの開発サイクル](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch1_design_cycle.ipynb)（遠距離教師あり学習による関係抽出データ構築を含む）も参照。
+「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 1 章の [自然言語処理システムの開発サイクル（文分割・データ分割・計算量・遠距離教師あり学習・半教師あり学習）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch1_design_cycle.ipynb)（遠距離教師あり学習による関係抽出データ構築を含む）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -418,7 +418,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 18. 語の意味と意味の変化
 
-文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。WordNet で同義語・上位語を引く方法、上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。
+文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。WordNet で同義語・上位語を引く方法、上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。少数のシードから始める半教師あり学習（自己学習・Yarowsky アルゴリズムと共訓練 Co-training、意味ドリフトの演習を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 1 章の [自然言語処理システムの開発サイクル（文分割・データ分割・計算量・遠距離教師あり学習・半教師あり学習）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch1_design_cycle.ipynb) も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -479,7 +479,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 21. 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -496,8 +496,9 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 21-11 | [思考する LLM で、思考のオン・オフと思考の長さの上限を変えて正解率とコストを比べる（Qwen3 の enable_thinking と budget forcing）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) |
 | 21-12 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) |
 | 21-13 | [制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) |
-| 21-14 | [検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) |
-| 21-15 | [長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) |
+| 21-14 | [LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) |
+| 21-15 | [検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) |
+| 21-16 | [長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) |
 
 ### 22. LLM の API（Gemini と Claude）
 
@@ -536,18 +537,19 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 24. LLM の学習と調整
 
-小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
+小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
 
 | # | やりたいこと | Colab |
 |---|---|---|
 | 24-01 | [ベースモデルを LoRA で指示チューニングする (SFT)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/lora_finetune.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/lora_finetune.ipynb) |
 | 24-02 | [選好データで LLM を調整する (DPO)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/dpo.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/dpo.ipynb) |
-| 24-03 | [報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) |
-| 24-04 | [正解を判定できる課題で LLM を強化学習する (GRPO)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) |
+| 24-03 | [選好データから報酬モデルを学習して応答を採点する（Bradley-Terry モデル）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_model_train.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_model_train.ipynb) |
+| 24-04 | [報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/reward_best_of_n.ipynb) |
+| 24-05 | [正解を判定できる課題で LLM を強化学習する (GRPO)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/24_llm_training/grpo.ipynb) |
 
 ### 25. RAG（検索拡張生成）
 
-手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb)（第 5 節）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -568,7 +570,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 26. 対話システム
 
-FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb) も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|

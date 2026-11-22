@@ -1,6 +1,6 @@
 # LLM の学習と調整
 
-小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
+小さなオープンモデルを学習・調整して、望む応答を出させる。ベースモデルの LoRA による指示チューニング (SFT)、選好データによる調整 (DPO)、選好データからの報酬モデルの学習、報酬モデルで応答を採点して最良を選ぶ方法 (Best-of-N)、正解を判定できる課題での強化学習 (GRPO)。モデルの動かし方とプロンプトは「大規模言語モデル (LLM)」の章、判定役の LLM による評価は「LLM の評価と分析」の章を前提にする。
 
 ## ベースモデルを LoRA で指示チューニングする (SFT) {lora_finetune gpu}
 
@@ -454,6 +454,231 @@ print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e
 - `DPOConfig` は、`TrainingArguments` と違って `bf16=True`、学習率 1e-6、`gradient_checkpointing=True` が既定。T4 では bf16 が使えないので fp16 を明示し、LoRA では学習率を上げる（ここでは 5e-5）。β を大きくすると参照モデルから離れにくくなる。`loss_type="ipo"` などで損失を IPO などに変えられる。trl 1.18.0 で確かめた（版によって引数や既定値が変わることがある）。
 - GPU メモリの最大使用量は学習時の 9.2GB で、3B の判定役を読み込んだ後も変わらなかった。sarashina2.2 のトークナイザーの修正 (`load_tokenizer`) については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
+## 選好データから報酬モデルを学習して応答を採点する（Bradley-Terry モデル） {reward_model_train gpu}
+
+「良い応答」と「悪い応答」の組（選好データ）から、質問と応答に対して 1 つの実数スコアを返す報酬モデルを LoRA で学習したい。学習前後での選好の正解率や長さバイアスを確かめ、同じテストデータで公開の 1.7B 報酬モデルや文字数ベースライン・DPO と比べる。
+
+```python
+import random, time
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+import torch.nn.functional as F
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+from peft import LoraConfig, get_peft_model
+from scipy.stats import pearsonr, spearmanr
+from tokenizers import models
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_cosine_schedule_with_warmup, set_seed
+
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    return tokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+set_seed(0)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+name = "sbintuitions/sarashina2.2-0.5b-instruct-v0.1"   # MIT License。DPO・Best-of-N・GRPO と同じ 0.5B モデル
+tokenizer = load_tokenizer(name)
+
+# num_labels=1 で読み込み、言語モデルヘッド (lm_head) の代わりにスカラー出力の線形層 score を付ける
+model = AutoModelForSequenceClassification.from_pretrained(name, num_labels=1, dtype=DTYPE, device_map="auto")
+model.config.pad_token_id = tokenizer.pad_token_id    # 最後の非パディングトークン位置を特定するために必須
+print("分類ヘッド:", model.score, "| pad_token_id:", model.config.pad_token_id)
+
+# パディング有無で最後の非パディングトークンから同じスカラー報酬が出ることを確かめる
+sample_ids = tokenizer("質問: おはようございます。", return_tensors="pt")["input_ids"].to(model.device)
+padded_ids = torch.cat([sample_ids, torch.full((1, 4), tokenizer.pad_token_id, device=model.device)], dim=1)
+padded_mask = torch.cat([torch.ones_like(sample_ids), torch.zeros((1, 4), dtype=torch.long, device=model.device)], dim=1)
+with torch.no_grad():
+    s_raw = model(input_ids=sample_ids).logits[0, 0].item()
+    s_pad = model(input_ids=padded_ids, attention_mask=padded_mask).logits[0, 0].item()
+print(f"パディングなし: {s_raw:+.4f} / 右パディングあり: {s_pad:+.4f}（差 {abs(s_raw - s_pad):.4f}）")
+
+# ランダム初期化の score 層も学習対象に含めるため modules_to_save=["score"] を必ず指定する
+lora = LoraConfig(
+    r=16, lora_alpha=32, lora_dropout=0.05, task_type="SEQ_CLS",
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    modules_to_save=["score"],
+)
+model = get_peft_model(model, lora)
+model.print_trainable_parameters()
+for pname, param in model.named_parameters():
+    if "score" in pname:
+        print(f"  {pname}: requires_grad={param.requires_grad}, shape={tuple(param.shape)}")
+```
+
+```python
+# 選好データ: この章の DPO レシピと完全に同一の絞り込み・乱数シードで train（2,000 組）・test（200 組）を作る
+raw = load_dataset("llm-jp/hh-rlhf-12k-ja", split="train")
+data = [{"prompt": [{"role": "user", "content": r["conversations"][0]["value"]}],
+         "chosen": [{"role": "assistant", "content": r["chosen"]}],
+         "rejected": [{"role": "assistant", "content": r["rejected"]}]}
+        for r in raw
+        if r["source"].startswith("helpful") and len(r["conversations"]) == 1 and r["chosen"] != r["rejected"]
+        and len(r["conversations"][0]["value"]) <= 200 and max(len(r["chosen"]), len(r["rejected"])) <= 400]
+random.Random(0).shuffle(data)
+train, test = data[:2000], data[2000:2200]
+print(f"全 {len(data)} 件から 学習 {len(train)} 組・評価 {len(test)} 組（train で chosen が長い割合 {np.mean([len(x['chosen'][0]['content']) > len(x['rejected'][0]['content']) for x in train]):.3f}）")
+
+MAX_LENGTH = 512
+def encode_pair(ex):
+    c_txt = tokenizer.apply_chat_template(ex["prompt"] + ex["chosen"], tokenize=False)
+    r_txt = tokenizer.apply_chat_template(ex["prompt"] + ex["rejected"], tokenize=False)
+    return (tokenizer(c_txt, truncation=True, max_length=MAX_LENGTH, add_special_tokens=False)["input_ids"],
+            tokenizer(r_txt, truncation=True, max_length=MAX_LENGTH, add_special_tokens=False)["input_ids"])
+
+train_enc = [encode_pair(ex) for ex in train]
+test_enc = [encode_pair(ex) for ex in test]
+
+def collate_pairs(pairs, pad_id):
+    """chosen と rejected を 1 つのバッチに並べて右パディングする"""
+    seqs = [c for c, _ in pairs] + [r for _, r in pairs]
+    n = max(len(s) for s in seqs)
+    x = torch.tensor([s + [pad_id] * (n - len(s)) for s in seqs])
+    mask = torch.tensor([[1] * len(s) + [0] * (n - len(s)) for s in seqs])
+    return x, mask
+
+@torch.no_grad()
+def evaluate_pairs(enc_pairs, bs=16):
+    model.eval()
+    rc, rr = [], []
+    for i in range(0, len(enc_pairs), bs):
+        batch = enc_pairs[i:i + bs]
+        x, mask = collate_pairs(batch, tokenizer.pad_token_id)
+        sc = model(input_ids=x.to(model.device), attention_mask=mask.to(model.device)).logits[:, 0].float()
+        m = len(batch)
+        rc.extend(sc[:m].tolist())
+        rr.extend(sc[m:].tolist())
+    return np.array(rc), np.array(rr)
+
+def rate_ci(hits):
+    idx = np.random.default_rng(0).integers(0, len(hits), (2000, len(hits)))
+    boot = hits[idx].mean(1)
+    return f"{hits.mean():.3f}（95% 信頼区間 {np.percentile(boot, 2.5):.3f}〜{np.percentile(boot, 97.5):.3f}）"
+
+rc0, rr0 = evaluate_pairs(test_enc)
+print(f"学習前（test {len(test)} 組）: 正解率 {rate_ci(rc0 > rr0)}、平均報酬差 {(rc0 - rr0).mean():+.3f}")
+
+# Bradley-Terry 損失 L = -log sigmoid(r_chosen - r_rejected) で 1 エポック学習
+BS, ACCUM, LR = 4, 2, 2e-4
+optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=LR, weight_decay=0.01)
+total_steps = (len(train_enc) // BS + ACCUM - 1) // ACCUM
+scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=max(1, total_steps // 10), num_training_steps=total_steps)
+order = list(range(len(train_enc)))
+random.Random(0).shuffle(order)
+
+torch.cuda.reset_peak_memory_stats()
+t0 = time.time()
+model.train()
+optimizer.zero_grad()
+losses = []
+for step_idx, start in enumerate(range(0, len(order), BS)):
+    batch = [train_enc[i] for i in order[start:start + BS]]
+    x, mask = collate_pairs(batch, tokenizer.pad_token_id)
+    scores = model(input_ids=x.to(model.device), attention_mask=mask.to(model.device)).logits[:, 0].float()
+    m = len(batch)
+    loss = -F.logsigmoid(scores[:m] - scores[m:]).mean()
+    (loss / ACCUM).backward()
+    losses.append(loss.item())
+    if (step_idx + 1) % ACCUM == 0 or start + BS >= len(order):
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
+    if (step_idx + 1) % 100 == 0:
+        print(f"  batch {step_idx + 1:3d}/{len(order) // BS}  loss {np.mean(losses[-100:]):.3f}")
+
+train_sec = time.time() - t0
+rc1, rr1 = evaluate_pairs(test_enc)
+print(f"学習 {train_sec:.1f} 秒、GPU メモリの最大使用量 {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+print(f"学習後（test {len(test)} 組）: 正解率 {rate_ci(rc1 > rr1)}、平均報酬差 {(rc1 - rr1).mean():+.3f}")
+```
+
+```python
+# 長さバイアス診断、文字数ベースライン・DPO（参照値）・Skywork-1.7B との比較、具体例での採点挙動
+model.eval()
+len_c = np.array([len(ex["chosen"][0]["content"]) for ex in test])
+len_r = np.array([len(ex["rejected"][0]["content"]) for ex in test])
+len_diff = len_c - len_r
+rm_diff = rc1 - rr1
+hits_rm = rm_diff > 0
+hits_len = len_c > len_r
+longer = len_c > len_r
+
+print(f"報酬差と応答文字数差の相関: Pearson r = {pearsonr(rm_diff, len_diff).statistic:.3f}, "
+      f"Spearman rho = {spearmanr(rm_diff, len_diff).statistic:.3f}")
+print(f"chosen が長い {longer.sum()} 組の正解率: {hits_rm[longer].mean():.3f} / "
+      f"長くない {(~longer).sum()} 組の正解率: {hits_rm[~longer].mean():.3f}")
+
+# 公開の 1.7B 報酬モデル (Skywork-Reward-V2-Qwen3-1.7B, Apache 2.0) を同じ test 200 組で評価する
+rm_name = "Skywork/Skywork-Reward-V2-Qwen3-1.7B"
+sky_tok = AutoTokenizer.from_pretrained(rm_name)
+sky_rm = AutoModelForSequenceClassification.from_pretrained(rm_name, dtype=DTYPE, device_map="auto").eval()
+t_sky = time.time()
+sc_sky, sr_sky = [], []
+with torch.no_grad():
+    for i in range(0, len(test), 8):
+        batch = test[i:i + 8]
+        texts = [sky_tok.apply_chat_template(ex["prompt"] + ex["chosen"], tokenize=False) for ex in batch] + \
+                [sky_tok.apply_chat_template(ex["prompt"] + ex["rejected"], tokenize=False) for ex in batch]
+        enc = sky_tok(texts, return_tensors="pt", padding=True).to(sky_rm.device)
+        sc = sky_rm(**enc).logits[:, 0].float()
+        m = len(batch)
+        sc_sky.extend(sc[:m].tolist())
+        sr_sky.extend(sc[m:].tolist())
+sc_sky, sr_sky = np.array(sc_sky), np.array(sr_sky)
+hits_sky = sc_sky > sr_sky
+print(f"\nSkywork-1.7B（{time.time() - t_sky:.1f} 秒）: 正解率 {rate_ci(hits_sky)}、平均報酬差 {(sc_sky - sr_sky).mean():+.3f}")
+print(f"文字数ベースライン: 正解率 {rate_ci(hits_len)}")
+print(f"DPO（この章の DPO レシピ参照値）: 正解率 0.680（95% 信頼区間 0.615〜0.745）")
+print(f"学習した 0.5B 報酬モデルと Skywork-1.7B の選好一致率: {(hits_rm == hits_sky).mean():.3f}、"
+      f"報酬差の順位相関: {spearmanr(rm_diff, sc_sky - sr_sky).statistic:.3f}")
+
+@torch.no_grad()
+def score_responses(prompt_text, responses):
+    texts = [tokenizer.apply_chat_template([{"role": "user", "content": prompt_text}, {"role": "assistant", "content": r}], tokenize=False)
+             for r in responses]
+    enc = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=MAX_LENGTH, add_special_tokens=False).to(model.device)
+    return model(**enc).logits[:, 0].float().cpu().numpy()
+
+# 具体例での採点挙動: Best-of-N レシピと同じりんごの問題・定型締め句の追加・半分削除
+q = "りんごが 12 個あります。4 個を友達にあげ、1 個買い足して、自分と兄弟 2 人の 3 人で等しく分けます。1 人何個もらえますか。"
+cands = {
+    "正しい（日本語）": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。3 人で分けるので 9 ÷ 3 = 3。答えは 1 人 3 個です。",
+    "誤り（日本語）": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。兄弟 2 人で分けるので 9 ÷ 2 = 4.5。答えは 1 人 4 個です。",
+    "定型締め句を追加": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。3 人で分けるので 9 ÷ 3 = 3。答えは 1 人 3 個です。\n\nほかにもご質問があれば、お気軽にお尋ねください。",
+    "後半を削除（半分）": "12 − 4 = 8 個。1 個買って 8 + 1 = 9 個。",
+}
+print("\nりんごの例での採点:")
+for k, s in zip(cands, score_responses(q, list(cands.values()))):
+    print(f"  {s:+7.3f}  {k}")
+
+sub = test[:50]
+orig_s = rc1[:50]
+tail_s = np.array([score_responses(ex["prompt"][0]["content"], [ex["chosen"][0]["content"] + "\n\nほかにもご質問があれば、お気軽にお尋ねください。"])[0] for ex in sub])
+half_s = np.array([score_responses(ex["prompt"][0]["content"], [ex["chosen"][0]["content"][:max(1, len(ex["chosen"][0]["content"]) // 2)]])[0] for ex in sub])
+print(f"\ntest 先頭 50 件での言い回し操作:")
+print(f"  定型締め句を追加: 平均 {(tail_s - orig_s).mean():+.3f}（上昇 {(tail_s > orig_s).mean():.1%}）")
+print(f"  後半を半分削除  : 平均 {(half_s - orig_s).mean():+.3f}（上昇 {(half_s > orig_s).mean():.1%}）")
+print(f"GPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+- Bradley-Terry モデルでは、質問 $x$ に対する 2 つの応答 $y_w$ (chosen) と $y_l$ (rejected) について、$y_w$ が選ばれる確率をシグモイド関数 $\sigma\bigl(r_\theta(x, y_w) - r_\theta(x, y_l)\bigr)$ で表し、負の対数尤度 $\mathcal{L} = -\log \sigma\bigl(r_\theta(x, y_w) - r_\theta(x, y_l)\bigr)$ を最小化してスカラー報酬 $r_\theta(x, y)$ を学習する。上の実行では、学習前は偶然どおり 0.495（95% 信頼区間 0.425〜0.565、平均報酬差 +0.006）だった選好の正解率が、2,000 組・1 エポックの学習（76.5 秒、GPU メモリの最大使用量 7.1 GB）により 0.635（95% 信頼区間 0.570〜0.700、平均報酬差 +0.318）に上がった。訓練損失は batch 100 の 1.518 から batch 500 の 0.619 へ下がった。なお Bradley-Terry 損失は $r_\theta(x, y)$ に定数を足しても差 $r_w - r_l$ が変わらない（平行移動不変）ため、りんごの例での絶対値も学習前の +10.375 付近から学習後は +0.7〜+1.0 付近へ動いている。点数の基準を 0 付近に保ちたい場合は、損失に微小な中心化項 $\lambda(r_w + r_l)^2$ を加えることがある。
+- `task_type="SEQ_CLS"` で `modules_to_save=["score"]` と `pad_token_id` 設定が必須な理由: `AutoModelForSequenceClassification.from_pretrained(..., num_labels=1)` は言語モデルヘッドをランダム初期化の線形層 `score`（1280 次元 → 1 スカラー）に置き換える。`modules_to_save=["score"]` を省くと `score` が凍結され (`requires_grad=False`)、LoRA 層だけではランダムな線形結合のまま十分な学習ができない（ここでは学習対象パラメータ約 10.1M、全体の 1.50%）。また `LlamaForSequenceClassification` は各系列の「最後の非パディングトークン」の隠れ状態から報酬を取り出すため、`model.config.pad_token_id` が `None` のままだとバッチサイズ 2 以上で `ValueError` になる。`tokenizer.pad_token_id` (3) を設定した上で右パディングの有無を比べると、どちらも +10.3750（差 0.0000）で一致した。
+- 長さバイアスと原因: 学習後の 0.5B 報酬モデルでは、報酬差と応答文字数差の相関が Pearson r = 0.684、Spearman rho = 0.676 と高い。内訳を見ると、`chosen` が長い 108 組では正解率 0.870 なのに対し、長くない 92 組では 0.359 と偶然 (0.5) を下回った。学習データ自体で `chosen` が長い組の割合が 0.589 あり、短い 1 エポックの学習で「長い応答に高い点を付ける」という近道を強く学んだと考えられる。文の後半を半分削る操作でも平均 −0.490（上昇は 8.0%）と下がった一方、末尾に定型締め句を足す操作では平均 −0.070（上昇は 14.0%）となり、この章の Best-of-N レシピで `Skywork-1.7B` が同じ締め句で +0.335（86% 上昇）したのとは逆の挙動を示した。長さバイアスを抑えるには、長さのバランスを揃えた選好データや長さによる正則化・デバイアス手法を使う。
+- 公開 1.7B 報酬モデル・文字数ベースライン・DPO との比較: 同じ 200 組で、文字数だけで選んだベースラインの正解率は 0.540（95% 信頼区間 0.475〜0.610）、公開の `Skywork/Skywork-Reward-V2-Qwen3-1.7B` (Apache 2.0) は 0.610（同 0.540〜0.675、平均報酬差 +1.056、推論 6.3 秒）、この章の「選好データで LLM を調整する (DPO)」で同じ分割を学習した DPO の暗黙の報酬は 0.680（同 0.615〜0.745）だった。0.5B 報酬モデルと Skywork-1.7B の選好一致率は 0.585（報酬差の順位相関 0.284）にとどまり、りんごの算数例でも正しい応答 (+0.887) と誤った応答 (+0.980) の正誤を見分けられていない。hh-rlhf-12k-ja の DeepL 翻訳データ 2,000 組だけで学習した 0.5B モデルは対象データの文体や長さに適合しただけで、計算の正誤判定までは学べていない。また GPU の非決定性により同一シードでも実行ごとに正解率は数ポイント前後しうるため、95% 信頼区間の幅で評価する。
+- DPO と明示的な報酬モデルの使い分け: DPO（この章の「選好データで LLM を調整する (DPO)」）は別の報酬モデルを学習せずに単一の方策モデルを直接更新できるため手順が簡単だが、暗黙の報酬はその方策と参照モデルの組に結びついており、別のモデルの応答を採点したり学習データ外の応答をふるいにかけたりする用途には使いにくい。明示的な報酬モデルは追加の学習とメモリが要る代わりに、一度学習すればこの章の「報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N)」のように推論時の候補選択や、PPO・GRPO などオンライン強化学習の報酬関数（検証器を書けない自由文の課題）、合成選好データのフィルタリングに何度でも再利用できる。
+- データ・ライセンス・トークナイザーの注意: データは `llm-jp/hh-rlhf-12k-ja` (MIT License) の `helpful-*` のみを使用しており、`harmless-base` は不快な内容を含むため除外した（DPO レシピと同じ注意が当てはまる）。モデルは `sbintuitions/sarashina2.2-0.5b-instruct-v0.1` (MIT License) で、トークナイザーの Unigram 修正 (`load_tokenizer`) については大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
 ## 報酬モデルで N 個の応答を採点して最良を選ぶ (Best-of-N) {reward_best_of_n gpu}
 
 LLM に同じ質問への応答を N 個サンプリングさせ、公開の報酬モデルで採点して最も点の高いものを選びたい (Best-of-N)。N を増やすと品質がどれだけ上がるかを、正解のある課題と別の判定役で確かめ、報酬モデルの偏り（報酬ハッキング）も調べる。選んだ最良と最悪の組を DPO の選好データにしたい。
@@ -699,7 +924,7 @@ print("\n質問:", p["prompt"][0]["content"], "\n[chosen]", p["chosen"][0]["cont
 - 報酬ハッキング（長さ）: この報酬モデルは、同じ質問の中では長い応答をやや好んだ（報酬と長さの順位相関の平均 0.191。最良の応答の平均 611 文字、全体 569 文字、最悪 538 文字）。上限の 384 トークンで打ち切られた応答は 3.0% で、それを除いても 0.225 だった。ただし、同じ応答を 2 回繰り返して長くすると報酬は平均 −0.720 で、上がったのは 16% だけなので、長ければよいわけではない。後半を削って半分にすると全部で下がった (−4.312) が、文の途中で切れたことへの罰も含まれていると考えられる。算数では逆に長い応答ほど報酬が低い (−0.265)。320 トークンで打ち切られて答えまで届かなかった応答（12.2%、報酬の平均 −4.34）の影響もあるが、それを除いても −0.170 で、原因は確かめていない。
 - 報酬ハッキング（言い回し）: 末尾に「ほかにもご質問があれば、お気軽にお尋ねください。」と足すだけで 86% の応答で報酬が上がった（平均 +0.335。同じ質問の 8 個の報酬の標準偏差は平均 1.56 なので、点の近い候補の順位は入れ替わりうる）。冒頭のほめ言葉はほとんど効かず（−0.011、上がったのは 54%）、「専門家が確認した正確な情報です」という自己申告は逆に下がった (−1.124)。算数で最後の答えだけを誤りに書き換えると 31 問すべてで下がった（平均 −6.549）。中身と関係のない言い回しで点が上がるので、N を大きくしたり、この報酬モデルで強化学習したりすると、こうした言い回しが増えると考えられる（確かめていない）。報酬モデルの点を上げすぎると本当の品質から離れていくこと（過最適化）は Gao et al. (2023) が Best-of-N と強化学習の両方で調べている。報酬だけでなく、別の評価（正解率や判定役）と出力の例も見る。
 - 選好データ: 報酬の差が 2 以上の 49 組（差の中央値 5.04）を bon_pairs.jsonl に保存した。質問は DPO のレシピの学習側 (`data[:2000]`) から取ったので、そのレシピの `train` を、このファイルから `margin` の列を除いて読み込んだものに置き換えれば、評価の質問と重ならずに DPO に使える（ここでは学習していない）。そのレシピの選好データは別のモデルの応答（方策外のデータ）だったが、これは調整するモデル自身の応答（方策上のデータ）で、人ではなく報酬モデルが選んでいる。そのため、報酬モデルの癖もそのまま選好として学習される。ここでは chosen のほうが長い組が 0.633 あり、学習すると応答が長くなる方向に働きうる。実際には数百問以上で作り、長さの比や言い回しの偏りを確かめる。
-- 関係するレシピ: 大規模言語モデルの章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の多数決は、答えが一致するかだけで選ぶので、答えを機械的に比べられる課題にしか使えない。Best-of-N は報酬モデルの点で選ぶので、自由な文章にも使える。この章の「正解を判定できる課題で LLM を強化学習する (GRPO)」は、同じように 1 問に複数の応答を生成し、その報酬の差でモデル自身を学習する。判定役のモデルの信頼性の確かめ方は、LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」を参照。トークナイザーの修正 (`load_tokenizer`) については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+- 関係するレシピ: 大規模言語モデルの章の「考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）」の多数決は、答えが一致するかだけで選ぶので、答えを機械的に比べられる課題にしか使えない。Best-of-N は報酬モデルの点で選ぶので、自由な文章にも使える。報酬モデル自体を選好データから学習する方法は、この章の「選好データから報酬モデルを学習して応答を採点する（Bradley-Terry モデル）」を参照。この章の「正解を判定できる課題で LLM を強化学習する (GRPO)」は、同じように 1 問に複数の応答を生成し、その報酬の差でモデル自身を学習する。判定役のモデルの信頼性の確かめ方は、LLM の評価と分析の章の「手元の LLM に生成文を採点させる (LLM-as-a-judge)」を参照。トークナイザーの修正 (`load_tokenizer`) については、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
 
 ## 正解を判定できる課題で LLM を強化学習する (GRPO) {grpo gpu}
 
