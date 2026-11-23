@@ -21,7 +21,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 426 レシピ（付録を含めると 465 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 427 レシピ（付録を含めると 466 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
@@ -35,7 +35,7 @@
 - [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (8)
 - [11. トピックとキーワードの抽出](#11-トピックとキーワードの抽出) (9)
 - [12. テキスト分類](#12-テキスト分類) (24)
-- [13. 感情分析と意見・有害表現の分析](#13-感情分析と意見有害表現の分析) (6)
+- [13. 感情分析と意見・有害表現の分析](#13-感情分析と意見有害表現の分析) (7)
 - [14. 評価指標と統計的検定](#14-評価指標と統計的検定) (10)
 - [15. 構文解析](#15-構文解析) (18)
 - [16. 固有表現抽出](#16-固有表現抽出) (14)
@@ -325,7 +325,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 13. 感情分析と意見・有害表現の分析
 
-レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
+レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、議題に対する立場（賛成・反対・中立）を判定する（スタンス検出）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -334,7 +334,8 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 13-03 | [二重否定・婉曲表現・皮肉を含むレビューの極性を判定する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/implicit_sentiment_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/implicit_sentiment_ja.ipynb) |
 | 13-04 | [喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) |
 | 13-05 | [観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) |
-| 13-06 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) |
+| 13-06 | [議題や施策に対する意見の立場（賛成・反対・中立）を判定する（スタンス検出）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/stance_detection_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/stance_detection_ja.ipynb) |
+| 13-07 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) |
 
 ### 14. 評価指標と統計的検定
 

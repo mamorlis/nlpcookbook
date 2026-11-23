@@ -1,6 +1,6 @@
 # 感情分析と意見・有害表現の分析
 
-レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
+レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、議題に対する立場（賛成・反対・中立）を判定する（スタンス検出）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
 
 ## 日本語の感情分析（ポジネガ判定）をする {sentiment_ja}
 
@@ -876,6 +876,330 @@ print("文全体の感情分析:", sent_clf("国内の販売は低調だった�
 - 数値は検証の GPU で float16 の経路（`BF16 = False`、T4 と同じ dtype）で実行したもので、GPU メモリの最大使用量は 4.7 GB だった。(1) と (2) は CPU だけで動く。テキスト分類の章の「ラベル付きデータなしで分類する（ゼロショット分類、NLI）」で「売上高は好調だ」という仮説の含意を判定させたり、LLM に観点ごとの極性を JSON で答えさせたりする方法もある。
 - chABSA は TIS の久保・中山によるデータセットで、2016 年度の有価証券報告書 230 社分の「経営成績の概要」のうち、観点の付いた 3,215 文（全 6,119 文のうち）に観点の語、カテゴリ（company#sales など）、極性を付けたもの（CC BY 4.0、https://github.com/chakki-works/chABSA-dataset）。ここでは Hugging Face 上の第三者による複製を使った（文数・観点数は論文と一致する。複製にはライセンスの記載がないので、元データの CC BY 4.0 に従う）。
 - 観点の語は与えられている前提で、極性だけを判定した。文から観点の語を見つけるのは系列ラベリングの問題になる（固有表現抽出の章の「文字位置のアノテーションを BIO タグ列に変換する」「BERT をファインチューニングして日本語の固有表現抽出器を作る」）。
+
+## 議題や施策に対する意見の立場（賛成・反対・中立）を判定する（スタンス検出） {stance_detection_ja gpu}
+
+「反対派の主張は時代遅れだ」「理念は素晴らしいが導入すべきではない」のように、文の表面的な感情極性（ポジネガ）と議題に対する立場（賛成・反対・中立）が食い違う意見文のスタンスを判定したい。文全体の感情分析、文埋め込み（意見文のみ / 議題と結論節のペア・話題成分除去）と線形分類器、および LLM の直接判定・批判対象と譲歩構造の分解プロンプトの 5 手法を 60 文で比較する。
+
+```python
+!pip install -q sentence-transformers sentencepiece
+```
+
+```python
+import gc, re, time
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from scipy.stats import binomtest
+from sentence_transformers import SentenceTransformer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
+from sklearn.model_selection import GroupKFold, StratifiedKFold, cross_val_predict
+from sklearn.preprocessing import normalize
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+# 4 議題 × 各 15 文 = 計 60 文（賛成 20・反対 20・中立 20 / 一致群 30・乖離群 30）
+DATA = [
+    # 1. 週休3日制の導入（一致: 賛3, 反2, 中2 / 乖離: 賛2, 反3, 中3）
+    ("週休3日制の導入", "一致群", "賛成", "心身の休息時間が増えて仕事への意欲が高まるため、週休3日制の導入を強く推したい。"),
+    ("週休3日制の導入", "一致群", "賛成", "育児や介護と仕事を両立しやすくなり、優秀な人材の定着にもつながる素晴らしい制度だ。"),
+    ("週休3日制の導入", "一致群", "賛成", "リスキリングや自己投資に充てる余裕が生まれ、結果として企業全体の生産性も向上する。"),
+    ("週休3日制の導入", "乖離群", "賛成", "導入に反対する議論は、現場の深刻な疲労や人手不足を無視した時代遅れの主張だ。"),
+    ("週休3日制の導入", "乖離群", "賛成", "週休3日制は怠け者を増やすという批判こそ根拠に乏しい偏見であり、早く導入に踏み切るべきだ。"),
+    ("週休3日制の導入", "一致群", "反対", "業務量が減らないまま休日だけ増えれば、平日の残業が激増して現場が疲弊するばかりだ。"),
+    ("週休3日制の導入", "一致群", "反対", "給与の減少やサービス水準の低下を招く恐れが大きく、導入には反対せざるを得ない。"),
+    ("週休3日制の導入", "乖離群", "反対", "理念や将来性は高く評価できるものの、中小企業のコスト負担が重すぎて導入は見送るべきだ。"),
+    ("週休3日制の導入", "乖離群", "反対", "働き方改革としての魅力は十分理解できるが、代替要員を確保できない現状では無理がある。"),
+    ("週休3日制の導入", "乖離群", "反対", "週5日勤務で培われた顧客への丁寧な即応体制は誇るべき強みであり、安易に休みを増やすべきではない。"),
+    ("週休3日制の導入", "一致群", "中立", "試験導入を行う企業が増えており、労働時間や賃金の設計について検証が進められている。"),
+    ("週休3日制の導入", "一致群", "中立", "対象職種や給与体系をどのように調整するかが、制度設計上の論点として挙げられている。"),
+    ("週休3日制の導入", "乖離群", "中立", "ワークライフバランス改善の恩恵は極めて大きい反面、収入減や現場混乱の不安も深刻で、一概に可否は言えない。"),
+    ("週休3日制の導入", "乖離群", "中立", "魅力的な働き方として期待が高まる一方、業種ごとの負担差が激しすぎて、導入の是非は意見が割れている。"),
+    ("週休3日制の導入", "乖離群", "中立", "生産性向上に成功した好例が称賛される一方で、人手不足の職場からは悲鳴も上がっており、判断が難しい。"),
+    # 2. 完全キャッシュレス化の義務付け（一致: 賛2, 反3, 中3 / 乖離: 賛3, 反2, 中2）
+    ("完全キャッシュレス化の義務付け", "一致群", "賛成", "レジ締めや現金管理の手間が劇的に減り、店舗の業務効率が大幅に改善するので大賛成だ。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "賛成", "会計の待ち時間が短くなって利用者にも快適で、防犯上のメリットも非常に大きい。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "賛成", "現金主義に固執する反対派の意見は、社会のデジタル化を遅らせる非効率な抵抗にすぎない。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "賛成", "高額な決済手数料への不満は理解できなくもないが、現金保管の無駄や盗難リスクを放置する害のほうが大きく義務化すべきだ。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "賛成", "小銭のやり取りに時間を浪費し続ける現状こそ異常であり、全面移行をためらう理由はない。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "反対", "通信障害や停電が起きた瞬間に決済手段が全滅する危険があり、義務付けには到底同意できない。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "反対", "手数料の負担が小規模店の利益を圧迫するため、強制的なキャッシュレス化は悪政だ。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "反対", "個人情報の追跡や過度なデータ収集に対する不信感が拭えず、現金廃止には反対する。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "反対", "キャッシュレスの利便性とスマートさは魅力的だが、高齢者やデジタル弱者が取り残されるため義務化は認められない。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "反対", "現金を手に取って家計を管理できる安心感はかけがえのない利点であり、すべてを電子決済に一本化すべきではない。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "中立", "決済端末の普及状況や手数料水準について、関係省庁と業界団体の間で調査が行われている。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "中立", "各国における現金利用の割合と電子決済の比率を比較した報告書が公表された。"),
+    ("完全キャッシュレス化の義務付け", "一致群", "中立", "自治体ごとに実証実験の対象店舗や期間が異なっており、段階的な移行のあり方が議論されている。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "中立", "会計の快適さや業務効率化の成果は素晴らしいものの、災害時の脆弱性や手数料負担の問題も深刻で、結論は出せない。"),
+    ("完全キャッシュレス化の義務付け", "乖離群", "中立", "先進的な仕組みとして歓迎する声が強い半面、プライバシー侵害への危機感も根強く、賛否が真っ向から対立している。"),
+    # 3. 生成AIの授業での全面解禁（一致: 賛3, 反2, 中2 / 乖離: 賛2, 反3, 中3）
+    ("生成AIの授業での全面解禁", "一致群", "賛成", "一人ひとりの理解度に合わせた個別最適な学びを実現できるため、授業での全面解禁を支持する。"),
+    ("生成AIの授業での全面解禁", "一致群", "賛成", "情報活用能力や批判的思考力を実践的に育てられる素晴らしい機会になり、積極的に取り入れるべきだ。"),
+    ("生成AIの授業での全面解禁", "一致群", "賛成", "教員の教材準備の負担も軽くなり、生徒と向き合う時間が増える点で非常に有益だ。"),
+    ("生成AIの授業での全面解禁", "乖離群", "賛成", "生成AIの活用を危険視して解禁に反対する議論は、変化する社会から目を背けた的外れな批判だ。"),
+    ("生成AIの授業での全面解禁", "乖離群", "賛成", "誤情報の混入という欠点は無視できないものの、使い方を教えずに放置する方がはるかに無責任なので全面解禁すべきだ。"),
+    ("生成AIの授業での全面解禁", "一致群", "反対", "自分で考える前に安易な答えに頼る癖がつき、基礎学力と文章力が著しく低下するため反対だ。"),
+    ("生成AIの授業での全面解禁", "一致群", "反対", "誤った解説をそのまま信じ込む危険性が高く、教育現場への全面解禁は無謀としか言えない。"),
+    ("生成AIの授業での全面解禁", "乖離群", "反対", "技術の進歩や可能性自体は素晴らしいと評価するが、評価基準や不正対策が未整備な現状では全面解禁を見合わせるべきだ。"),
+    ("生成AIの授業での全面解禁", "乖離群", "反対", "下調べを効率化できる点は確かに便利だが、思考力を育む教育の本質を損なう恐れがあり受け入れがたい。"),
+    ("生成AIの授業での全面解禁", "乖離群", "反対", "生徒が自分の頭で悩み抜いて書く営みには代えがたい価値があり、AIの授業導入を全面的に認めるべきではない。"),
+    ("生成AIの授業での全面解禁", "一致群", "中立", "教育委員会が作成したガイドライン案では、学年や教科ごとの利用条件が整理されている。"),
+    ("生成AIの授業での全面解禁", "一致群", "中立", "国内外の大学や高校における試行事例を集め、効果と課題の検証が進められている。"),
+    ("生成AIの授業での全面解禁", "乖離群", "中立", "学習意欲を引き出す可能性には大いに期待できる一方、思考停止や著作権侵害のリスクも極めて大きく、判断が分かれる。"),
+    ("生成AIの授業での全面解禁", "乖離群", "中立", "個別指導の強力な味方になり得る魅力と、学力低下を招く深刻な懸念の両面があり、一概に賛否を決められない。"),
+    ("生成AIの授業での全面解禁", "乖離群", "中立", "時代の要請として推進を迫る声がある反面、現場の疲弊や悪用を危惧する指摘も妥当で、どちらとも言い難い。"),
+    # 4. 深夜の無人店舗営業の拡大（一致: 賛2, 反3, 中3 / 乖離: 賛3, 反2, 中2）
+    ("深夜の無人店舗営業の拡大", "一致群", "賛成", "深夜勤務の人手を確保せずに24時間営業を維持できるため、無人店舗の拡大は極めて合理的で賛成だ。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "賛成", "夜遅くに働いた帰りでも気軽に日用品を買えるようになり、生活の利便性が大きく向上する。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "賛成", "無人化に反対する声は、慢性的な深夜シフトの採用難と現場の負担を直視していない空論だ。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "賛成", "初期投資の高さやシステム障害の心配はあるが、人件費高騰で閉店に追い込まれる惨状を放置するよりは拡大すべきだ。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "賛成", "防犯面の不安を煽って規制を求める主張には説得力がなく、省人化の流れを止めるべきではない。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "反対", "万引きや器物損壊などの治安悪化を招く恐れが強く、深夜の無人営業拡大には断固反対する。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "反対", "システムが止まった際に誰も対応できず、急病やトラブル時にも無力なため危険すぎる。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "反対", "夜間の見守り機能が失われて地域の安全性が損なわれる点で、無人化の拡大は認められない。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "反対", "最新のセンサー技術や省人化の仕組みは感心するほど優秀だが、防犯上のリスクが拭えず拡大には踏み切るべきではない。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "反対", "深夜でも店員が笑顔で迎えてくれる安心感と地域の防犯拠点としての役割は貴重であり、無人営業を増やすべきではない。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "中立", "都市部と郊外のそれぞれで実証実験が進んでおり、利用客数や機器の稼働状況が記録されている。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "中立", "決済方式や入店認証の仕組みについては、各社が異なる技術仕様を採用して運用している。"),
+    ("深夜の無人店舗営業の拡大", "一致群", "中立", "深夜帯の売上構成比と警備コストのバランスについて、流通各社がデータを収集している段階だ。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "中立", "人手不足解消という画期的な利点には惹かれるものの、防犯やトラブル対応の危うさも深刻で、評価が割れている。"),
+    ("深夜の無人店舗営業の拡大", "乖離群", "中立", "最新技術による快適な買い物体験は魅力的だが、治安への悪影響を恐れる住民の声ももっともで、一概には判断できない。"),
+]
+LABELS = ["賛成", "反対", "中立"]
+df = pd.DataFrame(DATA, columns=["topic", "group", "gold", "text"])
+y = df["gold"].to_numpy()
+groups = df["group"].to_numpy()
+print(pd.crosstab(df["group"], df["gold"])[LABELS])
+print()
+print(pd.crosstab(df["topic"], df["gold"])[LABELS])
+```
+
+```python
+# 手法 1: 文全体の感情分析モデル（多言語 DistilBERT, Apache 2.0）をそのまま立場に写像する
+device_idx = 0 if torch.cuda.is_available() else -1
+sent_clf = pipeline("text-classification", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student", device=device_idx)
+SENT_MAP = {"positive": "賛成", "negative": "反対", "neutral": "中立"}
+raw_sent = sent_clf(df["text"].tolist(), truncation=True, batch_size=16)
+preds = {"1. 文全体の感情分析モデル": np.array([SENT_MAP[r["label"]] for r in raw_sent])}
+print("感情分析の元ラベル分布:", pd.Series([r["label"] for r in raw_sent]).value_counts().to_dict())
+del sent_clf
+gc.collect(); torch.cuda.empty_cache()
+
+# 手法 2・3: 文埋め込み（intfloat/multilingual-e5-small, MIT License）+ ロジスティック回帰（5 分割層化交差検証）
+embedder = SentenceTransformer("intfloat/multilingual-e5-small", device="cuda" if torch.cuda.is_available() else "cpu")
+X_text = embedder.encode(["query: " + t for t in df["text"]], normalize_embeddings=True, batch_size=32)
+X_topic = embedder.encode(["query: " + tp for tp in df["topic"]], normalize_embeddings=True, batch_size=32)
+X_pair = embedder.encode([f"query: 議題: {r.topic} / 意見: {r.text}" for r in df.itertuples()], normalize_embeddings=True, batch_size=32)
+
+# 手法 3 では逆接・譲歩の接続表現より後ろ（結論節）を切り出し、議題とのペア表現から話題ベクトルの射影を除く
+ADV_PAT = re.compile(r"(?:ものの、|だが、|けれども、|けれど、|が、|反面、|一方、|一方で、|半面、|しかし、)")
+def tail_clause(text):
+    matches = list(ADV_PAT.finditer(text))
+    return text[matches[-1].end():] if matches else text
+
+X_pair_tail = embedder.encode([f"query: 議題: {r.topic} / 結論: {tail_clause(r.text)}" for r in df.itertuples()], normalize_embeddings=True, batch_size=32)
+residual = lambda A, B: normalize(A - (A * B).sum(1, keepdims=True) * B)
+X_pair_tail_res = residual(X_pair_tail, X_topic)
+del embedder
+gc.collect(); torch.cuda.empty_cache()
+
+cv5 = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+preds["2. 文埋め込み（意見文のみ）+ 分類器"] = cross_val_predict(LogisticRegression(C=10, max_iter=1000), X_text, y, cv=cv5)
+preds["3. 文埋め込み（議題 + 結論節・話題除去）+ 分類器"] = cross_val_predict(LogisticRegression(C=10, max_iter=1000), X_pair_tail_res, y, cv=cv5)
+
+# 参考比較: 議題と全文の単純連結、および未知議題への汎化（GroupKFold 4 分割）
+p_pair_raw = cross_val_predict(LogisticRegression(C=10, max_iter=1000), X_pair, y, cv=cv5)
+cv_loto = GroupKFold(n_splits=4)
+p_loto_2 = cross_val_predict(LogisticRegression(C=10, max_iter=1000), X_text, y, cv=cv_loto, groups=df["topic"])
+p_loto_3 = cross_val_predict(LogisticRegression(C=10, max_iter=1000), X_pair_tail_res, y, cv=cv_loto, groups=df["topic"])
+print(f"参考（議題 + 全文の単純連結, 5 分割 CV）: 正解率 {accuracy_score(y, p_pair_raw):.3f} | 乖離群 {accuracy_score(y[groups == '乖離群'], p_pair_raw[groups == '乖離群']):.3f}")
+print(f"参考（未知議題への汎化, 4 分割 GroupKFold）: 手法 2 = {accuracy_score(y, p_loto_2):.3f} / 手法 3 = {accuracy_score(y, p_loto_3):.3f}")
+```
+
+```python
+# 手法 4・5: ローカル LLM (sarashina2.2-3b-instruct-v0.1, MIT License)
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま。大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("GPU が利用できません")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+LLM_NAME = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tok = load_tokenizer(LLM_NAME)
+model = AutoModelForCausalLM.from_pretrained(LLM_NAME, dtype=DTYPE, device_map="auto").eval()
+STANCE_IDS = [tok(w, add_special_tokens=False)["input_ids"][0] for w in LABELS]   # いずれも 1 トークン
+
+@torch.no_grad()
+def next_stance(messages_list, bs=15):
+    texts = [tok.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in messages_list]
+    out = []
+    for i in range(0, len(texts), bs):
+        enc = tok(texts[i:i + bs], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        pos = (enc["attention_mask"].cumsum(-1) - 1).clamp(min=0)
+        logits = model(**enc, position_ids=pos, logits_to_keep=1).logits[:, -1, STANCE_IDS].float()
+        out.extend([LABELS[idx] for idx in logits.argmax(-1).tolist()])
+    return np.array(out)
+
+@torch.no_grad()
+def generate_analyses(messages_list, bs=15, max_new_tokens=96):
+    texts = [tok.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in messages_list]
+    out = []
+    for i in range(0, len(texts), bs):
+        enc = tok(texts[i:i + bs], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tok.pad_token_id)
+        out.extend(tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True))
+    return out
+
+torch.cuda.reset_peak_memory_stats()
+t0 = time.time()
+direct_msgs = [[{"role": "user", "content":
+    f"次の議題に対する意見文の立場を判定し、「賛成」「反対」「中立」の 1 語のみで答えてください。\n\n議題: {r.topic}\n意見: {r.text}"}]
+    for r in df.itertuples()]
+preds["4. LLM（直接判定）"] = next_stance(direct_msgs)
+t_direct = time.time() - t0
+
+t1 = time.time()
+step1_msgs = [[{"role": "user", "content":
+    "次の議題に対する意見文の立場（賛成・反対・中立）を、原文に書かれていない推測を補わずに分析してください。\n"
+    "確認する 3 点:\n"
+    "1. 主張の有無: 単なる調査・状況報告や「判断が分かれる／一概に言えない」などの両論併記なら中立。一方への支持や拒否があれば賛成または反対。\n"
+    "2. 批判・賞賛の対象: 「反対派」「批判」を否定していれば議題に賛成。「既存のやり方」を褒めて新施策を退けていれば議題に反対。\n"
+    "3. 譲歩と結論: 「〜だが」「〜ものの」「〜一方」があれば、前半を譲歩として外し、後半の結論句だけで判断する。\n"
+    "出力形式（この 4 行のみ）:\n"
+    "対象: （誰・何への評価か）\n"
+    "結論句: （文末や逆接の後ろの表現をそのまま引用）\n"
+    "構造: （単純主張 / 反対派批判 / 譲歩→否定 / 客観報告 / 両論併記）\n"
+    "判定: 賛成 / 反対 / 中立\n\n"
+    f"議題: {r.topic}\n意見: {r.text}"}]
+    for r in df.itertuples()]
+analyses = generate_analyses(step1_msgs)
+step2_msgs = [
+    m + [{"role": "assistant", "content": a},
+         {"role": "user", "content": "上記の分析を踏まえ、この議題に対する立場を「賛成」「反対」「中立」の 1 語のみで答えてください。"}]
+    for m, a in zip(step1_msgs, analyses)
+]
+preds["5. LLM（批判対象・譲歩構造の分解）"] = next_stance(step2_msgs)
+t_decomp = time.time() - t1
+
+print(f"推論時間: LLM（直接判定）{t_direct:.1f} 秒 / LLM（分解プロンプト）{t_decomp:.1f} 秒 | "
+      f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+del model
+gc.collect(); torch.cuda.empty_cache()
+```
+
+```python
+# 全体精度・Macro-F1 (95% CI)・クラス別 F1・一致群/乖離群別正解率・統計的比較・混同行列
+rng = np.random.default_rng(0)
+boot_idx = rng.integers(0, len(y), (2000, len(y)))
+macro_f1 = lambda g, p: f1_score(g, p, labels=LABELS, average="macro", zero_division=0)
+
+def metric_ci(fn, p):
+    val = fn(y, p)
+    bs = [fn(y[ix], p[ix]) for ix in boot_idx]
+    return f"{val:.3f} [{np.percentile(bs, 2.5):.3f}, {np.percentile(bs, 97.5):.3f}]"
+
+rows = []
+for mname, p in preds.items():
+    f1s = f1_score(y, p, labels=LABELS, average=None, zero_division=0)
+    rows.append({
+        "手法": mname,
+        "正解率 (95% CI)": metric_ci(accuracy_score, p),
+        "Macro-F1 (95% CI)": metric_ci(macro_f1, p),
+        "賛成 F1": round(float(f1s[0]), 3),
+        "反対 F1": round(float(f1s[1]), 3),
+        "中立 F1": round(float(f1s[2]), 3),
+        "一致群": round(float(accuracy_score(y[groups == "一致群"], p[groups == "一致群"])), 3),
+        "乖離群": round(float(accuracy_score(y[groups == "乖離群"], p[groups == "乖離群"])), 3),
+    })
+
+pd.set_option("display.width", 240); pd.set_option("display.unicode.east_asian_width", True)
+print("--- 5 手法の性能比較（N=60、各議題 15 文）---")
+print(pd.DataFrame(rows).to_string(index=False))
+
+print("\n--- 手法間の精度差（対応のあるブートストラップ 95% CI と McNemar 正確検定）---")
+pairs_cmp = [
+    ("3. 文埋め込み（議題 + 結論節・話題除去）+ 分類器", "2. 文埋め込み（意見文のみ）+ 分類器"),
+    ("4. LLM（直接判定）", "3. 文埋め込み（議題 + 結論節・話題除去）+ 分類器"),
+    ("5. LLM（批判対象・譲歩構造の分解）", "4. LLM（直接判定）"),
+    ("5. LLM（批判対象・譲歩構造の分解）", "2. 文埋め込み（意見文のみ）+ 分類器"),
+]
+for a_name, b_name in pairs_cmp:
+    ca, cb = (preds[a_name] == y).astype(float), (preds[b_name] == y).astype(float)
+    d = ca[boot_idx].mean(1) - cb[boot_idx].mean(1)
+    only_a, only_b = int(((ca == 1) & (cb == 0)).sum()), int(((ca == 0) & (cb == 1)).sum())
+    pval = binomtest(min(only_a, only_b), only_a + only_b, 0.5).pvalue if (only_a + only_b) > 0 else 1.0
+    print(f"  {a_name} − {b_name}: {(ca.mean() - cb.mean()) * 100:+5.1f} ポイント "
+          f"[{np.percentile(d, 2.5) * 100:+5.1f}, {np.percentile(d, 97.5) * 100:+5.1f}] | "
+          f"勝敗 {only_a}:{only_b} (McNemar p={pval:.4f})")
+
+print("\n--- 混同行列（行=正解, 列=予測: 賛成 / 反対 / 中立）---")
+for mname, p in preds.items():
+    cm = confusion_matrix(y, p, labels=LABELS)
+    row_str = " | ".join(f"{lbl}:[{cm[k, 0]:2d},{cm[k, 1]:2d},{cm[k, 2]:2d}]" for k, lbl in enumerate(LABELS))
+    print(f"  {mname:34} {row_str}")
+```
+
+```python
+# 乖離群における代表救済例と残存誤りの確認
+p1 = preds["1. 文全体の感情分析モデル"]
+p2 = preds["2. 文埋め込み（意見文のみ）+ 分類器"]
+p3 = preds["3. 文埋め込み（議題 + 結論節・話題除去）+ 分類器"]
+p4 = preds["4. LLM（直接判定）"]
+p5 = preds["5. LLM（批判対象・譲歩構造の分解）"]
+
+print("--- 従来手法・直接 LLM が誤り、分解プロンプトで救済された乖離群の代表例 ---")
+rescued = [i for i in range(len(df)) if groups[i] == "乖離群" and p5[i] == y[i] and (p4[i] != y[i] or (p1[i] != y[i] and p2[i] != y[i]))]
+seen_labels = set()
+for i in rescued:
+    if y[i] in seen_labels and p4[i] == y[i]:
+        continue
+    seen_labels.add(y[i])
+    print(f"[{i:02d}][{df.loc[i, 'topic']}][正解={y[i]}] 感情={p1[i]} / 埋込={p2[i]} / 結論={p3[i]} / 直接={p4[i]} / 分解={p5[i]}")
+    print(f"  意見: {df.loc[i, 'text']}")
+    print(f"  分解: {analyses[i].replace(chr(10), ' | ')}")
+    if len(seen_labels) == 3 and p4[i] == y[i]:
+        break
+
+print("\n--- 分解プロンプトでも誤った例 ---")
+for i in range(len(df)):
+    if p5[i] != y[i]:
+        print(f"[{i:02d}][{groups[i]}][{df.loc[i, 'topic']}][正解={y[i]}] 直接={p4[i]} / 分解={p5[i]} | {df.loc[i, 'text']}")
+        print(f"  分解: {analyses[i].replace(chr(10), ' | ')}")
+```
+
+### 実行結果の分析
+
+- 感情分析による代替の限界（`N=60`、カッコ内は 2,000 回ブートストラップによる 95% 信頼区間）: `1. 文全体の感情分析モデル` (`lxyuan/distilbert-base-multilingual-cased-sentiments-student`, Apache 2.0) は `一致群` で 0.667 だったのに対し、`乖離群` では 0.033（30 文中 1 文のみ正解）へと完全に破綻し、全体の正解率は 0.350 [0.233, 0.467]、Macro-F1 は 0.283 [0.194, 0.367] にとどまった。元の出力ラベルが `positive` 34 件・`negative` 26 件・`neutral` 0 件となり、客観報告や両論併記まで賛成・反対へ割り振ったため `中立 F1` は 0.000 になった。
+- 文埋め込み + 分類器と議題・結論節の扱い: `intfloat/multilingual-e5-small` (MIT License) と 5 分割層化交差検証のロジスティック回帰による `2. 文埋め込み（意見文のみ）+ 分類器` は、全体正解率 0.633 [0.517, 0.750]・Macro-F1 0.640 [0.517, 0.751] となり、`一致群` では 0.900 に達したが、`乖離群` は 0.367 に落ち込んだ。ここで議題と意見文をそのまま連結した `"議題: ... / 意見: ..."` を 1 本の文ベクトルにすると、話題成分のまとまりが支配的になり 5 分割 CV の正解率は 0.517（`乖離群` 0.233）へ逆に低下した。一方、逆接・譲歩の接続表現より後ろの結論節を切り出し、さらに議題ベクトルの射影を直交成分として除いた `3. 文埋め込み（議題 + 結論節・話題除去）+ 分類器` では、全体正解率 0.717 [0.600, 0.833]（Macro-F1 0.716 [0.600, 0.823]、`中立 F1` 0.900、`乖離群` 0.533）まで改善した。未知議題への汎化を見る 4 分割 `GroupKFold` でも、手法 2 の 0.717 に対して手法 3 は 0.800 を上回った（ただし 60 文での 5 分割 CV における手法 3 と手法 2 の差 +8.3 ポイント [-3.3, +20.0] は McNemar `p=0.3018` で統計的有意差には達していない）。
+- LLM の直接判定と構造分解プロンプトの効果: `sbintuitions/sarashina2.2-3b-instruct-v0.1`（MIT License、GPU メモリ最大 7.69 GB）の次トークン確率による `4. LLM（直接判定）` は 0.6 秒で全体正解率 0.883 [0.800, 0.967]・Macro-F1 0.883 [0.790, 0.962] を達成し、`一致群` 1.000・`乖離群` 0.767 となった（手法 3 との差 +16.7 ポイント [+5.0, +28.3]、McNemar `p=0.0129`）。さらに批判対象・結論句・文構造を 4 行で書き出させてから判定する `5. LLM（批判対象・譲歩構造の分解）` は 8.8 秒で正解率 0.983 [0.950, 1.000]・Macro-F1 0.983 [0.945, 1.000]（`一致群` 1.000、`乖離群` 0.967、賛成 F1=0.974・反対 F1=0.976・中立 F1=1.000）へ到達し、`4. LLM（直接判定）` を +10.0 ポイント [+3.3, +18.3]（勝敗 6:0、McNemar `p=0.0312`）、`2. 文埋め込み（意見文のみ）+ 分類器` を +35.0 ポイント [+21.7, +48.3]（勝敗 22:1、McNemar `p=0.0000`）と有意に上回った。
+- 救済された例と残った失敗例: `[17]`（「現金主義に固執する反対派の意見は〜」）、`[33]`（「〜解禁に反対する議論は〜的外れな批判だ」）、`[47]`（「無人化に反対する声は〜空論だ」）、`[49]`（「〜省人化の流れを止めるべきではない」）のような「反対派への強い批判＝施策への賛成」の文、および `[37]`（「〜素晴らしいと評価するが、〜全面解禁を見合わせるべきだ」）や `[42]`（「〜大いに期待できる一方、〜判断が分かれる」）を分解ステップにより正しく救済した。なお `[17]`・`[47]` では 1 段目の生成文末が `判定: 反対` と揺れたものの、同じ履歴から `対象: ...反対派` を受けて 2 段目の次トークン確率が `賛成` を選び直している。一方、`[03]`（「導入に反対する議論は、現場の深刻な疲労や人手不足を無視した時代遅れの主張だ。」）だけは 1 段目で `構造: 反対派批判` と正しく切り分けながら 1・2 段目ともに `反対` と誤り、3B モデルでも「否定表現が反対派の主張に向いている」ことの最終反転を 1 件落とした。
+
+### 実務上の指針
+
+- 世論調査・SNS・パブリックコメントの立場分析に市販の感情分析モデル（ポジネガ分類器）を流用してはならない。`一致群` だけを見ると一見そこそこ動くように見えても、「反対派を厳しく批判する賛成意見」や「相手への敬意を添えて反対する意見」「両論を感情的に併記した中立意見」で極性と立場が逆転するため、`乖離群` で精度が崩れる。
+- 文埋め込み + 線形分類器で小規模な立場分類器を組む場合は、単純に `"議題 + 意見"` を 1 文に連結すると話題クラスタの寄与が立場信号を埋もれさせる点に注意する。逆接後の結論節を切り出し、話題ベクトルとの直交成分（話題射影の除去）を取るだけでも未知議題への転移性能が改善する。
+- 計算コストと精度のバランスを取るには、`4. LLM（直接判定）`（次トークン 1 回分の順伝播で数十倍高速）を既定にしつつ、逆接表現（「〜だが」「〜ものの」「〜一方」）や「反対派」「批判」「議論」などの対象転換語を含む文、あるいは確信度（最大確率）が低い文だけ `5. LLM（批判対象・譲歩構造の分解）` へ回す 2 段階ルーティングが実用的である。
+- 本レシピの 60 文は現象ごとの挙動を切り分ける診断ベンチマークであり、実務の監視・分析では「皮肉・反語」「暗黙の前提知識を要する賛否」「条件付き賛成（〜なら賛成だが〜）」を自社ドメインの実データで追加評価し、必要なら 1 段目の構造化出力と少数例 (few-shot) を組み合わせる。
+
+### 関連レシピ
+
+- 学習済み感情分析モデルの基本と、二重否定・婉曲表現・皮肉を含む場合の振る舞いは、この章の「日本語の感情分析（ポジネガ判定）をする」および「二重否定・婉曲表現・皮肉を含むレビューの極性を判定する」を参照。
+- 1 文中に逆接で異なる極性が同居する文で結論区間を切り出す考え方は、この章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」を参照。
+- 文埋め込みを使った少量データ分類と、前提・仮説ペアによるゼロショット判定は、テキスト分類の章の「文埋め込みを特徴量にして少ない学習データで分類する」および「ラベル付きデータなしで分類する（ゼロショット分類、NLI）」を参照。
+- ブートストラップ信頼区間と McNemar 正確検定の手順は、評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」および「2 つのシステムの差が有意かどうかを検定する」を参照。
+- `sarashina2.2` のトークナイザー Unigram 復元と次トークン確率による分類は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」および「選択肢の尤度を比べて LLM に分類させる」を参照。
 
 ## 有害な表現を検出する {toxicity_detection}
 
