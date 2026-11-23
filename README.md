@@ -21,7 +21,7 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 424 レシピ（付録を含めると 463 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 426 レシピ（付録を含めると 465 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
@@ -35,7 +35,7 @@
 - [10. 文埋め込みとクラスタリング](#10-文埋め込みとクラスタリング) (8)
 - [11. トピックとキーワードの抽出](#11-トピックとキーワードの抽出) (9)
 - [12. テキスト分類](#12-テキスト分類) (24)
-- [13. 感情分析と意見・有害表現の分析](#13-感情分析と意見有害表現の分析) (5)
+- [13. 感情分析と意見・有害表現の分析](#13-感情分析と意見有害表現の分析) (6)
 - [14. 評価指標と統計的検定](#14-評価指標と統計的検定) (10)
 - [15. 構文解析](#15-構文解析) (18)
 - [16. 固有表現抽出](#16-固有表現抽出) (14)
@@ -45,7 +45,7 @@
 - [20. 質問応答](#20-質問応答) (8)
 - [21. 大規模言語モデル (LLM)](#21-大規模言語モデル-llm) (16)
 - [22. LLM の API（Gemini と Claude）](#22-llm-の-apigemini-と-claude) (11)
-- [23. LLM の評価と分析](#23-llm-の評価と分析) (10)
+- [23. LLM の評価と分析](#23-llm-の評価と分析) (11)
 - [24. LLM の学習と調整](#24-llm-の学習と調整) (6)
 - [25. RAG（検索拡張生成）](#25-rag検索拡張生成) (14)
 - [26. 対話システム](#26-対話システム) (12)
@@ -325,15 +325,16 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 13. 感情分析と意見・有害表現の分析
 
-レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
+レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
 | 13-01 | [日本語の感情分析（ポジネガ判定）をする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/sentiment_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/sentiment_ja.ipynb) |
 | 13-02 | [評価極性辞書で感情を判定し、効いた語を示す（否定と逆接の規則）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/sentiment_lexicon.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/sentiment_lexicon.ipynb) |
-| 13-03 | [喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) |
-| 13-04 | [観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) |
-| 13-05 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) |
+| 13-03 | [二重否定・婉曲表現・皮肉を含むレビューの極性を判定する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/implicit_sentiment_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/implicit_sentiment_ja.ipynb) |
+| 13-04 | [喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/emotion_ja.ipynb) |
+| 13-05 | [観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/absa_ja.ipynb) |
+| 13-06 | [有害な表現を検出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/13_sentiment/toxicity_detection.ipynb) |
 
 ### 14. 評価指標と統計的検定
 
@@ -520,20 +521,21 @@ API で大きなモデルを使う。Colab の組み込み AI、無料枠のあ�
 
 ### 23. LLM の評価と分析
 
-LLM を比べ、その性質を調べる。日本語のベンチマークでの比較、LLM に生成文を採点させる方法 (LLM-as-a-judge)、量子化による性能の低下、データ汚染の確認、自信のない誤答の検出、名前や属性による判断の偏り、有害な依頼の拒否と過剰な拒否、LLM が生成した文章の検出と透かし。
+LLM を比べ、その性質を調べる。日本語のベンチマークでの比較、LLM に生成文を採点させる方法 (LLM-as-a-judge)、一対比較の位置バイアス補正と Elo レーティング、量子化による性能の低下、データ汚染の確認、自信のない誤答の検出、名前や属性による判断の偏り、有害な依頼の拒否と過剰な拒否、LLM が生成した文章の検出と透かし。
 
 | # | やりたいこと | Colab |
 |---|---|---|
 | 23-01 | [日本語のベンチマークで複数の LLM を同じ条件で比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_benchmark.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_benchmark.ipynb) |
 | 23-02 | [手元の LLM に生成文を採点させる (LLM-as-a-judge)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_judge_local.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_judge_local.ipynb) |
 | 23-03 | [LLM に生成文の品質を採点させる (LLM-as-a-judge)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_judge.ipynb) 🔑 | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_judge.ipynb) |
-| 23-04 | [量子化で LLM の性能がどれだけ落ちるかを測る（bitsandbytes と GGUF）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/quantization_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/quantization_eval.ipynb) |
-| 23-05 | [ベンチマークの評価データが学習に漏れていないかを調べる（データ汚染の検出）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/benchmark_contamination.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/benchmark_contamination.ipynb) |
-| 23-06 | [LLM が自信なく間違える質問を見つける（トークンの確率、self-consistency、semantic entropy）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_uncertainty.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_uncertainty.ipynb) |
-| 23-07 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_social_bias.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_social_bias.ipynb) |
-| 23-08 | [LLM が有害な依頼を断るか、無害な依頼まで断らないかを測る（XSTest とガードモデル）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_safety_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_safety_eval.ipynb) |
-| 23-09 | [LLM が生成した文章を見分ける（パープレキシティ、Binoculars、分類器）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/ai_text_detection.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/ai_text_detection.ipynb) |
-| 23-10 | [LLM の出力に透かしを入れて検出する（transformers の WatermarkingConfig と SynthID）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_watermark.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_watermark.ipynb) |
+| 23-04 | [一対比較 (Pairwise LLM-as-a-judge) の位置バイアスを補正して Elo レートを求める](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/pairwise_judge_elo.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/pairwise_judge_elo.ipynb) |
+| 23-05 | [量子化で LLM の性能がどれだけ落ちるかを測る（bitsandbytes と GGUF）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/quantization_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/quantization_eval.ipynb) |
+| 23-06 | [ベンチマークの評価データが学習に漏れていないかを調べる（データ汚染の検出）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/benchmark_contamination.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/benchmark_contamination.ipynb) |
+| 23-07 | [LLM が自信なく間違える質問を見つける（トークンの確率、self-consistency、semantic entropy）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_uncertainty.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_uncertainty.ipynb) |
+| 23-08 | [名前や属性を入れ替えて LLM の判断の偏りを調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_social_bias.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_social_bias.ipynb) |
+| 23-09 | [LLM が有害な依頼を断るか、無害な依頼まで断らないかを測る（XSTest とガードモデル）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_safety_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_safety_eval.ipynb) |
+| 23-10 | [LLM が生成した文章を見分ける（パープレキシティ、Binoculars、分類器）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/ai_text_detection.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/ai_text_detection.ipynb) |
+| 23-11 | [LLM の出力に透かしを入れて検出する（transformers の WatermarkingConfig と SynthID）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_watermark.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/23_llm_analysis/llm_watermark.ipynb) |
 
 ### 24. LLM の学習と調整
 
@@ -550,7 +552,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 25. RAG（検索拡張生成）
 
-手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb)（第 5 節）も参照。
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG・評価）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb)（第 5 節）も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -571,7 +573,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 26. 対話システム
 
-FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb) も参照。
+FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [対話システムの基礎（ルールベース・検索型・タスク指向対話・検索拡張生成 RAG・評価）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_dialogue.ipynb) も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|

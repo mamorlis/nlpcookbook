@@ -1,6 +1,6 @@
 # 感情分析と意見・有害表現の分析
 
-レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
+レビューや SNS の投稿からポジティブ・ネガティブを判定する（学習済みモデルと評価極性辞書）、二重否定・婉曲表現・皮肉を含むレビューの極性判定、8 種類の感情の強さを推定する (WRIME)、観点ごとの極性を判定する（アスペクトベース感情分析）、有害な表現を検出する。一般的なテキスト分類の手法は「テキスト分類」の章を参照。評価極性分析の基礎と実践については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 2 章（2-1 評価極性分析）も参照。
 
 ## 日本語の感情分析（ポジネガ判定）をする {sentiment_ja}
 
@@ -217,6 +217,380 @@ explain("このラーメン、マジで神ってる。")
 - 形態素解析は unidic-lite (UniDic) だが、辞書の用言編は IPAdic の分割で書かれているので、複数の形態素からなる表現は表層を連結して引いている。分割の違いで引けない表現が残る。
 - 日本語評価極性辞書（用言編 約 5 千、名詞編 約 8 千 5 百の表現）は東北大学 乾・岡崎研究室の作成で、クレジットを明記すれば商用利用も可能（用言編は小林ら 2005、名詞編は東山ら 2008 を引用する）。配布元は研究室の旧サイトで、移転などで読めなくなったら、この辞書を JSON にして同梱したライブラリ oseti（MIT ライセンス。否定の反転はするが逆接の重み付けはなく、形態素解析に MeCab を使う）から取り出せる。WRIME は CC BY-NC-ND 4.0（非商用・改変禁止）で、ここでは評価にだけ使った。モデルは Apache 2.0。
 - 評価極性辞書と否定・逆接ヒューリスティクスによる文単位・文書単位の集約（第 1〜3 節）および語彙ネットワークと平均場イジングスピンモデルによる極性辞書の自動獲得（第 4 節）の演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 2 章の [評価極性辞書と文単位・文書単位の極性分析](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch2_sentiment_lexicon.ipynb) も参照。
+
+## 二重否定・婉曲表現・皮肉を含むレビューの極性を判定する {implicit_sentiment_ja gpu}
+
+「悪くない」「お値段なり」「素晴らしい接客ですね、1 時間も放置されるなんて」のように、表面上の評価語と書き手の意図が食い違うレビューの極性を判定したい。評価極性辞書と構文規則、学習済み感情分類モデル、および LLM の直接判定と意図・修辞解釈ステップ付き判定の 5 手法を 60 文で比べ、どの表現でどの手法が誤るかを確かめる。
+
+```python
+!pip install -q fugashi==1.5.2 unidic-lite==1.0.8
+```
+
+```python
+import gc, re, time, urllib.request
+import numpy as np
+import pandas as pd
+import sentencepiece as spm
+import torch
+from fugashi import Tagger
+from huggingface_hub import hf_hub_download
+from scipy.stats import binomtest
+from sklearn.metrics import accuracy_score, f1_score
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+# 4 種類の修辞現象 × 各 15 文 = 計 60 文（positive 30 文・negative 30 文）
+DATA = [
+    # 1. 直接表現 (15: positive 8, negative 7)
+    ("直接表現", "positive", "料理がどれも美味しく、スタッフの対応も親切で大満足です。"),
+    ("直接表現", "positive", "バッテリーの持ちが抜群に良く、毎日の通勤で重宝しています。"),
+    ("直接表現", "positive", "駅からのアクセスが便利で、部屋も清潔で快適に過ごせました。"),
+    ("直接表現", "positive", "操作が直感的で分かりやすく、初心者でもすぐに使いこなせます。"),
+    ("直接表現", "positive", "梱包がとても丁寧で、注文の翌日に届いたので助かりました。"),
+    ("直接表現", "positive", "素材の質感が上品で、着心地も軽くて素晴らしい仕上がりです。"),
+    ("直接表現", "positive", "音質がクリアで迫力があり、この価格で買えるのはお得だと思います。"),
+    ("直接表現", "positive", "説明が簡潔で要点を押さえており、非常に勉強になる一冊でした。"),
+    ("直接表現", "negative", "接客の態度が横柄で、料理も冷めていてがっかりしました。"),
+    ("直接表現", "negative", "購入して一週間で電源が入らなくなり、完全に不良品でした。"),
+    ("直接表現", "negative", "部屋の壁が薄く、隣の話し声が夜中じゅう聞こえて眠れませんでした。"),
+    ("直接表現", "negative", "画面の動作が重くて頻繁に固まるため、ストレスが溜まります。"),
+    ("直接表現", "negative", "説明書の記述が不親切で、設定手順がまったく理解できません。"),
+    ("直接表現", "negative", "値段が高い割にボリュームが少なく、正直損をした気分です。"),
+    ("直接表現", "negative", "配送が予定より三日も遅れたうえ、連絡もなく不信感を覚えました。"),
+    # 2. 二重否定・部分否定 (15: positive 7, negative 8)
+    ("二重否定・部分否定", "positive", "派手さはないものの、味は決して悪くないと思います。"),
+    ("二重否定・部分否定", "positive", "最初は戸惑いましたが、こういう素朴な雰囲気は嫌いじゃないです。"),
+    ("二重否定・部分否定", "positive", "職人が手間をかけて作っているので、美味しくないわけがない。"),
+    ("二重否定・部分否定", "positive", "デザインは地味ですが、機能面では文句のつけようがありません。"),
+    ("二重否定・部分否定", "positive", "多少重さはあるけれど、この性能なら買わない手はないでしょう。"),
+    ("二重否定・部分否定", "positive", "小さな店ですが、一度食べたらまた通わずにはいられない味です。"),
+    ("二重否定・部分否定", "positive", "細部まで気配りが行き届いており、非の打ちどころがない宿でした。"),
+    ("二重否定・部分否定", "negative", "値段を考えると、必ずしも満足できたとは言えません。"),
+    ("二重否定・部分否定", "negative", "見た目は悪くないのですが、使いやすいとは言い難い設計です。"),
+    ("二重否定・部分否定", "negative", "話題の新作ですが、誰にでもおすすめできるとは限りません。"),
+    ("二重否定・部分否定", "negative", "対応自体は丁寧でしたが、結果が十分だったとは言い切れません。"),
+    ("二重否定・部分否定", "negative", "景色は綺麗ですが、移動の不便さを考えると快適とは言い難いです。"),
+    ("二重否定・部分否定", "negative", "使えないわけではないものの、快適さに欠けるというのが本音です。"),
+    ("二重否定・部分否定", "negative", "批判するほどではないにせよ、褒められた出来ではありません。"),
+    ("二重否定・部分否定", "negative", "決して不味くはないのですが、価格に見合うとはとても言えません。"),
+    # 3. 婉曲表現・期待外れ (15: positive 7, negative 8)
+    ("婉曲表現・期待外れ", "positive", "派手な演出はありませんが、丁寧な仕事ぶりで心地よく過ごせました。"),
+    ("婉曲表現・期待外れ", "positive", "見た目は素朴そのものですが、出汁の旨味がしっかりしていて絶品です。"),
+    ("婉曲表現・期待外れ", "positive", "決して安い価格ではないけれど、長く使える品質で納得しています。"),
+    ("婉曲表現・期待外れ", "positive", "駅から少し歩きますが、その分だけ静かで落ち着ける良い環境です。"),
+    ("婉曲表現・期待外れ", "positive", "小ぶりなサイズ感ですが、素材の良さが際立っていて気に入りました。"),
+    ("婉曲表現・期待外れ", "positive", "最初は操作に迷いましたが、慣れると手放せない便利な道具になります。"),
+    ("婉曲表現・期待外れ", "positive", "メニュー数は控えめながら、一皿ごとの完成度がとても高いお店です。"),
+    ("婉曲表現・期待外れ", "negative", "良くも悪くもお値段なりでした。"),
+    ("婉曲表現・期待外れ", "negative", "もう少し車内が静かだとよかったのですが。"),
+    ("婉曲表現・期待外れ", "negative", "話題のお店なので一度行けば十分かなという印象です。"),
+    ("婉曲表現・期待外れ", "negative", "悪くはないのですが、事前の期待ほどではありませんでした。"),
+    ("婉曲表現・期待外れ", "negative", "内装の雰囲気だけは立派で、あとはご想像にお任せします。"),
+    ("婉曲表現・期待外れ", "negative", "時間がたっぷり余っているときの暇つぶしにはちょうどいいかもしれません。"),
+    ("婉曲表現・期待外れ", "negative", "特別な特徴は記憶に残らず、可もなく不可もなくといったところでした。"),
+    ("婉曲表現・期待外れ", "negative", "説明が長くて丁寧ではありますが、肝心の解決策が見当たりませんでした。"),
+    # 4. 皮肉・反語 (15: positive 8, negative 7)
+    ("皮肉・反語", "positive", "本当に助かりました、予定より一時間も前倒しで修理していただけるなんて。"),
+    ("皮肉・反語", "positive", "さすが老舗旅館ですね、細かな要望にも嫌な顔ひとつせず応じてくれました。"),
+    ("皮肉・反語", "positive", "驚きの速さですね、深夜に注文した商品が翌朝八時には届いていました。"),
+    ("皮肉・反語", "positive", "素晴らしい気配りです、雪の日に温かいお茶とタオルをすぐ出してくれました。"),
+    ("皮肉・反語", "positive", "ここまで親身に相談に乗ってくれるとは、本当に頼りになる窓口です。"),
+    ("皮肉・反語", "positive", "さすが評判通りの名店ですね、並ばずに焼きたてのパンが買えました。"),
+    ("皮肉・反語", "positive", "期待以上のサポートでした、休日の問い合わせにも五分で解決策が届きましたから。"),
+    ("皮肉・反語", "positive", "これほど静かで涼しいとは、真夏の避暑地として文句なしのホテルです。"),
+    ("皮肉・反語", "negative", "素晴らしい接客ですね、予約したのに一時間も放置されるなんて。"),
+    ("皮肉・反語", "negative", "さすがプロの仕事、見事な誤字とリンク切れのオンパレードですね。"),
+    ("皮肉・反語", "negative", "最新鋭のアプリらしく、保存ボタンを押すたびに強制終了してくれます。"),
+    ("皮肉・反語", "negative", "とても親切な説明書ですね、肝心の初期設定の手順が一行も書いていないとは。"),
+    ("皮肉・反語", "negative", "五回も再起動させてくれるとは、実に優秀で手のかかるソフトですね。"),
+    ("皮肉・反語", "negative", "さすがの高級店ですね、注文から四十分待ってもお水すら出てこないとは。"),
+    ("皮肉・反語", "negative", "丁寧な梱包に感動しました、外箱の角が全部つぶれて届きましたから。"),
+]
+df = pd.DataFrame(DATA, columns=["category", "gold", "text"])
+CATEGORIES = ["直接表現", "二重否定・部分否定", "婉曲表現・期待外れ", "皮肉・反語"]
+print(pd.crosstab(df["category"], df["gold"]).loc[CATEGORIES].to_string())
+```
+
+```python
+# 手法 1・2: 東北大学・日本語評価極性辞書 + 否定反転 / 構文パターン規則
+BASE = "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/"
+fetch = lambda fname: urllib.request.urlopen(BASE + fname).read().decode("utf-8").splitlines()
+lexicon = {}
+for line in fetch("pn.csv.m3.120408.trim"):
+    f = line.split("\t")
+    if len(f) >= 2 and f[1] in ("p", "n"):
+        lexicon[f[0]] = 1 if f[1] == "p" else -1
+for line in fetch("wago.121808.pn"):
+    tag, _, expr = line.partition("\t")
+    expr = re.sub(r" (だ|です|の|な|と|に)$", "", expr).replace(" ", "")
+    if expr:
+        lexicon.setdefault(expr, 1 if tag.startswith("ポジ") else -1)
+
+tagger = Tagger()
+ADVERSATIVE_PARTICLES = {"が", "けど", "けれど", "けれども", "のに", "ものの", "ながら"}
+ADVERSATIVE_CONJ = {"しかし", "でも", "だが", "だけど", "けれど", "けれども", "ところが", "ただ"}
+
+def lookup(toks, i):
+    if toks[i].feature.pos1 in ("助詞", "助動詞", "補助記号"):
+        return None
+    for n in (4, 3, 2, 1):
+        if i + n <= len(toks):
+            head, last = "".join(t.surface for t in toks[i:i + n - 1]), toks[i + n - 1]
+            for form in (last.surface, last.feature.orthBase, last.feature.lemma):
+                if form and head + form in lexicon:
+                    return head + form, n
+    return None
+
+def is_negation(t):
+    return (t.feature.pos1 == "助動詞" and t.feature.lemma in ("ない", "ぬ", "ず")) or (
+        t.feature.pos1 == "形容詞" and t.feature.lemma == "無い"
+    )
+
+def is_adversative(toks, i):
+    t = toks[i]
+    if t.feature.pos1 == "接続詞":
+        return t.surface in ADVERSATIVE_CONJ
+    if t.feature.pos2 == "接続助詞":
+        return t.surface in ADVERSATIVE_PARTICLES
+    return t.surface == "が" and i > 0 and toks[i - 1].feature.pos1 in ("動詞", "形容詞", "助動詞")
+
+def lexicon_score(text, adv_weight=0.5):
+    toks, hits, i = list(tagger(text)), [], 0
+    while i < len(toks):
+        found = lookup(toks, i)
+        if found:
+            word, n = found
+            hits.append({"極性": lexicon[word], "重み": 1.0, "end": i + n - 1})
+            i += n
+            continue
+        if hits and is_negation(toks[i]):
+            between = toks[hits[-1]["end"] + 1:i]
+            if all(b.feature.pos1 in ("助詞", "助動詞", "接尾辞") or b.feature.pos2 == "非自立可能" or b.feature.lemma in ("訳", "筈")
+                   for b in between):
+                hits[-1]["極性"] *= -1
+        if is_adversative(toks, i):
+            for h in hits:
+                h["重み"] *= adv_weight
+        i += 1
+    return sum(h["極性"] * h["重み"] for h in hits)
+
+# 手法 2 で追加する構文・慣用表現パターン
+LITOTES_POS = [
+    r"悪く(は|も)?ない", r"嫌い(じゃ|では)ない", r"ないわけが?ない",
+    r"買わない手はない", r"ずにはいられない", r"文句のつけようがない",
+    r"非の打ちどころがない", r"文句なし", r"手放せない",
+]
+PARTIAL_NEG = [
+    r"とは(言い難い|言えない|言えません|限らない|限りません|言い切れない|言い切れません|とても言えない)",
+    r"(ほど|わけ)(では|じゃ)(ない|ありません)",
+    r"褒められた.{0,6}ではない",
+    r"見合うとは.{0,4}言え",
+]
+COUNTERFACTUAL = [r"(だと|れば|たら)(もっと)?よかった", r"(て|ていて)ほしかった"]
+DISMISSIVE = [
+    r"(お)?値段なり", r"一度.{0,4}(行けば|見れば)?十分",
+    r"可もなく不可もなく", r"ご想像にお任せ|察してください",
+]
+
+def predict_lexicon(text):
+    s = lexicon_score(text, adv_weight=0.5)
+    return "positive" if s > 0 else "negative" if s < 0 else "neutral"
+
+def predict_pattern(text):
+    s = lexicon_score(text, adv_weight=0.25)
+    if any(re.search(p, text) for p in PARTIAL_NEG + COUNTERFACTUAL + DISMISSIVE):
+        s = min(s, 0.0) - 2.0      # 部分否定・反実仮想の後悔・見切り表現で否定側へ反転
+    elif any(re.search(p, text) for p in LITOTES_POS):
+        s += 2.0                   # 二重否定による控えめな肯定
+    return "positive" if s > 0 else "negative" if s < 0 else "neutral"
+
+preds = {
+    "1. 評価極性辞書 + 否定反転": np.array([predict_lexicon(t) for t in df["text"]]),
+    "2. 辞書 + 構文パターン規則": np.array([predict_pattern(t) for t in df["text"]]),
+}
+print(f"辞書語彙数: {len(lexicon)} 語 | 判定不能件数: 手法 1 = {(preds['1. 評価極性辞書 + 否定反転'] == 'neutral').sum()} 件, "
+      f"手法 2 = {(preds['2. 辞書 + 構文パターン規則'] == 'neutral').sum()} 件")
+```
+
+```python
+# 手法 3: 学習済み感情分類モデル（DistilBERT 多言語版, Apache 2.0）
+device_idx = 0 if torch.cuda.is_available() else -1
+clf = pipeline("text-classification", model="lxyuan/distilbert-base-multilingual-cased-sentiments-student", device=device_idx)
+posneg = lambda rs: max((r for r in rs if r["label"] != "neutral"), key=lambda r: r["score"])["label"]
+preds["3. 学習済み感情分類モデル"] = np.array([posneg(rs) for rs in clf(df["text"].tolist(), top_k=None, truncation=True, batch_size=16)])
+del clf
+gc.collect(); torch.cuda.empty_cache()
+
+# 手法 4・5: ローカル LLM (sarashina2.2-3b-instruct-v0.1, MIT License)
+def load_tokenizer(name):
+    tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+    # transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+    # 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま。大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）
+    sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+    tokenizer.backend_tokenizer.model = models.Unigram(
+        [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("GPU が利用できません")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+LLM_NAME = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tok = load_tokenizer(LLM_NAME)
+model = AutoModelForCausalLM.from_pretrained(LLM_NAME, dtype=DTYPE, device_map="auto").eval()
+POS_NEG_IDS = [tok(w, add_special_tokens=False)["input_ids"][0] for w in ("positive", "negative")]
+
+@torch.no_grad()
+def next_polarity(messages_list, bs=15):
+    texts = [tok.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in messages_list]
+    out = []
+    for i in range(0, len(texts), bs):
+        enc = tok(texts[i:i + bs], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        pos = (enc["attention_mask"].cumsum(-1) - 1).clamp(min=0)
+        logits = model(**enc, position_ids=pos, logits_to_keep=1).logits[:, -1, POS_NEG_IDS]
+        out.extend(["positive" if p == 0 else "negative" for p in logits.argmax(-1).tolist()])
+    return np.array(out)
+
+@torch.no_grad()
+def generate_analyses(messages_list, bs=15, max_new_tokens=96):
+    texts = [tok.apply_chat_template(m, add_generation_prompt=True, tokenize=False) for m in messages_list]
+    out = []
+    for i in range(0, len(texts), bs):
+        enc = tok(texts[i:i + bs], return_tensors="pt", padding=True, add_special_tokens=False).to(model.device)
+        gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tok.pad_token_id)
+        out.extend(tok.batch_decode(gen[:, enc["input_ids"].shape[1]:], skip_special_tokens=True))
+    return out
+
+torch.cuda.reset_peak_memory_stats()
+t0 = time.time()
+direct_msgs = [[{"role": "user", "content":
+    f"次の日本語レビューの書き手の感情極性を判定し、positive または negative の 1 語のみで答えてください。\n\nレビュー: {t}"}]
+    for t in df["text"]]
+preds["4. LLM（直接判定）"] = next_polarity(direct_msgs)
+t_direct = time.time() - t0
+
+t1 = time.time()
+step1_msgs = [[{"role": "user", "content":
+    "次の日本語レビューについて、書き手の本心が肯定的 (positive) か否定的 (negative) かを分析してください。\n"
+    "確認する観点: (1) 二重否定や部分否定（「悪くない」「満足とは言えない」「言い難い」）、"
+    "(2) 仮定・後悔（「〜だとよかった」）、譲歩（「派手さはないが〜」）、遠回しな見切り（「お値段なり」「一度行けば十分」）、"
+    "(3) 表面的な褒め言葉（「素晴らしい」「さすが」）と後ろの事実が食い違う皮肉。\n"
+    f"1〜2 文で簡潔に理由を分析し、最後に「判定: positive」または「判定: negative」と書いてください。\n\nレビュー: {t}"}]
+    for t in df["text"]]
+analyses = generate_analyses(step1_msgs)
+step2_msgs = [
+    m + [{"role": "assistant", "content": a},
+         {"role": "user", "content": "上記の分析を踏まえ、最終的な極性を positive または negative の 1 語のみで答えてください。"}]
+    for m, a in zip(step1_msgs, analyses)
+]
+preds["5. LLM（意図・修辞解釈ステップ付き）"] = next_polarity(step2_msgs)
+t_prag = time.time() - t1
+
+print(f"推論時間: LLM（直接判定）{t_direct:.1f} 秒 / LLM（意図・修辞解釈ステップ付き）{t_prag:.1f} 秒 | "
+      f"GPU メモリ最大 {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
+del model
+gc.collect(); torch.cuda.empty_cache()
+```
+
+```python
+# 全体精度（95% 信頼区間）・Macro-F1・カテゴリ別正解率・統計的比較の集計
+y = df["gold"].to_numpy()
+cats = df["category"].to_numpy()
+rng = np.random.default_rng(0)
+boot_idx = rng.integers(0, len(y), (2000, len(y)))
+
+def metric_ci(fn, p):
+    val = fn(y, p)
+    bs = [fn(y[ix], p[ix]) for ix in boot_idx]
+    return f"{val:.3f} [{np.percentile(bs, 2.5):.3f}, {np.percentile(bs, 97.5):.3f}]"
+
+macro_f1 = lambda g, p: f1_score(g, p, labels=["positive", "negative"], average="macro", zero_division=0)
+
+rows = []
+for mname, p in preds.items():
+    row = {
+        "手法": mname,
+        "正解率 (95% CI)": metric_ci(accuracy_score, p),
+        "Macro-F1 (95% CI)": metric_ci(macro_f1, p),
+        "判定不能": int((p == "neutral").sum()),
+    }
+    for c in CATEGORIES:
+        row[c] = round(float(accuracy_score(y[cats == c], p[cats == c])), 3)
+    rows.append(row)
+
+pd.set_option("display.width", 220); pd.set_option("display.unicode.east_asian_width", True)
+print("--- 5 手法の性能比較 (N=60, 各カテゴリ 15 文) ---")
+print(pd.DataFrame(rows).to_string(index=False))
+
+print("\n--- 手法間の精度差（対応のあるブートストラップ 95% CI と McNemar 正確検定）---")
+pairs_cmp = [
+    ("2. 辞書 + 構文パターン規則", "1. 評価極性辞書 + 否定反転"),
+    ("4. LLM（直接判定）", "3. 学習済み感情分類モデル"),
+    ("5. LLM（意図・修辞解釈ステップ付き）", "4. LLM（直接判定）"),
+    ("5. LLM（意図・修辞解釈ステップ付き）", "2. 辞書 + 構文パターン規則"),
+]
+for a_name, b_name in pairs_cmp:
+    ca, cb = (preds[a_name] == y).astype(float), (preds[b_name] == y).astype(float)
+    d = ca[boot_idx].mean(1) - cb[boot_idx].mean(1)
+    only_a = int(((ca == 1) & (cb == 0)).sum())
+    only_b = int(((ca == 0) & (cb == 1)).sum())
+    pval = binomtest(min(only_a, only_b), only_a + only_b, 0.5).pvalue if (only_a + only_b) > 0 else 1.0
+    print(f"  {a_name} − {b_name}: {(ca.mean() - cb.mean()) * 100:+5.1f} ポイント "
+          f"[{np.percentile(d, 2.5) * 100:+5.1f}, {np.percentile(d, 97.5) * 100:+5.1f}] | "
+          f"勝敗 {only_a}:{only_b} (McNemar p={pval:.4f})")
+```
+
+```python
+# 代表的な救済例と残存誤りの確認
+p1 = preds["1. 評価極性辞書 + 否定反転"]
+p2 = preds["2. 辞書 + 構文パターン規則"]
+p3 = preds["3. 学習済み感情分類モデル"]
+p4 = preds["4. LLM（直接判定）"]
+p5 = preds["5. LLM（意図・修辞解釈ステップ付き）"]
+
+print("--- 辞書・分類モデル・直接 LLM が誤り、意図解釈付き LLM で救済された代表例 ---")
+rescued = [i for i in range(len(df)) if p5[i] == y[i] and (p4[i] != y[i] or (p2[i] != y[i] and p3[i] != y[i]))]
+shown_cats = set()
+for i in rescued:
+    c = df.loc[i, "category"]
+    if c in shown_cats and p4[i] == y[i]:
+        continue
+    shown_cats.add(c)
+    print(f"[{i:02d}][{c}][正解={y[i]}] 辞書={p1[i]} / 規則={p2[i]} / BERT={p3[i]} / 直接={p4[i]} / 解釈={p5[i]}")
+    print(f"  文: {df.loc[i, 'text']}")
+    print(f"  解釈出力: {analyses[i].replace(chr(10), ' ')[:140]}")
+
+print("\n--- 意図解釈付き LLM でも誤った例 ---")
+for i in range(len(df)):
+    if p5[i] != y[i]:
+        print(f"[{i:02d}][{df.loc[i, 'category']}][正解={y[i]}] 直接={p4[i]} / 解釈={p5[i]} | {df.loc[i, 'text']}")
+        print(f"  解釈出力: {analyses[i].replace(chr(10), ' ')[:140]}")
+```
+
+### 実行結果の分析
+
+- 全体性能とカテゴリ別傾向（N=60、各カテゴリ 15 文、カッコ内は 2,000 回ブートストラップによる 95% 信頼区間）: `1. 評価極性辞書 + 否定反転` は正解率 0.600 [0.483, 0.717]・Macro-F1 0.571 [0.438, 0.685] で、直接表現でも語彙不足により判定不能が 7 件生じた（直接表現 0.733、二重否定・部分否定 0.533、婉曲表現・期待外れ 0.600、皮肉・反語 0.533）。一方、多言語の `3. 学習済み感情分類モデル` (`lxyuan/distilbert-base-multilingual-cased-sentiments-student`) は直接表現で 0.933 と高精度なものの、二重否定・部分否定では表面の肯定語・否定語に引っ張られて 0.267（偶然の 0.5 以下）へ大きく落ち込み、全体正解率 0.633 [0.517, 0.750]・Macro-F1 0.633 [0.500, 0.748] にとどまった。
+- 構文・慣用表現パターンの効果: `2. 辞書 + 構文パターン規則` は、部分否定（「とは言い難い」「とは言えない」「とは限らない」「とは言い切れません」「ほどではない」）、反実仮想の後悔（「〜だとよかった」「〜てほしかった」）、見切り表現（「お値段なり」「一度行けば十分」「可もなく不可もなく」）、控えめな肯定（「悪くない」「嫌いじゃない」「ないわけがない」）を補うことで、二重否定・部分否定が 0.533 → 1.000、婉曲表現・期待外れが 0.600 → 0.867 へ向上した。全体の正解率は 0.783 [0.667, 0.883] (Macro-F1 0.808 [0.701, 0.898]) となり、手法 1 との差は +18.3 ポイント [+10.0, +28.3]（McNemar 検定 勝敗 11:0, p=0.0010）と有意に改善した。ただし世界知識や事実の矛盾を要する皮肉・反語は 0.533 のまま動かなかった。
+- LLM の直接判定と 2 段階意図解釈: `sbintuitions/sarashina2.2-3b-instruct-v0.1` の次トークン確率による `4. LLM（直接判定）` は 0.8 秒で全体正解率 0.917 [0.833, 0.983]・Macro-F1 0.916 [0.833, 0.983] を達成し、`3. 学習済み感情分類モデル` を +28.3 ポイント [+15.0, +41.7]（勝敗 19:2, p=0.0002）上回った。さらに修辞的な枠組みと事実の矛盾を言語化させてから判定する `5. LLM（意図・修辞解釈ステップ付き）` は 18.1 秒（GPU メモリ最大 7.34 GB）で正解率 0.967 [0.917, 1.000]・Macro-F1 0.967 [0.916, 1.000] に到達し、直接判定を +5.0 ポイント [+0.0, +11.7]（勝敗 3:0, p=0.2500）、`2. 辞書 + 構文パターン規則` を +18.3 ポイント [+8.3, +28.3]（勝敗 11:0, p=0.0010）上回った。なお `4` と `5` の差は 60 文では 3 件差のため McNemar 検定では有意水準に達しない。
+- 救済例と残った失敗例: `[37]`（「良くも悪くもお値段なりでした。」）、`[39]`（「話題のお店なので一度行けば十分かなという印象です。」）、`[57]`（「五回も再起動させてくれるとは、実に優秀で手のかかるソフトですね。」）では、直接判定の LLM が表面語に引かれて positive と誤ったのに対し、意図解釈ステップで「一度行けば十分は再訪を勧めない」「五回再起動は不満の強調」と明示的に言語化して negative へ救済した。一方で 3B モデルでも `[42]`（「時間がたっぷり余っているときの暇つぶしにはちょうどいいかもしれません。」）と `[59]`（「丁寧な梱包に感動しました、外箱の角が全部つぶれて届きましたから。」）の 2 件は誤り、`[59]` では「外箱の角がつぶれていた点を梱包の丁寧さを強調する表現と解釈する」という誤った合理化が見られた。
+
+### 実務上の指針
+
+- レビュー分析では全体の正解率だけを見ると「直接表現がほとんどのデータ」で過大評価しやすく、二重否定・婉曲・皮肉を個別に落としていることに気づけない。少なくとも 4 現象を分けてカテゴリ別正解率を測ると、学習済み小規模分類器や辞書がどの現象で破綻するかが見える。
+- 計算コストを抑えつつ精度を上げる実用構成としては、まず `辞書 + 構文パターン規則` や `LLM（直接判定）`（次トークン確率による 1 順伝播）で高速に処理し、表面語の極性と文脈が衝突しやすい長文・逆接文や低確信度の文だけ 2 段階の意図・修辞解釈ステップへ回すハイブリッド運用が有効である。
+- 3B クラスの小型 LLM は、`[59]` のように一見もっともらしい理由を付けて皮肉を肯定側へ合理化してしまうことがある。皮肉の検出精度が業務上クリティカルな場合は、より大きなモデルや API モデルによる再判定、あるいは「良い点と悪い点を別々に抜き出させてから総合判定する」プロンプトを組み合わせる。
+- ここで用いた 60 文は現象ごとの挙動を確かめる小規模な診断セットであり、実運用では自社ドメイン（宿泊、EC、アプリレビューなど）で注釈した数百〜数千件の評価セットで再現性を検証する。また、東北大学の評価極性辞書（クレジット明記で商用利用可）と `sarashina2.2-3b-instruct-v0.1` (MIT License)・多言語 DistilBERT (Apache 2.0) はいずれも商用利用可能な条件で公開されている。
+
+### 関連レシピ
+
+- 基本的な学習済みモデル・評価極性辞書の実装と WRIME での検証は、この章の「日本語の感情分析（ポジネガ判定）をする」および「評価極性辞書で感情を判定し、効いた語を示す（否定と逆接の規則）」を参照。
+- 1 文の中にポジティブな観点とネガティブな観点が同居する表現の扱いは、この章の「観点ごとにポジティブ・ネガティブを判定する（アスペクトベース感情分析）」を参照。
+- 従属節を含む否定の作用域やモダリティの形式的な解析は、意味解析の章の「否定・モダリティ・時制を取り出す」を参照。
+- 信頼区間と McNemar 正確検定の詳細は、評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」および「2 つのシステムの差が有意かどうかを検定する」を参照。
+- `sarashina2.2` のトークナイザー Unigram 復元と次トークン確率による分類は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」および「選択肢の尤度を比べて LLM に分類させる」を参照。
+- 評価極性辞書と否定・逆接ルールによる文単位・文書単位の集約（第 1〜3 節）および語彙ネットワークと平均場イジングスピンモデルによる極性辞書の自動獲得（第 4 節）の演習と、本レシピで扱う二重否定・婉曲表現・皮肉のような修辞・慣用表現の扱いとの対比については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 2 章の [評価極性辞書と文単位・文書単位の極性分析](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch2_sentiment_lexicon.ipynb) も参照。
 
 ## 喜び・悲しみ・怒りなど 8 種類の感情の強さを推定する (WRIME) {emotion_ja}
 

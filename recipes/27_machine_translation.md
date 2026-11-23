@@ -38,7 +38,7 @@ print(df[~ok].sample(5, random_state=0)[["ja", "en"]].to_string(index=False))
 - OPUS の日英は映画字幕 (OpenSubtitles) 由来が多く、口語的で短く、ノイズや意訳も多い。データの出どころと分野を必ず確認する。
 - 日英の定番データ: JParaCrawl（Web、大規模）、ASPEC（科学技術論文、要申請）、KFTT（京都関連の Wikipedia）、JESC（字幕）、WMT の news タスク。
 - 長さの比によるフィルタは最低限の処理。さらに、言語判定、文埋め込みの類似度（LaBSE など）によるフィルタが有効。
-- 過去の承認済み対訳を使う翻訳メモリ (TM) のあいまい一致検索・用語統一、および長さ比・日本語文字率・数値一致・双方向 IBM Model 1 アライメント信頼度による対訳ノイズフィルタリングの演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 5〜6 節）も参照。
+- 過去の承認済み対訳を使う翻訳メモリ (TM) のあいまい一致検索・用語統一、および長さ比・日本語文字率・数値一致・双方向 IBM Model 1 アライメント信頼度による対訳ノイズフィルタリングの演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1・フレーズベース SMT）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 5〜6 節）も参照。
 
 ## 言語をまたいで意味の近い文を対応付ける（対訳文の抽出） {cross_lingual_similarity}
 
@@ -540,6 +540,7 @@ for src, hyp, ref in list(zip(open("data/test.ja"), hyps, refs))[:8]:
 - 単語アライメントには GIZA++ が標準的に使われてきたが、fast_align のほうがはるかに速く、質も大きくは変わらない。`train-model.perl` の手順 1〜3（GIZA++ によるアライメント）を飛ばして、手順 4 から実行している。
 - ビルドに時間がかかる（4 コアで約 6 分、Colab の 2 コアではその 2〜3 倍）。うまくいかないときは `bjam.log` と `train.log` を確認する。
 - 現在の実用システムはほぼニューラルに置き換わったが、フレーズテーブルは対訳辞書の抽出や訳語の分析に、単語アライメントは用語の対応付けや注釈の投影に、今も使われている。
+- 双方向 IBM Model 1 からのアライメント対称化（Intersection・Union・`Grow-Diag-Final-And` による AER 改善）、整合フレーズ対抽出と双方向フレーズ翻訳確率推定、および歪みコストと日本語バイグラム言語モデルを組み込んだ並び替えデコーディングの実装演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1・フレーズベース SMT）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 7 節）も参照。
 
 ## Transformer の翻訳モデルをゼロから学習する {nmt_from_scratch gpu}
 
@@ -903,7 +904,7 @@ print(df[df["cos"] > 0.97][["ja", "pseudo_en", "cos"]].head(5).to_string(index=F
 - 埋め込みの類似度は、訳されずに原文がそのまま残った組（コピー）に最高点を付けてしまう。類似度が高すぎる組や、原文と訳文の文字列がほぼ同じ組は、別に取り除く。
 - 往復で元に戻るからといって、中間の訳が正しいとは限らない（同じ誤りを往復で打ち消すことがある）。逆に、正しい訳でも言い換えで戻ってくると一致度は下がる。あくまで目安として使う。
 - 短い文や定型文ばかりが高得点で残りやすい。残したデータの長さや内容の分布が偏っていないかを確かめる。
-- 長さ比・日本語文字率・数値一致に加え、双方向 IBM Model 1 アライメント信頼度スコアを用いた対訳ノイズフィルタリングと単語アライメント改善の演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 6 節）も参照。
+- 長さ比・日本語文字率・数値一致に加え、双方向 IBM Model 1 アライメント信頼度スコアを用いた対訳ノイズフィルタリングと単語アライメント改善の演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1・フレーズベース SMT）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 6 節）も参照。
 
 ## 漢字を部品に分解して日本語と中国語で共有する {subcharacter_decomposition}
 
@@ -1403,7 +1404,7 @@ for i in list(dict.fromkeys(show_ids)):
 - NLLB の基本構成と商用ライセンスの注意 (CC BY-NC) については、この章の「多言語翻訳モデル NLLB で翻訳する」を参照。
 - タグによる文体制御や、LLM による古文の語釈注入との比較は、この章の「タグを付けて訳文の文体を制御する（丁寧さの制御）」および「古文を現代語に訳す」を参照。
 - 翻訳品質の自動評価指標 (BLEU, chrF) と意味ベース評価 (COMET) の使い分けは、この章の「機械翻訳を BLEU で評価する (sacreBLEU)」「chrF と TER で翻訳を評価する」「COMET で翻訳の品質を評価する」を参照。
-- 過去の承認済み対訳を使う翻訳メモリ (TM) のあいまい一致検索と用語統一チェックの演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 5 節）も参照。
+- 過去の承認済み対訳を使う翻訳メモリ (TM) のあいまい一致検索と用語統一チェックの演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 4 章の [統計的機械翻訳の基礎（IBM Model 1・フレーズベース SMT）・BLEU 評価・翻訳メモリ・対訳フィルタリング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch4_smt_bleu.ipynb)（第 5 節）も参照。
 
 ## 1 つの原文から多様な訳を複数出す {diverse_translation}
 
