@@ -1,6 +1,6 @@
 # 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、話題の切れ目での区切り、口コミからの意見の要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換と、その評価。要約・生成タスクの理論や背景については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、話題の切れ目での区切り、口コミからの意見の要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換、表の数値からの文章の生成（data-to-text）と、その評価。要約・生成タスクの理論や背景については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 ## 重要な文を選んで抽出型要約を作る (LexRank) {extractive_summary}
 
@@ -356,6 +356,7 @@ for label, summary in summaries.items():
 - 要約の各文を仮説、原文を前提として含意関係を判定する。含意なら裏付けあり、矛盾なら誤り、中立なら原文にない付け足し。
 - この例では、NLI は「費用は年間約 60 億円…」の文を矛盾 0.95 と判定し、桁違いの数値（6 億と 60 億）の誤りを見つけた。ただし、数値の誤りをいつも見つけられるとは限らない。数値・日付・固有名詞は、文字列として原文に存在するかを別に検査する。
 - 原文が長いと NLI モデルの入力長を超える。原文を段落に分け、要約文ごとに最も含意の高い段落を採用する。
+- 入力が文章でなく表のときは、数値を表の値や計算した値と突き合わせて検査できる。この章の「表の数値から文章を作り、数値の誤りを検査する（data-to-text）」を参照。
 - 忠実であることと、良い要約であることは別。重要な内容を落としていないか（網羅性）は、参照要約との比較や人手で確かめる。
 
 ## 長い文章を話題の切れ目で区切る（TextTiling と文埋め込み） {text_segmentation}
@@ -1772,6 +1773,7 @@ print(f"【】を含む: 実際 {np.mean([bool(tag(t)) for t in test['title']]):
 - デコードの設定: ビーム幅 4 のビーム探索は、貪欲法より ROUGE-L が 0.017 高い（95% 信頼区間 +0.002〜+0.033）。3-gram の繰り返しを禁止しても ROUGE-L は同じで、平均字数が 37.6 字から 35.5 字に縮んだ（実際の見出しは平均 36.7 字）。貪欲法は短め（31.9 字）で、ビームの半分ほどの時間で済む。サンプリングは ROUGE-L が 0.033 低いが、毎回違う候補が出るので、複数の案から人が選ぶ使い方に向く。
 - 学習データの書き方をそのまま覚える: 【Sports Watch】のような連載やカテゴリの表記は実際の見出しの 33% にしかないのに、T5 は 65% に付け、付けた表記のうち実際の見出しにもあったのは 17% だった（上の浅田真央の例も、実際の見出しには表記がない）。不要なら、学習データの見出しから表記を除いておくか、生成後に取り除く。
 - トークナイザーの不具合: transformers 5 系の T5Tokenizer は、このモデルの SentencePiece の byte_fallback を落とすので、語彙にない文字が `<unk>` になり、デコードで消える（上の「【ports atch】」）。修正すると、600 文で分割も復元も SentencePiece と一致した。ほかのモデル（rinna など）の直し方と違い、デコーダーにもバイト列を文字に戻す処理が要る。保存したトークナイザーは、上の出力のとおり AutoTokenizer で読むと修正が失われるので、`PreTrainedTokenizerFast.from_pretrained` で読み直す。
+- 同じ T5 を擬似誤りデータで学習して文法誤り訂正に使う例は、文法誤り訂正と文章校正の章の「擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ）」を参照。
 - データとモデルの出典とライセンス: livedoor ニュースコーパスの記事は CC BY-ND 2.1 JP（表示・改変禁止）。sonoisa/t5-base-japanese-v1.1 は、日本語の Wikipedia（2022 年 6 月 27 日時点）、OSCAR、CC-100 で事前学習した T5 で、CC BY-SA 4.0。モデルカードは Common Crawl の利用規約も守るよう求めている。学習したモデルを配布するなら同じライセンスを継承する必要があり、改変禁止の記事で学習したモデルや生成した見出しを公開するときは、扱いを確かめる。
 
 ## 文章をやさしい日本語に書き換える（テキスト平易化） {text_simplification gpu}
@@ -1873,6 +1875,7 @@ for src, out in zip(texts, simplified):
 - やさしい日本語には、1 文を短く、漢語より和語、敬語や受け身を避ける、といった具体的な指針がある。それを条件として列挙し、書き換えの例を 1 つ見せると従いやすい。
 - 短く書き換える過程で、期限や持ち物のような大事な情報が落ちやすい。行政や防災の文章では、落ちていないかの確認が欠かせない。
 - 参照となる平易文がある場合は SARI（追加・削除・保持の適否を測る指標）がよく使われる。日本語のデータには SNOW T15/T23（やさしい日本語対訳コーパス）、JADES などがある。
+- 上のやさしさの指標（文の長さ、漢字の割合、語の頻度）は、言語教育・リーダビリティ・自動採点の章の「日本語の文章の読みやすさを測る」と「単語の頻度から語彙の難しさを推定する (wordfreq)」で詳しく扱っている。平易化の前後で、原文と書き換えた文章の難しさを同じ指標で比べるのに使える。
 
 ## 難しい単語を見つけてやさしい単語に言い換える（語彙平易化） {lexical_simplification}
 
@@ -1956,6 +1959,7 @@ for s in [sentence, "医師は患者に対し、速やかに治療を開始す�
 - 活用語は、候補の語を元の語と同じ活用形にそろえる必要がある。ここでは形の合う候補だけを残す簡易な方法をとっている。
 - LLM に「この語をやさしく言い換えて」と頼む方法が、現在は最も精度が高い。その場合も、候補が本当にやさしいか（頻度）と、意味が保たれているかの確認は別に行う。
 - 単語単位の言い換えでは、文の構造の難しさは解消しない。文全体の平易化は、この章の「文章をやさしい日本語に書き換える（テキスト平易化）」を参照。
+- 難しい語の特定に使った頻度の尺度は、言語教育・リーダビリティ・自動採点の章の「単語の頻度から語彙の難しさを推定する (wordfreq)」で詳しく扱っている。読み手の目標のレベルに合わせて言い換える方法（意味が保たれたかの検査を含む）は、同じ章の「目標の難易度（CEFR レベル）に合わせて語彙を平易化する」を参照。
 
 ## 文体を変換する（です・ます調、だ・である調、敬語） {style_transfer_ja gpu}
 
@@ -2372,3 +2376,277 @@ for (c, ref), r_out, l_out in zip(CASUAL, rule["くだけ→敬語"], llm_out["�
 - くだけた文 → 敬語では、規則は丁寧語と縮約形（「待ってる」「言っといた」）の復元しかできず、尊敬語・謙譲語は 0/12、省かれた助詞も戻らない。LLM は目印の正規表現で数えて 10/12 で尊敬語・謙譲語を使ったが（「ご出席されますか」のように適否が分かれる表現もある）、内容語の保持は 0.39 で、「遅れる → 遅刻する」「やめとこう → 中止にいたしましょうか」のように語や意図まで変わる。敬語では「見る → ご覧になる」のように語が替わるのが正しいこともあるので、内容語の一致では測れず、含意の判定や人の確認が要る。
 - 判定器は正解の文をすべて正しく判定した（常体 31/31、敬体 44/44）が、文末しか見ず、規則と同じ形態素解析器を使うので、規則の誤り（上の「であろ」）を見逃す。くだけた表現の判定 (is_casual) も縮約形や「じゃん」「けど」「？」しか見ず、「かも」や省かれた助詞は拾わないので、規則のくだけ → 敬語の成功率 1.00 は甘い。尊敬語・謙譲語の目印も簡単な正規表現で、すべては拾えない。機械翻訳の章の「タグを付けて訳文の文体を制御する（丁寧さの制御）」も、正規表現の判定器で文体の成功率を測っている。
 - 評価は 30〜50 文、1 モデル、貪欲法での結果で、数文の差はばらつきの範囲と考える。実際には、規則で変換して判定器が失敗とした文だけを LLM に回す、LLM の出力を判定器と内容語の一致で検査する、といった組み合わせが考えられる（試していない）。例文はこのレシピのための作例、青空文庫の 2 作品は著者の没年（1943 年、1927 年）から著作権の保護期間が終わっている。sarashina2.2 は SB Intuitions のモデルで MIT ライセンス。
+
+## 表の数値から文章を作り、数値の誤りを検査する（data-to-text） {data_to_text gpu}
+
+試合結果や決算のような表のデータから、短い記事の文章を作りたい。生成した文章の数値や名前が表と合っているかを自動で確かめ、テンプレートで作る方法とも比べたい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import numpy as np
+
+# 架空の試合結果と決算（このレシピのために乱数で作ったもの。チーム・会社・人名は実在しない）
+rng = np.random.default_rng(0)
+stadiums = {"北浜ペリカンズ": "北浜スタジアム", "南町ラクーンズ": "南町球場", "東川ハミングバーズ": "東川ドーム",
+            "西原バイソンズ": "西原パーク", "青葉コメッツ": "青葉フィールド", "白砂タートルズ": "白砂球場"}
+surnames = ["佐藤", "高橋", "田中", "伊藤", "渡辺", "山本", "中村", "小林", "加藤", "吉田", "山田", "松本", "井上", "木村", "清水", "森", "池田", "橋本"]
+roster = {t: list(rng.choice(surnames, 3, replace=False)) for t in stadiums}
+
+games = []
+for _ in range(12):
+    home, away = (str(t) for t in rng.choice(list(stadiums), 2, replace=False))
+    hs, vs = (int(x) for x in rng.choice(10, 2, replace=False))      # 引き分けはなし
+    win, lose = (home, away) if hs > vs else (away, home)
+    hr = str(rng.choice([home, away]))
+    games.append({"日付": f"{rng.integers(4, 10)}月{rng.integers(1, 29)}日", "球場": stadiums[home], "ホーム": home, "ビジター": away,
+                  "ホームの得点": hs, "ビジターの得点": vs, "勝利投手": f"{roster[win][0]}（{win}）", "敗戦投手": f"{roster[lose][0]}（{lose}）",
+                  "本塁打": f"{roster[hr][1]}（{hr}）{rng.integers(1, 25)}号", "観客数": int(rng.integers(8000, 45000))})
+
+companies = ["北浜精機", "みなと食品", "青葉電子", "さくら物流", "東雲化学", "ひかり通信", "若葉製薬", "白砂建設", "南町鉄工", "つばさ商事", "西原紙業", "東川電機"]
+reasons_up, reasons_down = ["海外向けの販売が好調だった", "新製品の販売が伸びた", "値上げが浸透した"], ["原材料費が高騰した", "国内の需要が低迷した", "円高で海外の売上が目減りした"]
+earnings = []
+for i, name in enumerate(companies):
+    rev0 = int(rng.integers(200, 5000)); rev1 = int(round(rev0 * (1 + rng.normal(0.03, 0.10))))
+    op0 = int(round(rev0 * rng.uniform(0.03, 0.12))); op1 = int(round(op0 * (1 + rng.normal(0, 0.3))))
+    if i == 3: op1 = -int(round(op0 * 0.4))                        # 赤字に転じた会社と、黒字に戻った会社を 1 社ずつ入れる
+    if i == 7: op0, op1 = -int(round(op0 * 0.5)), int(round(op0 * 0.6))
+    earnings.append({"会社名": name, "決算期": "2025年度上期", "売上高（億円）": rev1, "前年同期の売上高（億円）": rev0,
+                     "営業利益（億円）": op1, "前年同期の営業利益（億円）": op0,
+                     "主な要因": str(rng.choice(reasons_up if op1 > op0 else reasons_down))})
+
+def to_table(rec):
+    return "\n".join(f"{k}: {v}" for k, v in rec.items())
+
+print(to_table(games[0]), "\n")
+print(to_table(earnings[3]))
+```
+
+```python
+# 1. テンプレートによる生成: 表の値を文の型に流し込む。計算（点差や前年同期比）はコードで行う
+def pct(cur, prev):
+    return (cur - prev) / abs(prev) * 100
+
+def template_game(g):
+    hs, vs = g["ホームの得点"], g["ビジターの得点"]
+    win, lose = (g["ホーム"], g["ビジター"]) if hs > vs else (g["ビジター"], g["ホーム"])
+    return (f"{g['日付']}、{g['球場']}で行われた{g['ホーム']}対{g['ビジター']}の試合は、{win}が{max(hs, vs)}対{min(hs, vs)}で{lose}に勝った。"
+            f"勝利投手は{g['勝利投手'].split('（')[0]}、敗戦投手は{g['敗戦投手'].split('（')[0]}。本塁打は{g['本塁打']}。観客数は{g['観客数']:,}人だった。")
+
+def template_earnings(e):
+    r1, r0, o1, o0 = e["売上高（億円）"], e["前年同期の売上高（億円）"], e["営業利益（億円）"], e["前年同期の営業利益（億円）"]
+    p = pct(r1, r0)
+    s = f"{e['会社名']}の{e['決算期']}の売上高は{r1:,}億円で、前年同期比{abs(p):.1f}%の{'増収' if r1 > r0 else '減収'}だった。"
+    if o1 < 0 <= o0:
+        s += f"営業損益は{-o1:,}億円の赤字（前年同期は{o0:,}億円の黒字）に転落した。"
+    elif o0 < 0 <= o1:
+        s += f"営業損益は{o1:,}億円の黒字（前年同期は{-o0:,}億円の赤字）に転換した。"
+    else:
+        s += f"営業利益は{o1:,}億円で、前年同期比{abs(pct(o1, o0)):.1f}%の{'増益' if o1 > o0 else '減益'}となった。"
+    return s + f"{e['主な要因']}ことが影響した。"
+
+records = [("試合", g) for g in games] + [("決算", e) for e in earnings]
+template_texts = [template_game(r) if kind == "試合" else template_earnings(r) for kind, r in records]
+print(template_texts[0], "\n")
+print(template_texts[12 + 3])
+```
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"   # この章のほかのレシピと同じ 3B の日本語モデル（MIT ライセンス）。VRAM 約 7GB
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる（大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」を参照）。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+def chat(prompt, max_new_tokens=200):
+    inputs = tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    with torch.no_grad():
+        out = llm.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, pad_token_id=tokenizer.eos_token_id)
+    return tokenizer.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
+
+def with_computed(kind, r):
+    """方法 B: 計算が要る値（勝敗、点差、前年同期比、増収・減収）をコードで求めて表に足す"""
+    r = dict(r)
+    if kind == "試合":
+        hs, vs = r["ホームの得点"], r["ビジターの得点"]
+        r["勝ったチーム"], r["点差"] = (r["ホーム"] if hs > vs else r["ビジター"]), abs(hs - vs)
+    else:
+        r1, r0, o1, o0 = r["売上高（億円）"], r["前年同期の売上高（億円）"], r["営業利益（億円）"], r["前年同期の営業利益（億円）"]
+        r["売上高の前年同期比"] = f"{abs(pct(r1, r0)):.1f}%{'増' if r1 > r0 else '減'}（{'増収' if r1 > r0 else '減収'}）"
+        if (o1 < 0) != (o0 < 0):
+            r["営業損益の変化"] = "赤字に転落" if o1 < 0 else "黒字に転換"
+        else:
+            r["営業利益の前年同期比"] = f"{abs(pct(o1, o0)):.1f}%{'増' if o1 > o0 else '減'}（{'増益' if o1 > o0 else '減益'}）"
+    return r
+
+def prompt(kind, r):
+    what = "プロ野球の試合結果" if kind == "試合" else "企業の決算"
+    return (f"次の表は{what}のデータです。この内容を伝える 2〜3 文のニュース記事を書いてください。"
+            f"表にない情報は書かないでください。記事だけを出力してください。\n\n{to_table(r)}")
+
+llm_texts = {"LLM（表だけ）": [chat(prompt(k, r)) for k, r in records],                       # T4 で 24 件に数分
+             "LLM（計算済みの値も渡す）": [chat(prompt(k, with_computed(k, r))) for k, r in records]}
+for method, texts in llm_texts.items():
+    print(f"■ {method}\n{texts[0]}\n\n{texts[12 + 3]}\n")
+```
+
+```python
+import re
+import unicodedata
+from fugashi import Tagger
+
+tagger = Tagger()
+UNIT = {"兆": 1e12, "億": 1e8, "万": 1e4, "千": 1e3}
+
+def norm(text):
+    text = unicodedata.normalize("NFKC", text)
+    return re.sub(r"(?<=\d)[, ](?=\d)", "", text)                  # 「1,234」「1 234」の区切りを取る
+
+def numbers(text):
+    """文中の数値を取り出す。「3万2千人」「1兆234億円」のような単位の組み合わせは 1 つの値にまとめる。符号は見ない"""
+    out = []
+    for m in re.finditer(r"(?:\d+(?:\.\d+)?[兆億万千]?)+", norm(text)):
+        s, value = m.group(), 0.0
+        for num, unit in re.findall(r"(\d+(?:\.\d+)?)([兆億万千]?)", s):
+            value += float(num) * UNIT.get(unit, 1)
+        out.append((s, value, re.search(r"(約|およそ|ほぼ|近く)$", norm(text)[:m.start()]) is not None))
+    return out
+
+def allowed_values(kind, r):
+    """表から言える値: 表の数値そのもの（億円の値は円にした値も）と、そこから計算できる値（点差、合計、増減額、前年同期比）"""
+    exact = {float(x) for v in r.values() for x in re.findall(r"\d+", norm(str(v)))}
+    derived = set()
+    if kind == "試合":
+        hs, vs = r["ホームの得点"], r["ビジターの得点"]
+        exact |= {abs(hs - vs), hs + vs}
+    else:
+        r1, r0, o1, o0 = r["売上高（億円）"], r["前年同期の売上高（億円）"], r["営業利益（億円）"], r["前年同期の営業利益（億円）"]
+        oku = [abs(x) for x in (r1, r0, o1, o0, r1 - r0, o1 - o0)]
+        exact |= set(oku) | {x * 1e8 for x in oku}
+        derived |= {abs(pct(r1, r0)), abs(pct(o1, o0)), r1 / r0 * 100, abs(o1 / o0) * 100 if o0 else 0}
+    return exact, derived
+
+def supported(s, x, approx, exact, derived):
+    if any(abs(x - v) < 1e-6 for v in exact):
+        return True
+    decimals = len(s.split(".")[1].rstrip("兆億万千")) if "." in s else 0
+    if any(round(d, decimals) == x for d in derived):               # 計算した値を丸めて書いたもの（12.34% → 12.3%）
+        return True
+    if approx and any(abs(x - v) <= 0.05 * v for v in exact | derived):   # 「約」が付いていれば 5% までのずれを許す
+        return True
+    zeros = len(str(int(x))) - len(str(int(x)).rstrip("0")) if x == int(x) and x >= 1000 else 0   # 「3万2千人」のような概数は、
+    return zeros > 0 and any(round(v / 10 ** zeros) * 10 ** zeros == x and abs(x - v) <= 0.05 * v for v in exact)   # 丸めた値が一致し、ずれが 5% 以内なら認める
+
+def numeric_errors(kind, r, text):
+    exact, derived = allowed_values(kind, r)
+    return [f"表にない数値 {s}" for s, x, approx in numbers(text) if not supported(s, x, approx, exact, derived)]
+
+def name_errors(r, text):
+    """固有名詞（形態素解析で固有名詞とされた語）のうち、表のどこにも書かれていないもの"""
+    table = norm(" ".join(str(v) for v in r.values()))
+    return [f"表にない固有名詞 {w.surface}" for w in tagger(norm(text))
+            if w.feature.pos2 == "固有名詞" and w.surface not in table]
+
+WIN, LOSE = r"勝ち(?!投手|越)|勝利(?!投手)|勝っ|勝つ|制し|下し|破っ|破り|白星", r"敗れ|負け|敗戦(?!投手)|黒星"
+UP, DOWN = r"増加|増え|伸び|上回|拡大|改善|黒字に転|黒字転|黒字化", r"減少|減っ|下回|落ち込|縮小|悪化|赤字に転|赤字転|赤字化|転落"
+
+def logic_errors(kind, r, text):
+    """勝ち負けや増減の向きが表と合っているか"""
+    errs, t = [], norm(text)
+    if kind == "試合":
+        hs, vs = r["ホームの得点"], r["ビジターの得点"]
+        win, lose = (r["ホーム"], r["ビジター"]) if hs > vs else (r["ビジター"], r["ホーム"])
+        for a, b in re.findall(r"(\d+)\s*(?:対|-|−|–)\s*(\d+)", t):
+            if sorted([int(a), int(b)]) != sorted([hs, vs]):
+                errs.append(f"スコアが違う {a}対{b}")
+        for sent in re.split(r"(?<=。)", t):
+            for verb, should in [(WIN, win), (LOSE, lose)]:
+                v = re.search(verb, sent)
+                if not v:
+                    continue
+                subj = [(m.start(), team) for team in (win, lose) for m in re.finditer(f"(?:{team}|{team[2:]})[がは]", sent[:v.start()])]
+                if subj and min(subj)[1] != should:
+                    errs.append(f"勝敗が逆 「{sent[:40]}」")
+    else:
+        truth = {"売上": r["売上高（億円）"] > r["前年同期の売上高（億円）"], "利益": r["営業利益（億円）"] > r["前年同期の営業利益（億円）"]}
+        for sent in re.split(r"(?<=。)", t):
+            claims = [("売上" if w[1] == "収" else "利益", w[0] == "増", w) for w in re.findall(r"[増減][収益]", sent)]
+            keys = list(re.finditer(r"売上高?|営業利益|営業損益|営業損失|利益", sent))
+            for j, k in enumerate(keys):          # 「売上高は…」から次の項目名か文末までに、増減の語があるか
+                seg = sent[k.end(): keys[j + 1].start() if j + 1 < len(keys) else len(sent)]
+                up, down = re.search(UP, seg), re.search(DOWN, seg)
+                if up or down:
+                    claims.append(("売上" if "売上" in k.group() else "利益", down is None or (up is not None and up.start() < down.start()), k.group() + seg[:25]))
+            errs += [f"{metric}の増減が逆 「{where}」" for metric, said_up, where in claims if said_up != truth[metric]]
+    return sorted(set(errs), key=errs.index)
+
+def check(kind, r, text):
+    return numeric_errors(kind, r, text) + name_errors(r, text) + logic_errors(kind, r, text)
+
+# 検査器の確認 1: テンプレートの文（表と合っている）で誤検出がないか
+print("テンプレートで誤りとされたもの:", [(i, e) for i, ((k, r), t) in enumerate(zip(records, template_texts)) for e in check(k, r, t)])
+
+# 検査器の確認 2: テンプレートの文にわざと誤りを入れて、見つけられるか
+def corrupt(kind, r, text, how):
+    if how == "数値":                         # 観客数か売上高の数値に 7 を足す
+        m = re.search(r"\d+(?=人|億円)", norm(text))
+        return norm(text)[:m.start()] + str(int(m.group()) + 7) + norm(text)[m.end():]
+    if kind == "試合":                        # 勝ったチームと負けたチームを入れ替える
+        hs, vs = r["ホームの得点"], r["ビジターの得点"]
+        win, lose = (r["ホーム"], r["ビジター"]) if hs > vs else (r["ビジター"], r["ホーム"])
+        return text.replace(f"{win}が", "@").replace(f"で{lose}に", f"で{win}に").replace("@", f"{lose}が")
+    return text.translate(str.maketrans({"増": "減", "減": "増"}))   # 増収と減収、増益と減益を入れ替える
+
+for how in ["数値", "勝敗・増減"]:
+    found = [bool(check(k, r, corrupt(k, r, t, how))) for (k, r), t in zip(records, template_texts)]
+    print(f"わざと入れた誤り（{how}）: {sum(found)}/{len(found)} 件で検出")
+```
+
+```python
+import pandas as pd
+
+# 3 つの方法の文章を検査する
+results = {"テンプレート": template_texts, **llm_texts}
+rows = []
+for method, texts in results.items():
+    errs = [check(k, r, t) for (k, r), t in zip(records, texts)]
+    for kind in ["試合", "決算"]:
+        idx = [i for i, (k, _) in enumerate(records) if k == kind]
+        flat = [e for i in idx for e in errs[i]]
+        rows.append({"方法": method, "題材": kind, "誤りを含む文章": f"{sum(bool(errs[i]) for i in idx)}/{len(idx)}",
+                     "数値": sum(e.startswith("表にない数値") for e in flat), "固有名詞": sum(e.startswith("表にない固有名詞") for e in flat),
+                     "勝敗・増減・スコア": sum(not e.startswith("表にない") for e in flat),
+                     "平均字数": round(np.mean([len(texts[i]) for i in idx]))})
+pd.DataFrame(rows)
+```
+
+```python
+# 誤りとされた箇所を読む（検査器の誤検出もありうるので、人が確かめる）
+for method, texts in llm_texts.items():
+    print(f"■ {method}")
+    for i, ((k, r), t) in enumerate(zip(records, texts)):
+        if errs := check(k, r, t):
+            print(f"[{i}] {t.replace(chr(10), ' ')[:150]}\n     → {errs}")
+    print()
+```
+
+- data-to-text（表や数値データからの文章の生成）は、天気予報・試合の速報・決算の短信のように、型の決まった記事を大量に作る場面で使われる。テンプレートは表の値をそのまま流し込むので誤りがない（上の 24 件で検査の誤りは 0）が、どの記事も同じ文の型になる。LLM は言い回しを変えた読みやすい文章を書くが、長さは 1.6〜2 倍になり、表にない数値や内容を書くことがある。
+- 表だけを渡した LLM は、試合の得点・日付・観客数は正しく書いた（検査で誤りは 0。読んで確かめると、勝利投手を負けたチームの投手と書いた文章が 1 件あった）。一方、決算では前年同期比を自分で計算して書いた 14 か所が、すべて誤っていた（9.8% 減を「3.2% 減少」、17.2% 増を「25.9% 増」など）。前年同期の 98 億円から 90 億円に減った営業利益を「改善し」と書いた文章もある。小さい LLM に計算をさせてはいけない。
+- 計算した値をコードで足して渡すと、前年同期比の誤りはなくなった（すべて表の値を写した）。ところが試合では、足した「点差」を勝ったチームの得点と取り違え、8 対 3 の試合を「5 対 3 で下し」と書くような誤りが 5 件出た。増減額の 140 億円を「40 億円」と書いた文章も 1 件ある。値を足すほど取り違える候補が増えるので、渡す値は文章に必要なものに絞り、項目名もまぎれないものにする。数値は全部テンプレートで書き、LLM には前後の言い回しだけを任せる組み合わせも考えられる（試していない）。
+- 検査器は、文中の数値を表の値と、表から計算できる値（点差、増減額、前年同期比を丸めた値、「約」や「3万2千人」のような概数）に突き合わせ、勝ち負けと増減の向き、スコアの組を表と比べる。わざと入れた誤りは 24/24 件で見つけ、テンプレートの文章では誤検出がなかった。LLM の文章では、誤りとされた 25 か所のうち 4 か所が誤検出だった（要因の「海外売上が減少」を売上高の減少とみなした 2 件、「改善が急務」を増益とみなした 1 件、「重要な 1 勝」の 1 を表にない数値とした 1 件）。
+- 検査器が見逃すものもある。上の勝利投手の取り違えや、売上高が増えたのに「これらの数値を下回った」と書いた文のような関係の誤り、「首位キープ」「連勝街道を驀進」「為替差損が主な原因」のような表にない内容は、数値と固有名詞の照合では見つからない。こうした主張には、この章の「要約が原文と食い違っていないか検査する」の含意 (NLI) の判定を表を文にしたものに使うか、人が確かめる。固有名詞の照合で見つかった誤りはなかった（架空のカタカナのチーム名は、形態素解析で固有名詞にならないことが多い）。
+- 「記事にない情報は入れない」と指示しても数値や名前を作ってしまうことは、この章の「記事の見出しを生成して実際の見出しと比べる」でも見た。表について質問に答える逆向きの使い方は、質問応答の章の「表の内容について質問に答える」を参照。そこでも、集計はコードで行うのが確実である。
+- 英語の data-to-text の評価用データには、WebNLG（知識グラフの 3 つ組から文）、ToTTo（Wikipedia の表の一部から文）、RotoWire（バスケットボールのボックススコアから試合の記事）がある。RotoWire は、生成した記事の数値の誤りを測る研究でよく使われる。
+- 試合結果と決算はこのレシピのために乱数で作った架空のもので、チーム・会社・人名は実在しない。sarashina2.2-3b-instruct は SB Intuitions のモデルで MIT ライセンス。数値は検証の GPU で実行したもの（48 件の生成でモデルの読み込みを含めて約 2 分）で、T4 では float16 で計算するので、生成される文章が変わることがある。12 件ずつの作例で、1 モデル、貪欲法での結果なので、件数の差は目安と考える。

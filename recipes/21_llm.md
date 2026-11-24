@@ -1,6 +1,6 @@
 # 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、入力の長さによる待ち時間と生成速度の計測（最初のトークンまでの時間と KV キャッシュの効果）、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 ## オープンな LLM とチャットする（チャットテンプレート） {llm_chat_local}
 
@@ -372,6 +372,67 @@ print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB
 - 速度は 16bit より遅くなる。メモリに収まるなら `dtype=torch.float16` で普通に読み込むほうが速い。
 - A100 や L4 など bfloat16 に対応した GPU（Ampere 以降）なら、`bnb_4bit_compute_dtype=torch.bfloat16` のほうが数値的に安定する。
 
+## 長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る {llm_prefill_decode gpu}
+
+RAG で参考文書を増やしたときの待ち時間を調べたい。小型 LLM に長さだけを変えた入力を渡し、最初の1トークンを返すまでと、続く31トークンを生成する区間を分けて測る。
+
+```python
+import time
+import pandas as pd
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+if not torch.cuda.is_available():
+    raise RuntimeError("Colab のランタイムを GPU に変更してください")
+print(torch.cuda.get_device_name())
+name = "Qwen/Qwen2.5-0.5B-Instruct"
+tok = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float16).cuda().eval()
+context = tok.encode("この図書館は午前九時に開館します。", add_special_tokens=False)
+question = tok.encode("質問：この図書館の開館時刻は？", add_special_tokens=False)
+
+def make_input(length):
+    n = length - len(question)
+    prefix = (context * (n // len(context) + 1))[:n]
+    return torch.tensor([prefix + question], device="cuda")
+```
+
+```python
+@torch.inference_mode()
+def measure(ids, cached):
+    # 入力はあらかじめ GPU に置き、トークン化・転送を計測から外す。
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    start = time.perf_counter()
+    out = model(ids, use_cache=cached, logits_to_keep=1)
+    token = out.logits[:, -1].argmax(-1, keepdim=True)
+    torch.cuda.synchronize()
+    first = time.perf_counter()
+    for _ in range(31):
+        if cached:
+            out = model(token, past_key_values=out.past_key_values, use_cache=True, logits_to_keep=1)
+        else:
+            ids = torch.cat([ids, token], dim=1)
+            out = model(ids, use_cache=False, logits_to_keep=1)
+        token = out.logits[:, -1].argmax(-1, keepdim=True)
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - first
+    return {"初回 ms": (first - start) * 1000, "続き token/s": 31 / elapsed,
+            "ピーク MiB": torch.cuda.max_memory_allocated() / 2**20}
+
+rows = []
+for length, cached in [(128, True), (512, True), (2048, True), (128, False)]:
+    ids = make_input(length)
+    measure(ids, cached)  # 同じ条件でウォームアップ
+    runs = pd.DataFrame([measure(ids, cached) for _ in range(3)])
+    rows.append({"入力トークン": length, "KV キャッシュ": cached, **runs.median().to_dict()})
+print(pd.DataFrame(rows).round(2).to_string(index=False))
+```
+
+- 入力には同じ参考文を繰り返し、末尾に同じ質問を置く。貪欲法で文末記号が出ても32トークンまで続け、出力長を固定する。表は3回の中央値。
+- キャッシュありの3行では、質問全体を処理する最初の待ち時間と、その後の生成速度を別々に読む。ピークはモデルの重みを含む PyTorch の割り当て量。
+- 128トークンの2行では、過去のキーと値を GPU に残して次の1トークンだけを入力する場合と、毎回全文を入力し直す場合の時間とメモリを比べる。
+
 ## Few-shot プロンプトでテキストを分類する {llm_few_shot}
 
 学習なしで、いくつかの例をプロンプトに入れるだけで LLM に分類させたい。
@@ -420,6 +481,7 @@ for n_shots in [0, 4]:
 - 例があると、出力の「形式」が揃う効果が大きい（ゼロショットでは余計な説明が付きがち）。
 - 例の選び方と順序で結果が変わる。ラベルの偏りがあると、その多数派ラベルに引っ張られる。
 - 出力は必ず後処理する（前後の空白や句点を除く、想定外の出力を検出する）。次項のように尤度で選ばせる方法もある。
+- 翻訳で few-shot の例と前後の文脈を与えたときの違いを比べた例は、機械翻訳の章の「LLM で日英・英日翻訳して NLLB と比べる（ゼロショット、few-shot、前後の文脈）」を参照。
 
 ## 選択肢の尤度を比べて LLM に分類させる {llm_choice_scoring}
 
@@ -1060,6 +1122,7 @@ print(json.dumps(Review.model_json_schema(), ensure_ascii=False)[:150], "...")  
 
 - プロンプトには、スキーマ (`model_json_schema()`) と出力例を入れる。
 - 可能なら、API やライブラリの「構造化出力」機能を使うのが確実（文法的に正しい JSON しか生成できないように制約される）。Gemini API・Claude API の例は、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」と「Claude に決まった形式（JSON スキーマ）で出力させる」を参照。ローカルモデルなら `outlines` などの制約付きデコードのライブラリがある（この章の「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」を参照）。
+- 出力から前置きの説明や引用符を除いて訳文だけを取り出す後処理は、機械翻訳の章の「LLM で日英・英日翻訳して NLLB と比べる（ゼロショット、few-shot、前後の文脈）」を参照。出来事を JSON で抜き出させて、解析器の部品を組み合わせる方法と比べる例は、意味解析の章の「ニュースから出来事（誰が・いつ・どこで・何をした）を抜き出して時間順に並べる（イベント抽出）」を参照。
 
 ## 制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines) {constrained_decoding gpu}
 
@@ -1590,6 +1653,7 @@ print(f"\nGPU メモリの最大使用量: {torch.cuda.max_memory_allocated() / 
 - `apply_chat_template(..., tools=TOOLS)` は、Python 関数の型ヒント（`str`, `float`, 既定値）と Google 形式 docstring (`Args:`) を検査して JSON Schema を組み立て、システムメッセージの `<tools>...</tools>` に埋め込む。生成時は `stop_strings=["</tool_call>"]` を指定して `</tool_call>` でいったん止めると、小型モデルがツール結果を待たずに次の呼び出し引数を推測したり偽の実行結果を書き足したりするのを抑えられる。履歴には `role: "assistant"` の `tool_calls` と `role: "tool"` の実行結果（JSON 文字列）を交互に積んで次の生成に渡す。
 - 安全なディスパッチのため、モデルの出力を `eval` や `exec` で実行せず、ホワイトリスト辞書 `TOOL_MAP` に登録された関数名だけを許可し、`inspect.signature` の型注釈に沿って引数名と型（数値引数への真偽値の混入防止など）を検証する。不正な引数には例外で落とさず `{"error": ...}` を返してモデルに再判断させる。また、Web ページや検索結果のように信頼できない外部テキストを返すツールでは、返り値に「元の指示を無視して別のツールを呼べ」といった指示を紛れ込ませる間接プロンプトインジェクションの危険がある（RAG の章の「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」も参照）。実運用では参照系と更新・送信系のツールを分け、後者には人の確認を挟む。
 - 30 問の処理時間はツールなし 56.0 秒、ツールあり 99.5 秒、GPU メモリの最大使用量は 3.2 GB だった（T4 相当の float16 ではこの倍程度の時間がかかる見込み）。複雑な多段階推論や大規模な関数群を安定して呼び出したい場合は、LLM の API の章の「Gemini に決まった形式（JSON スキーマ）で出力させる」「Claude に決まった形式（JSON スキーマ）で出力させる」や各 API のネイティブなツール呼び出し機能を使う。1 回の生成で出力の文法だけを強制したいときは、この章の「制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)」を使い、外部関数の選択と実行結果の反映まで繰り返させたいときにツール呼び出しを使う。
+- 検索をツールにして、LLM に検索を繰り返させる例は、RAG の章の「LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG）」を参照。
 
 ## 検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ {ad_text_generation gpu}
 
@@ -1824,64 +1888,3 @@ diff_ci("8 本を短くしてから選ぶ", "実際の広告 (title_org)", "ROUG
 - 参照との自動評価では、方法の違いがほとんど見えなかった。人が書いた 3 本の参照に対する ROUGE-1（参照ごとの F の最大）は、どの方法も 0.18〜0.22 で、短くしてから選んだ見出しと貪欲法の差は −0.011 [−0.034, +0.013]（対応のあるブートストラップの 95% 信頼区間。評価指標と統計的検定の章の「ブートストラップ法で評価値の信頼区間を求める」を参照）だった。chrF は −0.013 [−0.027, −0.000] とわずかに下がったが、信頼区間の端が 0 に接する程度である。実際の広告 (0.184) との差も +0.026 [−0.007, +0.059] で、人が書いた見出しも LLM と同じくらい参照と重ならない。広告文は同じ商品でも訴求の仕方がいくつもあるので、参照との重なりは良し悪しの目安にしかならない。CAMERA の論文 (Mita et al., 2024) も、BLEU-4、ROUGE-1、BERTScore のほかに、キーワードを含む割合と文字数の規定を守る割合を指標にし、人手評価との比較では、魅力 (attractiveness) の順位を既存の自動評価指標で再現するのは難しかったと報告している。記事の本文から見出しを生成して実際の見出しと比べる例は、要約と平易化の章の「記事の見出しを生成して実際の見出しと比べる」にある。
 - キーワードの語を含む割合は、LLM の見出し (0.80〜0.86) のほうが実際の広告 (0.32) よりずっと高く、実際の広告はキーワードの語をそのまま含まないことが多い。ただし、CAMERA のキーワード (kw) は検索語なので、「は な さくせい めい ほけん」のように分かち書きが崩れたものや、LP や参照と内容が合わないもの（「東京 銀座 バイト」に対して実際の広告が池袋の求人）も混じるので、実際の広告の低さには、キーワードと広告が合わない組の影響も含まれる。件数も 120 件なので、細かな差は読み取らない。
 - データは CAMERA（CyberAgent、CC BY-NC-SA 4.0）。非商用に限られ、改変したものも同じライセンスで公開する必要がある。商用の広告文生成のモデルの学習や評価には使えない。ここでは LP の画像を含まない without-lp-images のテストデータ（872 件）の parquet だけを読み込んでいる。モデルは sarashina2.2（SB Intuitions、MIT ライセンス）で、T4 と同じ float16 で実行したとき GPU メモリを最大 10.8 GB 使った。トークナイザーの修正については、この章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
-
-## 長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る {llm_prefill_decode gpu}
-
-RAG で参考文書を増やしたときの待ち時間を調べたい。小型 LLM に長さだけを変えた入力を渡し、最初の1トークンを返すまでと、続く31トークンを生成する区間を分けて測る。
-
-```python
-import time
-import pandas as pd
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-if not torch.cuda.is_available():
-    raise RuntimeError("Colab のランタイムを GPU に変更してください")
-print(torch.cuda.get_device_name())
-name = "Qwen/Qwen2.5-0.5B-Instruct"
-tok = AutoTokenizer.from_pretrained(name)
-model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float16).cuda().eval()
-context = tok.encode("この図書館は午前九時に開館します。", add_special_tokens=False)
-question = tok.encode("質問：この図書館の開館時刻は？", add_special_tokens=False)
-
-def make_input(length):
-    n = length - len(question)
-    prefix = (context * (n // len(context) + 1))[:n]
-    return torch.tensor([prefix + question], device="cuda")
-```
-
-```python
-@torch.inference_mode()
-def measure(ids, cached):
-    # 入力はあらかじめ GPU に置き、トークン化・転送を計測から外す。
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    start = time.perf_counter()
-    out = model(ids, use_cache=cached, logits_to_keep=1)
-    token = out.logits[:, -1].argmax(-1, keepdim=True)
-    torch.cuda.synchronize()
-    first = time.perf_counter()
-    for _ in range(31):
-        if cached:
-            out = model(token, past_key_values=out.past_key_values, use_cache=True, logits_to_keep=1)
-        else:
-            ids = torch.cat([ids, token], dim=1)
-            out = model(ids, use_cache=False, logits_to_keep=1)
-        token = out.logits[:, -1].argmax(-1, keepdim=True)
-    torch.cuda.synchronize()
-    elapsed = time.perf_counter() - first
-    return {"初回 ms": (first - start) * 1000, "続き token/s": 31 / elapsed,
-            "ピーク MiB": torch.cuda.max_memory_allocated() / 2**20}
-
-rows = []
-for length, cached in [(128, True), (512, True), (2048, True), (128, False)]:
-    ids = make_input(length)
-    measure(ids, cached)  # 同じ条件でウォームアップ
-    runs = pd.DataFrame([measure(ids, cached) for _ in range(3)])
-    rows.append({"入力トークン": length, "KV キャッシュ": cached, **runs.median().to_dict()})
-print(pd.DataFrame(rows).round(2).to_string(index=False))
-```
-
-- 入力には同じ参考文を繰り返し、末尾に同じ質問を置く。貪欲法で文末記号が出ても32トークンまで続け、出力長を固定する。表は3回の中央値。
-- キャッシュありの3行では、質問全体を処理する最初の待ち時間と、その後の生成速度を別々に読む。ピークはモデルの重みを含む PyTorch の割り当て量。
-- 128トークンの2行では、過去のキーと値を GPU に残して次の1トークンだけを入力する場合と、毎回全文を入力し直す場合の時間とメモリを比べる。

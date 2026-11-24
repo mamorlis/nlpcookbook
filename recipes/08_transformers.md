@@ -98,6 +98,7 @@ for claim in ["売上高は増加した。", "営業利益は増加した。", "
 - 語彙の重なりが大きいと含意と判定しやすい、といった表面的な手がかりへの依存（アーティファクト）が知られている。過信は禁物。
 - 日本語のデータセットには JNLI (JGLUE)、JSICK、JaNLI などがある。
 - mDeBERTa のトークナイザーの不具合: transformers 5 系では、`AutoTokenizer` が返す `DebertaV2Tokenizer` が、全角の括弧や英数字（「（」「ＡＢＣ」など）を [UNK] にしてしまう（transformers の issue #49622。5.0〜5.23 で確認、4.57 では正しい）。エラーは出ないまま入力の一部が失われる。リポジトリにある tokenizer.json を `PreTrainedTokenizerFast.from_pretrained` で直接読めば、正しく分割される。`pipeline` で使うときは、こうして読んだトークナイザーを `tokenizer=` に渡す。上流で直れば不要になる。
+- JNLI で文ペアの分類器を学習し、仮説文だけで学習したモデルと比べてデータの偏りを確かめる例は、意味解析の章の「文ペアを分類する BERT を学習し、仮説文だけでどこまで当たるかを調べる（含意関係認識、JNLI）」を参照。
 
 ## 次に来るトークンの確率分布を見る {next_token_probs}
 

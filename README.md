@@ -21,14 +21,14 @@
 ## 目次
 
 <!-- INDEX:START -->
-全 427 レシピ（付録を含めると 466 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
+全 438 レシピ（付録を含めると 478 レシピ）。タイトルをクリックすると GitHub 上で、バッジをクリックすると Google Colab で開きます。
 
 - [1. データの収集と入出力](#1-データの収集と入出力) (10)
 - [2. 文字列処理と正規化](#2-文字列処理と正規化) (26)
-- [3. 日本語の形態素解析と文分割](#3-日本語の形態素解析と文分割) (29)
+- [3. 日本語の形態素解析と文分割](#3-日本語の形態素解析と文分割) (31)
 - [4. 英語・多言語の前処理](#4-英語多言語の前処理) (17)
-- [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (12)
-- [6. 単語ベクトル](#6-単語ベクトル) (10)
+- [5. コーパスの統計と可視化](#5-コーパスの統計と可視化) (11)
+- [6. 単語ベクトル](#6-単語ベクトル) (11)
 - [7. サブワードとトークナイザ](#7-サブワードとトークナイザ) (13)
 - [8. Transformers の基本操作](#8-transformers-の基本操作) (14)
 - [9. 言語モデルの確率と内部を調べる](#9-言語モデルの確率と内部を調べる) (9)
@@ -39,23 +39,23 @@
 - [14. 評価指標と統計的検定](#14-評価指標と統計的検定) (10)
 - [15. 構文解析](#15-構文解析) (18)
 - [16. 固有表現抽出](#16-固有表現抽出) (14)
-- [17. 意味解析](#17-意味解析) (11)
-- [18. 語の意味と意味の変化](#18-語の意味と意味の変化) (14)
+- [17. 意味解析](#17-意味解析) (13)
+- [18. 語の意味と意味の変化](#18-語の意味と意味の変化) (15)
 - [19. 検索](#19-検索) (18)
 - [20. 質問応答](#20-質問応答) (8)
 - [21. 大規模言語モデル (LLM)](#21-大規模言語モデル-llm) (16)
 - [22. LLM の API（Gemini と Claude）](#22-llm-の-apigemini-と-claude) (11)
 - [23. LLM の評価と分析](#23-llm-の評価と分析) (11)
 - [24. LLM の学習と調整](#24-llm-の学習と調整) (6)
-- [25. RAG（検索拡張生成）](#25-rag検索拡張生成) (14)
-- [26. 対話システム](#26-対話システム) (12)
-- [27. 機械翻訳](#27-機械翻訳) (19)
-- [28. 要約と平易化](#28-要約と平易化) (16)
-- [29. 文法誤り訂正と文章校正](#29-文法誤り訂正と文章校正) (15)
+- [25. RAG（検索拡張生成）](#25-rag検索拡張生成) (15)
+- [26. 対話システム](#26-対話システム) (14)
+- [27. 機械翻訳](#27-機械翻訳) (20)
+- [28. 要約と平易化](#28-要約と平易化) (17)
+- [29. 文法誤り訂正と文章校正](#29-文法誤り訂正と文章校正) (16)
 - [30. 言語教育・リーダビリティ・自動採点](#30-言語教育リーダビリティ自動採点) (8)
 - [31. 日本語入力（かな漢字変換）](#31-日本語入力かな漢字変換) (11)
 - [32. 画像と言語](#32-画像と言語) (7)
-- [付録 A. Colab と Python の小技](#付録-a-colab-と-python-の小技) (14)
+- [付録 A. Colab と Python の小技](#付録-a-colab-と-python-の小技) (15)
 - [付録 B. 仕組みを理解するための実装](#付録-b-仕組みを理解するための実装) (25)
 
 ### 1. データの収集と入出力
@@ -110,7 +110,7 @@
 
 ### 3. 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd やユーザー辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd や MeCab・Sudachi・Janome へのユーザー辞書の追加、解析器の比べ方、FLR や C-value による専門用語の候補の抽出、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -143,6 +143,8 @@ MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品
 | 03-27 | [日本語の文を句点で分割する（括弧内は分割しない）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/sentence_split_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/sentence_split_ja.ipynb) |
 | 03-28 | [日本語の文分割をライブラリで行って比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/sentence_split_libs.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/sentence_split_libs.ipynb) |
 | 03-29 | [句読点のない文章に読点と句点を付ける（句読点の復元）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/punctuation_restoration.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/punctuation_restoration.ipynb) |
+| 03-30 | [MeCab (fugashi + UniDic) にユーザー辞書を追加する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/mecab_userdic.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/mecab_userdic.ipynb) |
+| 03-31 | [専門用語の候補を FLR と C-value でスコア付けして抽出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/term_extraction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/03_japanese_tokenization/term_extraction.ipynb) |
 
 ### 4. 英語・多言語の前処理
 
@@ -170,26 +172,25 @@ MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品
 
 ### 5. コーパスの統計と可視化
 
-単語を数える、共起や特徴語を調べる、分布を図にする、n-gram 言語モデルでノイズの混じった文を見つける。コーパスを手に入れたらまずやること。
+単語を数える、共起や特徴語を調べる、分布を図にする、n-gram 言語モデルでノイズの混じった文を見つける。コーパスを手に入れたらまずやること。グラフの日本語を文字化けさせずに表示する方法は、付録の「Colab と Python の小技」の「matplotlib で日本語を文字化けさせずに表示する」を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
 | 05-01 | [文の長さや文字数の基本統計をとる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/corpus_stats.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/corpus_stats.ipynb) |
 | 05-02 | [単語の頻度を数える](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/word_freq.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/word_freq.ipynb) |
-| 05-03 | [matplotlib で日本語を文字化けさせずに表示する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/matplotlib_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/matplotlib_ja.ipynb) |
-| 05-04 | [Zipf の法則を確かめる（順位-頻度プロット）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/zipf.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/zipf.ipynb) |
-| 05-05 | [語彙の豊富さを測る（TTR とその仲間）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/lexical_diversity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/lexical_diversity.ipynb) |
-| 05-06 | [文字や単語のエントロピーを計算する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) |
-| 05-07 | [品詞の分布を調べる・比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) |
-| 05-08 | [キーワードの前後の文脈を一覧する (KWIC)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/kwic.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/kwic.ipynb) |
-| 05-09 | [単語の共起を数えて PMI で結びつきの強さを測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pmi.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pmi.ipynb) |
-| 05-10 | [よく使われる言い回し（コロケーション）を抽出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/collocations.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/collocations.ipynb) |
-| 05-11 | [2 つのコーパスを比べて特徴語を見つける（対数尤度比）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/keyness.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/keyness.ipynb) |
-| 05-12 | [KenLM で n-gram 言語モデルを作り、パープレキシティでコーパスのノイズを見つける](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/ngram_lm.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/ngram_lm.ipynb) |
+| 05-03 | [Zipf の法則を確かめる（順位-頻度プロット）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/zipf.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/zipf.ipynb) |
+| 05-04 | [語彙の豊富さを測る（TTR とその仲間）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/lexical_diversity.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/lexical_diversity.ipynb) |
+| 05-05 | [文字や単語のエントロピーを計算する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/entropy.ipynb) |
+| 05-06 | [品詞の分布を調べる・比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pos_distribution.ipynb) |
+| 05-07 | [キーワードの前後の文脈を一覧する (KWIC)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/kwic.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/kwic.ipynb) |
+| 05-08 | [単語の共起を数えて PMI で結びつきの強さを測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pmi.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/pmi.ipynb) |
+| 05-09 | [よく使われる言い回し（コロケーション）を抽出する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/collocations.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/collocations.ipynb) |
+| 05-10 | [2 つのコーパスを比べて特徴語を見つける（対数尤度比）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/keyness.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/keyness.ipynb) |
+| 05-11 | [KenLM で n-gram 言語モデルを作り、パープレキシティでコーパスのノイズを見つける](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/ngram_lm.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/05_corpus_statistics/ngram_lm.ipynb) |
 
 ### 6. 単語ベクトル
 
-単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
+単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。2 言語の単語ベクトルを線形写像で重ね合わせて、対訳語を引くレシピもある。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -203,6 +204,7 @@ MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品
 | 06-08 | [単語ベクトルに含まれるジェンダーバイアスを測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/embedding_bias.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/embedding_bias.ipynb) |
 | 06-09 | [単語ベクトルの平均で文ベクトルを作る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/avg_word_vectors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/avg_word_vectors.ipynb) |
 | 06-10 | [Doc2Vec で文書ベクトルを学習する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/doc2vec.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/doc2vec.ipynb) |
+| 06-11 | [2 言語の単語ベクトルを線形写像で対応させて対訳語を引く](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/cross_lingual_word_vectors.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/06_word_vectors/cross_lingual_word_vectors.ipynb) |
 
 ### 7. サブワードとトークナイザ
 
@@ -402,7 +404,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 17. 意味解析
 
-「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
+「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。章の後半では、これらの部品を組み合わせてニュースから出来事を抜き出して時間順に並べるイベント抽出（小さな LLM による JSON 抽出との比較）と、含意関係認識の分類器の学習、仮説文だけで学習したモデルで分かるデータの偏りを扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -417,10 +419,12 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 17-09 | [日本語の時間表現を抽出して正規化する (ja-timex)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/timex_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/timex_ja.ipynb) |
 | 17-10 | [否定・モダリティ・時制を取り出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/negation_modality_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/negation_modality_ja.ipynb) |
 | 17-11 | [2 つの文の論理的な関係を接続表現から推定する（談話関係）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/discourse_relation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/discourse_relation.ipynb) |
+| 17-12 | [ニュースから出来事（誰が・いつ・どこで・何をした）を抜き出して時間順に並べる（イベント抽出）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/event_extraction.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/event_extraction.ipynb) |
+| 17-13 | [文ペアを分類する BERT を学習し、仮説文だけでどこまで当たるかを調べる（含意関係認識、JNLI）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/nli_hypothesis_only.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/17_semantics/nli_hypothesis_only.ipynb) |
 
 ### 18. 語の意味と意味の変化
 
-文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。WordNet で同義語・上位語を引く方法、上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。少数のシードから始める半教師あり学習（自己学習・Yarowsky アルゴリズムと共訓練 Co-training、意味ドリフトの演習を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
+文脈から語の意味を判定し、コーパスから語彙知識を集め、意味の変化を見つける。WordNet で同義語・上位語を引く方法、上位語・下位語や同じカテゴリの語、言い換えの自動獲得（パターンによる抽出、ブートストラッピングと意味ドリフト、対訳を介した言い換え）、語義曖昧性解消と語義推定、慣用句・機能表現の検出と字義どおりの用法との区別、時代の違うコーパスを比べて頻度や使われ方が変わった単語を見つける方法（単語ベクトルの位置合わせ、近傍語や共起の比較、文脈化ベクトル、評価データでの検証）。少数のシードから始める半教師あり学習（自己学習・Yarowsky アルゴリズムと共訓練 Co-training、意味ドリフトの演習を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -438,6 +442,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 18-12 | [複数の時代にまたがる意味の変化を 1 つのモデルで追う (Temporal Referencing)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/temporal_referencing.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/temporal_referencing.ipynb) |
 | 18-13 | [BERT の文脈化ベクトルで単語の使われ方の変化を調べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/semantic_change_bert.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/semantic_change_bert.ipynb) |
 | 18-14 | [意味変化の検出手法を評価データで比べる (SemEval-2020 Task 1)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/semantic_change_eval.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/semantic_change_eval.ipynb) |
+| 18-15 | [慣用句・機能表現を見つけて字義どおりの用法と区別する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/idiom_detection.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/18_lexical_semantics/idiom_detection.ipynb) |
 
 ### 19. 検索
 
@@ -481,7 +486,7 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 
 ### 21. 大規模言語モデル (LLM)
 
-小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
+小さなオープンモデルを Colab 上で動かす。チャットとバッチ生成、vLLM による高速な生成、量子化、入力の長さによる待ち時間と生成速度の計測（最初のトークンまでの時間と KV キャッシュの効果）、プロンプトと推論の工夫（Chain-of-Thought、思考する LLM の思考の長さ）、構造化出力と制約付きデコーディング、関数の定義を渡して外部ツールを呼び出させるツール呼び出し、生成した広告文のプログラムによる検証。API で大きなモデルを使う方法は「LLM の API（Gemini と Claude）」の章、LLM の比較と性質の調べ方や LLM による評価は「LLM の評価と分析」の章、LoRA による指示チューニングや DPO・GRPO による調整は「LLM の学習と調整」の章、検索と組み合わせる方法は「RAG」の章を参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -490,17 +495,17 @@ Hugging Face Transformers と Datasets で、事前学習済みモデルを動�
 | 21-03 | [複数のプロンプトをまとめてバッチ生成する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_batch_generation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_batch_generation.ipynb) |
 | 21-04 | [vLLM で大量のプロンプトをまとめて高速に生成する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/vllm_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/vllm_generation.ipynb) |
 | 21-05 | [LLM を 4bit 量子化して少ないメモリで動かす](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_4bit.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_4bit.ipynb) |
-| 21-06 | [Few-shot プロンプトでテキストを分類する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_few_shot.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_few_shot.ipynb) |
-| 21-07 | [選択肢の尤度を比べて LLM に分類させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_choice_scoring.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_choice_scoring.ipynb) |
-| 21-08 | [プロンプトをテンプレートで管理し、似た例を動的に選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_template.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_template.ipynb) |
-| 21-09 | [指示文の言語を変えて LLM の出力がどう変わるか比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_language.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_language.ipynb) |
-| 21-10 | [考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_reasoning.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_reasoning.ipynb) |
-| 21-11 | [思考する LLM で、思考のオン・オフと思考の長さの上限を変えて正解率とコストを比べる（Qwen3 の enable_thinking と budget forcing）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) |
-| 21-12 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) |
-| 21-13 | [制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) |
-| 21-14 | [LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) |
-| 21-15 | [検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) |
-| 21-16 | [長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) |
+| 21-06 | [長い質問で最初の応答とその後の生成がどれだけ遅くなるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_prefill_decode.ipynb) |
+| 21-07 | [Few-shot プロンプトでテキストを分類する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_few_shot.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_few_shot.ipynb) |
+| 21-08 | [選択肢の尤度を比べて LLM に分類させる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_choice_scoring.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_choice_scoring.ipynb) |
+| 21-09 | [プロンプトをテンプレートで管理し、似た例を動的に選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_template.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_template.ipynb) |
+| 21-10 | [指示文の言語を変えて LLM の出力がどう変わるか比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_language.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/prompt_language.ipynb) |
+| 21-11 | [考える過程を書かせて LLM に算数の文章題を解かせる（Chain-of-Thought と self-consistency）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_reasoning.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_reasoning.ipynb) |
+| 21-12 | [思考する LLM で、思考のオン・オフと思考の長さの上限を変えて正解率とコストを比べる（Qwen3 の enable_thinking と budget forcing）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/thinking_budget.ipynb) |
+| 21-13 | [LLM の出力から JSON を取り出して検証する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_json_output.ipynb) |
+| 21-14 | [制約付きデコーディングで LLM の出力を JSON スキーマ・正規表現・選択肢に従わせる (outlines)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/constrained_decoding.ipynb) |
+| 21-15 | [LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/llm_tool_calling.ipynb) |
+| 21-16 | [検索広告の見出しを LLM で複数作り、文字数やキーワードを自動でチェックして選ぶ](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/21_llm/ad_text_generation.ipynb) |
 
 ### 22. LLM の API（Gemini と Claude）
 
@@ -553,7 +558,7 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 
 ### 25. RAG（検索拡張生成）
 
-手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」「LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG）」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策と、LLM に検索語を決めさせて検索を繰り返させ、複数の文書をたどって答えさせる方法（エージェント型 RAG）も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -571,10 +576,11 @@ LLM を比べ、その性質を調べる。日本語のベンチマークでの�
 | 25-12 | [RAG 全体を評価して設定を比べる](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_eval_pipeline.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_eval_pipeline.ipynb) |
 | 25-13 | [RAG の失敗を検索と生成に切り分けて分析する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_error_analysis.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_error_analysis.ipynb) |
 | 25-14 | [プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/prompt_injection.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/prompt_injection.ipynb) |
+| 25-15 | [LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_agent.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/25_rag/rag_agent.ipynb) |
 
 ### 26. 対話システム
 
-FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向（実際の対話データでの対話状態の追跡の評価を含む）、LLM による雑談、応答の評価、音声で話せる対話システムまで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3〜4B の LLM で何度も生成するレシピと、音声認識を使うレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -590,10 +596,12 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 | 26-10 | [攻撃的な投稿に対して落ち着いた返答を作る（カウンタースピーチ）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/counter_speech.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/counter_speech.ipynb) |
 | 26-11 | [対話システムの応答を評価する（参照あり・参照なしの指標と LLM による判定）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/dialogue_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/dialogue_eval.ipynb) |
 | 26-12 | [ブラウザで使えるチャット画面を作る (Gradio)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/gradio_chat.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/gradio_chat.ipynb) |
+| 26-13 | [音声で話せる対話システムを作る（音声認識・LLM・音声合成）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/voice_dialogue.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/voice_dialogue.ipynb) |
+| 26-14 | [対話状態の追跡を評価する（JMultiWOZ、全スロット一致率）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/dst_eval.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/26_dialogue/dst_eval.ipynb) |
 
 ### 27. 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する、LLM に翻訳させて NLLB と比べる（few-shot、前後の文脈、出力の後処理）。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -616,10 +624,11 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 | 27-17 | [1 つの原文から多様な訳を複数出す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/diverse_translation.ipynb) |
 | 27-18 | [古文を現代語に訳す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/classical_to_modern.ipynb) |
 | 27-19 | [動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/subtitle_translation.ipynb) |
+| 27-20 | [LLM で日英・英日翻訳して NLLB と比べる（ゼロショット、few-shot、前後の文脈）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/llm_translation.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/27_machine_translation/llm_translation.ipynb) |
 
 ### 28. 要約と平易化
 
-文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、話題の切れ目での区切り、口コミからの意見の要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換と、その評価。要約・生成タスクの理論や背景については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+文章を短くまとめる、やさしく書き換える。抽出型と生成型の要約、3 行要約、話題の切れ目での区切り、口コミからの意見の要約、議事録の作成、規約の新旧の比較、見出し生成（T5 のファインチューニングを含む）、テキスト平易化と語彙平易化、文体の変換、表の数値からの文章の生成（data-to-text）と、その評価。要約・生成タスクの理論や背景については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -639,10 +648,11 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 | 28-14 | [文章をやさしい日本語に書き換える（テキスト平易化）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/text_simplification.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/text_simplification.ipynb) |
 | 28-15 | [難しい単語を見つけてやさしい単語に言い換える（語彙平易化）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/lexical_simplification.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/lexical_simplification.ipynb) |
 | 28-16 | [文体を変換する（です・ます調、だ・である調、敬語）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/style_transfer_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/style_transfer_ja.ipynb) |
+| 28-17 | [表の数値から文章を作り、数値の誤りを検査する（data-to-text）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/data_to_text.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/28_summarization/data_to_text.ipynb) |
 
 ### 29. 文法誤り訂正と文章校正
 
-学習者の作文を訂正する、訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5、参照なし評価）、日本語の文章の校正すべき箇所を指摘する、スペルミスを直す。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
+学習者の作文を訂正する、擬似誤りデータで訂正モデルを学習する、訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5、参照なし評価）、日本語の文章の校正すべき箇所を指摘する、スペルミスを直す。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -661,6 +671,7 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 | 29-13 | [日本語の文章の校正すべき箇所を指摘する（表記ゆれ・冗長な表現・ら抜き言葉）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/proofreading_ja.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/proofreading_ja.ipynb) |
 | 29-14 | [英語のスペルミスをライブラリで直す (pyspellchecker)](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/spellcheck.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/spellcheck.ipynb) |
 | 29-15 | [symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/spelling_correction.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/spelling_correction.ipynb) |
+| 29-16 | [擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ）](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/gec_synthetic_train.ipynb) ⚡ | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/29_gec/gec_synthetic_train.ipynb) |
 
 ### 30. 言語教育・リーダビリティ・自動採点
 
@@ -711,7 +722,7 @@ FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向�
 
 ### 付録 A. Colab と Python の小技
 
-Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章も参照。
+Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）、グラフの日本語を文字化けさせずに表示する方法。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章も参照。
 
 | # | やりたいこと | Colab |
 |---|---|---|
@@ -729,6 +740,7 @@ Colab で NLP の実験をするときに、毎回調べることになる定番
 | A-12 | [JSON Lines 形式でデータを読み書きする](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/jsonl_io.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/jsonl_io.ipynb) |
 | A-13 | [CSV / TSV の文字化けと列ずれを避ける](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/csv_io.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/csv_io.ipynb) |
 | A-14 | [巨大なテキストファイルをメモリに載せずに処理する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/large_file_stream.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/large_file_stream.ipynb) |
+| A-15 | [matplotlib で日本語を文字化けさせずに表示する](https://github.com/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/matplotlib_ja.ipynb) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mamorlis/nlpcookbook/blob/main/notebooks/A_colab_python_tips/matplotlib_ja.ipynb) |
 
 ### 付録 B. 仕組みを理解するための実装
 

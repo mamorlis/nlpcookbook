@@ -1,6 +1,6 @@
 # Colab と Python の小技
 
-Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章も参照。
+Colab で NLP の実験をするときに、毎回調べることになる定番の操作と、テキストのファイルを扱うときの Python の小技（JSON Lines、CSV / TSV、メモリに載らない大きなファイル）、グラフの日本語を文字化けさせずに表示する方法。NLP パイプラインのモジュール分割・テストや高速化・ボトルネック計測については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 5 章も参照。
 
 ## Google Drive をマウントしてファイルを読み書きする {colab_drive norun}
 
@@ -616,3 +616,35 @@ print(reservoir_sample(read_lines("corpus.txt.gz"), 3))
 - `f.readlines()` や `f.read().split("\n")` は全体をメモリに載せるので、大きなファイルでは使わない。
 - 行数だけ知りたいなら `!zcat corpus.txt.gz | wc -l`、先頭を見たいなら `!zcat corpus.txt.gz | head` が速い。
 - 表形式なら `pd.read_csv(path, chunksize=100_000)`、Hugging Face Datasets なら `streaming=True` が同じ役割をする。
+
+## matplotlib で日本語を文字化けさせずに表示する {matplotlib_ja}
+
+グラフの軸ラベルや凡例の日本語が □□□（豆腐）になるのを直したい。
+
+```python
+!pip install -q matplotlib-fontja
+```
+
+```python
+import matplotlib.pyplot as plt
+import matplotlib_fontja  # import するだけで IPAex ゴシックが既定のフォントになる
+
+words, counts = ["猫", "主人", "人間", "先生", "迷亭"], [270, 933, 280, 250, 340]
+plt.bar(words, counts)
+plt.title("単語の出現頻度"); plt.xlabel("単語"); plt.ylabel("頻度")
+plt.show()
+```
+
+```python
+# seaborn を使う場合は、set_theme がフォントを上書きするので後からもう一度設定する
+import seaborn as sns
+
+sns.set_theme(style="whitegrid")
+matplotlib_fontja.japanize()
+sns.barplot(x=words, y=counts)
+plt.title("seaborn でも日本語")
+plt.show()
+```
+
+- 以前の定番 `japanize-matplotlib` は Python 3.12 以降で動かない（distutils 廃止のため）。`matplotlib-fontja` はその後継。
+- 別のフォントを使いたいときは `!apt-get -y install fonts-noto-cjk` して `plt.rcParams["font.family"] = "Noto Sans CJK JP"`。

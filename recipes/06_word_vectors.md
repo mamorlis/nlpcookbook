@@ -1,6 +1,6 @@
 # 単語ベクトル
 
-単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
+単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。2 言語の単語ベクトルを線形写像で重ね合わせて、対訳語を引くレシピもある。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
 
 ## word2vec を自分のコーパスで学習する {word2vec_train}
 
@@ -353,3 +353,127 @@ for n, sim in model.dv.most_similar([vec], topn=3):
 
 - `dm=1` が PV-DM（文脈語 + 文書ベクトルで予測）、`dm=0` が PV-DBOW（文書ベクトルだけで単語を予測）。ここでは `dm=0` を使った。このデータでは `dm=1` にすると、上の推論の例で石油 (crude) の記事が上位に来なかった。
 - 現在は事前学習済みの文埋め込みモデルのほうが手軽で高精度なことが多い。ドメイン特化の大量文書がある場合の選択肢。
+
+## 2 言語の単語ベクトルを線形写像で対応させて対訳語を引く {cross_lingual_word_vectors}
+
+日本語と英語で別々に学習した単語ベクトルを、少数の対訳ペアで学習した線形写像で重ね合わせ、辞書にない単語の訳語を引きたい。
+
+```python
+# MUSE の日英対訳辞書: 学習用 (よく使う語 0〜5000 番目) とテスト用 (5000〜6500 番目)
+!wget -q https://dl.fbaipublicfiles.com/arrival/dictionaries/ja-en.0-5000.txt
+!wget -q https://dl.fbaipublicfiles.com/arrival/dictionaries/ja-en.5000-6500.txt
+```
+
+```python
+import gzip, urllib.request
+import numpy as np
+
+def load_vec(lang, n=50000):
+    """fastText の Common Crawl ベクトル (.vec.gz, 約 1.3GB) を、ストリーミングで頻度順の先頭 n 語だけ読む"""
+    url = f"https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/cc.{lang}.300.vec.gz"
+    words, vecs = [], np.zeros((n, 300), dtype=np.float32)
+    with urllib.request.urlopen(url) as r, gzip.open(r, "rt", encoding="utf-8") as f:
+        f.readline()  # 1 行目は「語数 次元数」
+        for i, line in enumerate(f):
+            if i == n:
+                break
+            w, *v = line.rstrip().split(" ")
+            words.append(w)
+            vecs[i] = np.array(v, dtype=np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)  # 長さ 1 にそろえる (内積 = コサイン類似度)
+    return words, {w: i for i, w in enumerate(words)}, vecs
+
+ja_words, ja_id, JA = load_vec("ja")  # 1 言語あたり約 35MB のダウンロード
+en_words, en_id, EN = load_vec("en")
+
+def load_dict(path):
+    d = {}  # 日本語 → 英訳の集合 (訳語が複数ある語も多い)
+    for line in open(path, encoding="utf-8"):
+        s, t = line.split()
+        if s in ja_id and t in en_id:
+            d.setdefault(s, set()).add(t)
+    return d
+
+train, test = load_dict("ja-en.0-5000.txt"), load_dict("ja-en.5000-6500.txt")
+pairs = [(s, t) for s, ts in train.items() for t in sorted(ts)]
+print(f"学習: {len(train)} 語 ({len(pairs)} ペア)  テスト: {len(test)} 語")
+print("テストの例:", [(s, sorted(ts)) for s, ts in list(test.items())[:5]])
+```
+
+```python
+X = JA[[ja_id[s] for s, _ in pairs]]  # 日本語側のベクトル
+Y = EN[[en_id[t] for _, t in pairs]]  # 対応する英語側のベクトル
+
+# 1. Mikolov らの翻訳行列: ‖XW − Y‖² を最小にする W (最小二乗法)
+W_ls = np.linalg.lstsq(X, Y, rcond=None)[0]
+# 2. 直交プロクラステス: W を回転 (直交行列) に限る。XᵀY の特異値分解 UΣVᵀ から W = UVᵀ
+U, _, Vt = np.linalg.svd(X.T @ Y)
+W_pro = U @ Vt
+print("WᵀW と単位行列の差:", round(float(np.abs(W_ls.T @ W_ls - np.eye(300)).max()), 3), "(最小二乗)",
+      round(float(np.abs(W_pro.T @ W_pro - np.eye(300)).max()), 6), "(プロクラステス)")
+
+def nn(Q, k=5):
+    """写像したベクトルに、コサイン類似度で最も近い英単語を k 個返す"""
+    Q = Q / np.linalg.norm(Q, axis=1, keepdims=True)
+    return np.argsort(-(Q @ EN.T), axis=1)[:, :k]
+
+def precision(top, queries, k):
+    return np.mean([any(en_words[j] in test[s] for j in row[:k]) for row, s in zip(top, queries)])
+
+queries = list(test)
+Q = JA[[ja_id[s] for s in queries]]
+for name, W in [("最小二乗", W_ls), ("プロクラステス", W_pro)]:
+    top = nn(Q @ W)
+    print(f"{name:8}  P@1 = {precision(top, queries, 1):.3f}  P@5 = {precision(top, queries, 5):.3f}")
+```
+
+```python
+# CSLS: どの語の近傍にも現れる「ハブ」の英単語を割り引いて、最近傍探索の偏りを抑える
+#   CSLS(x, y) = 2 cos(Wx, y) − r_en(Wx) − r_ja(y)   (r は相手側の言語の近傍 10 語との平均類似度)
+def csls(Q, W, k=5, knn=10):
+    S = JA @ W
+    S /= np.linalg.norm(S, axis=1, keepdims=True)  # 日本語の全語彙 (5 万語) を写像したもの
+    r_ja = np.zeros(len(EN), dtype=np.float32)     # 英単語ごとに、写像した日本語の近傍との平均類似度
+    for i in range(0, len(EN), 2000):
+        sims = EN[i:i + 2000] @ S.T
+        r_ja[i:i + 2000] = np.partition(sims, -knn, axis=1)[:, -knn:].mean(1)
+    Q = Q / np.linalg.norm(Q, axis=1, keepdims=True)
+    sims = Q @ EN.T
+    r_en = np.partition(sims, -knn, axis=1)[:, -knn:].mean(1)
+    return np.argsort(-(2 * sims - r_en[:, None] - r_ja[None]), axis=1)[:, :k]
+
+from collections import Counter
+for name, W in [("最小二乗", W_ls), ("プロクラステス", W_pro)]:
+    for method, top in [("最近傍", nn(Q @ W)), ("CSLS", csls(Q @ W, W))]:
+        hubs = Counter(en_words[row[0]] for row in top).most_common(3)
+        print(f"{name:8} {method:4}  P@1 = {precision(top, queries, 1):.3f}  P@5 = {precision(top, queries, 5):.3f}"
+              f"  1 位に多く出た語: {hubs}")
+```
+
+```python
+# うまくいく例と失敗する例 (どれも学習用の辞書にない語。猫と犬はテスト用の辞書にもない)
+examples = ["猫", "犬", "寿司", "ひまわり", "休暇", "レバー", "押す", "微分", "等しい", "ジェームス", "ディック", "土井", "三次"]
+top = csls(JA[[ja_id[w] for w in examples]] @ W_pro, W_pro)
+for w, row in zip(examples, top):
+    gold = "/".join(sorted(test.get(w, []))) or "-"
+    print(f"{w:6} 正解: {gold:20} 予測: {[en_words[j] for j in row]}")
+```
+
+```python
+# 対訳ペアの数を減らすと: 300 ペアは次元数 (300) より少なく、最小二乗では W が決まらない
+rng = np.random.default_rng(0)
+perm = rng.permutation(len(pairs))
+for n in [300, 1000, 3000, len(pairs)]:
+    Xn, Yn = X[perm[:n]], Y[perm[:n]]
+    U, _, Vt = np.linalg.svd(Xn.T @ Yn)
+    p_ls = precision(nn(Q @ np.linalg.lstsq(Xn, Yn, rcond=None)[0], 1), queries, 1)
+    p_pro = precision(nn(Q @ (U @ Vt), 1), queries, 1)
+    print(f"{n:5} ペア  P@1  最小二乗 {p_ls:.3f}  プロクラステス {p_pro:.3f}")
+```
+
+- 単語ベクトル空間の形は言語が違っても似ているので、線形写像（ほぼ回転）で重ねられる（Mikolov ら 2013）。写像を直交行列に限ると、日本語の中での語どうしの距離が変わらず、少ないペアでも過学習しにくい（Xing ら 2015）。CSLS は MUSE（Conneau ら 2018）で提案された。
+- 評価は、テスト用の日本語 1 語に対して英語 5 万語から探し、上位に辞書の訳語のどれかが入れば正解とする。全ペア（5300 ペア）で学習すると、最近傍の P@1 は最小二乗 0.532、プロクラステス 0.547 で差は小さい。CSLS にすると 0.589 と 0.570 に上がり、このデータでは最小二乗のほうが伸びた。ペアが少ないとプロクラステスのほうがはるかに頑健で、300 ペアでは最小二乗の P@1 が 0.001 とほぼ 0 で、プロクラステスは 0.238 だった。
+- 失敗の典型は、固有名詞（ジェームス → george、ディック → mr、名字の土井は意味のない語）、意味は近いが訳ではない語（微分 → algebra などの数学の語、等しい → negligible、tantamount）、トークン化や用法のずれ（三次 → cubic が引けない）。多義語は、片方の語義（レバー → lever、liver は出ない）だけが出やすい。
+- 英語側は大文字・小文字を区別した語彙なので、`Sunflower` のような大文字の変種が候補の枠を使う。MUSE の辞書は小文字だけ。
+- fastText の Common Crawl ベクトルは CC BY-SA 3.0。MUSE の対訳辞書は CC BY-NC 4.0（非商用に限る）。MUSE の日本語の辞書には、カタカナの人名や自動抽出による誤りが多く含まれる。
+- 対訳ペアなしで写像を学習する方法（敵対的学習、VecMap の自己学習）もある。同じ回転による位置合わせを、時代の違うコーパスどうしに使うのが語の意味と意味の変化の章の「時代別の単語ベクトルを位置合わせして意味が変わった単語を探す」。単語ではなく文を言語をまたいで探すなら、検索の章の「言語をまたいで検索する（クロスリンガル検索）」。
