@@ -1,6 +1,6 @@
 # 機械翻訳
 
-対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
+対訳データを用意する、翻訳モデルを動かす、訳文を評価する、品質推定モデルを学習する、モデルを学習・微調整する、訳し方を制御する、用語集による定訳の指定、動画の字幕を作って翻訳する、LLM に翻訳させて NLLB と比べる（few-shot、前後の文脈、出力の後処理）。単語アライメント (IBM Model 1)、BLEU や文埋め込みから翻訳の評価指標を自分で学習するレシピは、付録の「仕組みを理解するための実装」にある。機械翻訳や品質推定を含む応用・評価については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章・第 2 章・第 4 章も参照。
 
 ## 対訳コーパスを取得して中身を確認する {parallel_corpus}
 
@@ -102,7 +102,7 @@ for tgt in ["jpn_Jpan", "zho_Hans", "kor_Hang", "fra_Latn"]:
 - 言語は FLORES-200 のコード（`jpn_Jpan`、`eng_Latn`、`zho_Hans` など）で指定する。出力言語は、デコーダの最初のトークンを強制することで決まる。
 - 文単位で学習されたモデルなので、長い文章は文に分割してから 1 文ずつ訳す。
 - 精度を上げるなら `facebook/nllb-200-1.3B` や `nllb-200-3.3B`（GPU 推奨）。NLLB のライセンスは CC-BY-NC（非商用）である点に注意。
-- 日英・英日に特化するなら、LLM に翻訳させるほうが流暢なことも多い（大規模言語モデルの章を参照）。
+- 日英・英日なら、手元で動く小さな LLM に翻訳させる方法もある。NLLB との比較や、出力の後処理、前後の文脈の与え方は、この章の「LLM で日英・英日翻訳して NLLB と比べる（ゼロショット、few-shot、前後の文脈）」を参照。
 
 ## 機械翻訳を BLEU で評価する (sacreBLEU) {bleu}
 
@@ -1919,3 +1919,235 @@ print(open("en.srt", encoding="utf-8").read()[:400])
 - 英語の字幕の制約は Netflix のガイドライン（1 行 42 字、2 行まで、大人向けは 1 秒あたり 20 字まで、表示は 5/6 秒以上 7 秒以下）に合わせた。154 枚のうち 23 枚が 1 秒あたり 20 字を超え、4 枚が 2 行 × 42 字に収まらなかった。表示を次の字幕の直前まで延ばしても 17 枚と 4 枚が残った。違反の残った 14 文を LLM に字数の上限を示して短くさせると、違反は 0 になったが、上限の 6 割ほどまで縮めすぎる傾向があり、参照訳に対する chrF は 51.0 から 46.7 に下がった。
 - 字幕の訳は読み切れる長さに縮めるのが普通なので、参照訳との一致を見る BLEU や chrF は、縮めた分だけ低く出る。この章の「COMET で翻訳の品質を評価する」のような意味を見る指標や、映像に重ねて読んで確かめることを併用する。
 - GPU メモリの最大は 11.8GB（Whisper、NLLB、LLM を同時に読み込んだ状態、float16）。LLM は会話の例を 1 往復前に置いても、訳させた 377 件（字幕ごと 156 件 × 2 通りと 65 文）のうち 1 件で日本語の説明しか返さなかった。出力が英語になっているかは必ず確かめる。
+
+## LLM で日英・英日翻訳して NLLB と比べる（ゼロショット、few-shot、前後の文脈） {llm_translation gpu}
+
+手元で動く小さな LLM に日英・英日の翻訳をさせて、翻訳専用のモデル NLLB と chrF・COMET で比べたい。LLM の出力に付く説明文などの後処理と、例を見せる (few-shot)・前後の文を見せることの効果も確かめたい。
+
+```python
+!pip install -q unbabel-comet "setuptools<81"   # COMET のレシピと同じ。comet が使う torchmetrics は、新しい setuptools で削除された pkg_resources を読み込む
+```
+
+```python
+import pandas as pd
+from huggingface_hub import hf_hub_download
+
+# Business Scene Dialogue（BSD、Rikters ほか、CC BY-NC-SA 4.0）: ビジネスの場面の日英の会話。半分は日本語で書いて英訳し、半分は英語で書いて和訳したもの
+# 話し言葉で主語や目的語の省略が多く、前の発言を知らないと訳しにくい文が多い
+def load(split):
+    return pd.read_parquet(hf_hub_download("ryo0634/bsd_ja_en", f"data/{split}-00000-of-00001.parquet", repo_type="dataset"))
+test, train = load("test"), load("train")
+
+# 原文の言語で会話を選び、テストデータの先頭の会話から 100 文ずつ取る（会話の順のまま）
+DIRS = {"ja→en": ("ja", "en", "jpn_Jpan", "eng_Latn"), "en→ja": ("en", "ja", "eng_Latn", "jpn_Jpan")}
+data = {d: test[test["original_language"] == s].head(100).reset_index(drop=True) for d, (s, *_) in DIRS.items()}
+for d, (s, t, *_) in DIRS.items():
+    x = data[d]
+    print(d, len(x), "文", x["id"].nunique(), "会話:", " / ".join(x["title"].unique()))
+    for _, r in x.iloc[6:10].iterrows():
+        print(f"  {r[s + '_speaker']}: {r[s + '_sentence']}  →  {r[t + '_sentence']}")
+```
+
+```python
+import os
+os.environ["USE_TF"] = os.environ["USE_FLAX"] = "0"   # comet が入れる古い transformers が、numpy 2 を前提にした Colab の TensorFlow・JAX を読み込んで失敗するのを防ぐ
+import torch
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+# この章の「多言語翻訳モデル NLLB で翻訳する」と同じモデル（Meta、CC BY-NC 4.0 で非商用に限る）。1 文ずつ、前後の文は見ない
+name = "facebook/nllb-200-distilled-600M"
+nllb_tok = AutoTokenizer.from_pretrained(name)
+nllb = AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda").eval()
+
+@torch.no_grad()
+def nllb_translate(texts, src, tgt, batch_size=16):
+    nllb_tok.src_lang = src
+    out = []
+    for i in range(0, len(texts), batch_size):
+        batch = nllb_tok(texts[i:i + batch_size], return_tensors="pt", padding=True).to("cuda")
+        gen = nllb.generate(**batch, forced_bos_token_id=nllb_tok.convert_tokens_to_ids(tgt), num_beams=4, max_new_tokens=256)
+        out += nllb_tok.batch_decode(gen, skip_special_tokens=True)
+    return out
+
+hyps = {d: {} for d in DIRS}                           # hyps[方向][方法] = 訳文のリスト
+for d, (s, t, sc, tc) in DIRS.items():
+    hyps[d]["NLLB"] = nllb_translate(data[d][s + "_sentence"].tolist(), sc, tc)
+print(hyps["ja→en"]["NLLB"][6:10])
+del nllb; torch.cuda.empty_cache()                 # GPU メモリを LLM のために空ける
+```
+
+```python
+import re
+from transformers import AutoModelForCausalLM
+
+DTYPE = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16   # bfloat16 は Ampere (A100, L4) 以降。T4 では float16
+
+@torch.no_grad()
+def chat(conversations, batch_size=8, max_new_tokens=200):
+    """会話（メッセージのリスト）ごとに、貪欲法で応答を生成する"""
+    out = []
+    for i in range(0, len(conversations), batch_size):
+        texts = [tok.apply_chat_template(c, add_generation_prompt=True, tokenize=False) for c in conversations[i:i + batch_size]]
+        batch = tok(texts, add_special_tokens=False, return_tensors="pt", padding=True).to(llm.device)
+        gen = llm.generate(**batch, max_new_tokens=max_new_tokens, do_sample=False, temperature=None, top_p=None, top_k=None,
+                           pad_token_id=tok.pad_token_id)
+        out += [o.strip() for o in tok.batch_decode(gen[:, batch["input_ids"].shape[1]:], skip_special_tokens=True)]
+    return out
+
+LANG = {"ja": "日本語", "en": "英語"}
+JA = re.compile(r"[ぁ-んァ-ヶ一-龥]")
+def problems(src, out, tgt):
+    """後処理か指示の工夫が必要な出力の種類"""
+    p = []
+    if "\n" in out or re.match(r"(?i)(翻訳|訳|英訳|和訳|日本語|英語|here|translation|sure)", out):
+        p.append("説明・複数行")
+    if len(out) >= 2 and out[0] + out[-1] in ['""', "“”", "「」", "''"]:
+        p.append("引用符")
+    if (tgt == "en") == bool(JA.search(out.split("\n")[0])):
+        p.append("言語が違う")
+    if src.rstrip().endswith(("?", "？")) and not re.search(r"[?？]|か[。]?$", out.split("\n")[0]):
+        p.append("疑問文が疑問文でない")             # 質問に答えてしまった疑い（人が見て確かめる）
+    return p
+
+PREFIX = re.compile(r"(?i)^(翻訳|訳文|英訳|和訳|日本語訳|英語訳|translation|english|japanese)\s*[:：]\s*")
+def clean(out, tgt, speakers=()):
+    """前置き・説明の行と引用符を除き、訳す先の言語で書かれた最初の行を訳文とする"""
+    lines = [PREFIX.sub("", l.strip().lstrip("*-→ ")) for l in out.split("\n")]
+    lines = [l for l in lines if l and not l.endswith((":", "："))]
+    ok = [l for l in lines if (tgt == "ja") == bool(JA.search(l))] or lines
+    x = ok[0] if ok else ""
+    for sp in speakers:                                  # 「ジョン スミスさん: 」のような話者名を除く
+        x = x.removeprefix(sp + ": ").removeprefix(sp + "：")
+    while len(x) >= 2 and x[0] + x[-1] in ['""', "“”", "「」", "''"]:
+        x = x[1:-1].strip()
+    return x
+
+# 役割と出力の形をはっきり指示する。質問や依頼の文も答えずに訳すように書く
+def system(s, t):
+    return {"role": "system", "content": f"あなたはプロの翻訳者です。ユーザーが送る{LANG[s]}の文を{LANG[t]}に翻訳し、訳文だけを出力してください。"
+                                         "説明や引用符は付けません。質問や依頼の文も、答えずにそのまま訳します。"}
+
+def few_shot(s, t, k=4):
+    """学習データから例を k 組選び、会話の往復として並べる（テストデータの会話とは重ならない）。疑問文を 1 つ入れる"""
+    ex = train[(train["original_language"] == s) & train[s + "_sentence"].str.len().between(8, 60)]
+    q = ex[ex[s + "_sentence"].str.endswith(("?", "？"))].sample(1, random_state=0)
+    ex = pd.concat([ex.drop(q.index).sample(k - 1, random_state=0), q])
+    return [m for _, r in ex.iterrows() for m in ({"role": "user", "content": r[s + "_sentence"]}, {"role": "assistant", "content": r[t + "_sentence"]})]
+
+# 前後の文脈を与える: 同じ会話の前の 5 発言と後の 1 発言を話者名つきで見せ、印を付けた発言だけを訳させる
+def context_prompt(df, i, s, t, before=5, after=1):
+    r = df.iloc[i]
+    same = df[df["id"] == r["id"]]
+    rows = same[(same["no"] >= r["no"] - before) & (same["no"] <= r["no"] + after)]
+    lines = [("▶ " if q["no"] == r["no"] else "  ") + f"{q[s + '_speaker']}: {q[s + '_sentence']}" for _, q in rows.iterrows()]
+    return (f"次は「{r['title']}」の場面の会話の一部です。▶ を付けた発言だけを{LANG[t]}に翻訳してください。"
+            f"前後の発言は、省略された主語や指示語を補う手がかりにだけ使い、訳しません。\n\n" + "\n".join(lines))
+
+def few_shot_context(s, t, k=4):
+    """few-shot の例も同じ形（前後の発言つき）にする"""
+    ex = train[(train["original_language"] == s) & (train["no"] > 5)]
+    ex = ex[ex[s + "_sentence"].str.len().between(8, 60)].sample(k, random_state=1)
+    msgs = []
+    for i in ex.index:
+        msgs += [{"role": "user", "content": context_prompt(train, i, s, t)}, {"role": "assistant", "content": train.loc[i, t + "_sentence"]}]
+    return msgs
+
+print("few-shot の例 (ja→en):", [m["content"] for m in few_shot("ja", "en")][:4])
+print(context_prompt(data["ja→en"], 8, "ja", "en"))
+```
+
+```python
+# 2 つの LLM を順に読み込んで、同じ条件で訳させる（どちらも Alibaba の Qwen チーム、Apache 2.0）
+# Qwen2.5-1.5B-Instruct は float16 で約 3GB、Qwen3-4B-Instruct-2507 は約 8GB（この章の「動画の字幕を作って翻訳する（区切り直し、文脈、文字数の制約）」と同じモデル）
+LLMS = {"Qwen2.5-1.5B": "Qwen/Qwen2.5-1.5B-Instruct", "Qwen3-4B": "Qwen/Qwen3-4B-Instruct-2507"}
+examples = []
+for m, name in LLMS.items():                           # T4 なら 2 モデルで 10 分ほど
+    tok = AutoTokenizer.from_pretrained(name, padding_side="left")
+    llm = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="cuda").eval()
+    for d, (s, t, *_) in DIRS.items():
+        x = data[d]
+        xs = x[s + "_sentence"].tolist()
+        # まず素朴な指示だけで訳させて、出力をそのまま見る
+        raw = chat([[{"role": "user", "content": f"{LANG[t]}にして: {a}"}] for a in xs])
+        probs = [problems(a, o, t) for a, o in zip(xs, raw)]
+        examples += [(m, d, a, o, p) for a, o, p in zip(xs, raw, probs) if p]
+        hyps[d][f"{m} ゼロショット（素朴な指示、出力そのまま）"] = raw
+        hyps[d][f"{m} ゼロショット（素朴な指示、後処理あり）"] = [clean(o, t) for o in raw]
+        good = chat([[system(s, t), {"role": "user", "content": a}] for a in xs])
+        hyps[d][f"{m} ゼロショット（指示を工夫、後処理あり）"] = [clean(o, t) for o in good]
+        hyps[d][f"{m} few-shot（4 例）"] = [clean(o, t) for o in chat([[system(s, t), *few_shot(s, t), {"role": "user", "content": a}] for a in xs])]
+        sp = x[s + "_speaker"].unique().tolist() + x[t + "_speaker"].unique().tolist()
+        ctx = chat([[system(s, t), *few_shot_context(s, t), {"role": "user", "content": context_prompt(x, i, s, t)}] for i in range(len(x))])
+        hyps[d][f"{m} few-shot + 前後の文脈"] = [clean(o, t, sp) for o in ctx]
+        n_good = sum(map(bool, (problems(a, o, t) for a, o in zip(xs, good))))
+        print(f"{m} {d}: 素朴な指示で問題のある出力 {sum(map(bool, probs))} 文", pd.Series([q for p in probs for q in p]).value_counts().to_dict(),
+              f"→ 指示を工夫すると {n_good} 文")
+    print(f"  GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+    del llm; torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+
+# 問題のあった出力の例（種類ごとに 1〜2 件）
+shown = {}
+for m, d, a, o, p in examples:
+    if shown.get(p[0], 0) < 2:
+        shown[p[0]] = shown.get(p[0], 0) + 1
+        print(f"\n[{m} {d}] {p}\n  原文: {a}\n  出力: {o[:160]!r}")
+```
+
+```python
+import logging, warnings
+import numpy as np
+warnings.filterwarnings("ignore", module="torchmetrics|pytorch_lightning")
+from comet import download_model, load_from_checkpoint
+from sacrebleu.metrics import CHRF
+logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
+
+# 評価はこの章の「chrF と TER で翻訳を評価する」「COMET で翻訳の品質を評価する」と同じ指標・モデル
+comet = load_from_checkpoint(download_model("Unbabel/wmt22-comet-da"))
+seg = {d: {} for d in DIRS}                            # 文ごとの COMET（あとで比べる）
+rows = []
+for d, (s, t, *_) in DIRS.items():
+    src, ref = data[d][s + "_sentence"].tolist(), data[d][t + "_sentence"].tolist()
+    for k, h in hyps[d].items():
+        out = comet.predict([{"src": a, "mt": b, "ref": c} for a, b, c in zip(src, h, ref)], batch_size=32, gpus=1, progress_bar=False)
+        seg[d][k] = np.array(out.scores)
+        rows.append({"方向": d, "方法": k, "chrF": CHRF().corpus_score(h, [ref]).score, "COMET": out.system_score})
+table = pd.DataFrame(rows).pivot(index="方法", columns="方向", values=["chrF", "COMET"]).loc[list(hyps["ja→en"])]
+print(table.round({("chrF", d): 1 for d in DIRS} | {("COMET", d): 3 for d in DIRS}).to_string())
+```
+
+```python
+# 前後の文脈の効果: 文脈なしの few-shot との COMET の差を、文を単位に 1000 回再標本化して 95% 信頼区間を求める
+rng = np.random.default_rng(0)
+for m in LLMS:
+    A, B = f"{m} few-shot（4 例）", f"{m} few-shot + 前後の文脈"
+    for d in DIRS:
+        diff = seg[d][B] - seg[d][A]
+        boot = [diff[rng.integers(0, len(diff), len(diff))].mean() for _ in range(1000)]
+        print(f"{m} {d}: 差 {diff.mean():+.3f}（95% CI {np.percentile(boot, 2.5):+.3f}〜{np.percentile(boot, 97.5):+.3f}）"
+              f" 良くなった文 {(diff > 0.05).sum()}、悪くなった文 {(diff < -0.05).sum()}（差 0.05 超）")
+
+# Qwen3-4B で、文脈で COMET が大きく上がった文と下がった文を見る（前の発言、原文、参照訳、文脈なし・ありの訳）
+A, B = "Qwen3-4B few-shot（4 例）", "Qwen3-4B few-shot + 前後の文脈"
+for d, (s, t, *_) in DIRS.items():
+    x, diff = data[d], seg[d][B] - seg[d][A]
+    for i in [*np.argsort(-diff)[:2], np.argmin(diff)]:
+        prev = x[(x["id"] == x["id"][i]) & (x["no"] < x["no"][i])].tail(2)
+        print(f"\n[{d}] COMET の差 {diff[i]:+.2f}  前: " + " / ".join(prev[s + "_sentence"]))
+        print(f"  原文: {x[s + '_sentence'][i]}  参照: {x[t + '_sentence'][i]}")
+        print(f"  NLLB: {hyps[d]['NLLB'][i]}\n  文脈なし: {hyps[d][A][i]}\n  文脈あり: {hyps[d][B][i]}")
+
+# Qwen2.5-1.5B は前後の文脈を与えると大きく崩れる。崩れ方を見る
+A, B = "Qwen2.5-1.5B few-shot（4 例）", "Qwen2.5-1.5B few-shot + 前後の文脈"
+diff = seg["ja→en"][B] - seg["ja→en"][A]
+for i in np.argsort(diff)[:3]:
+    print(f"\n[Qwen2.5-1.5B ja→en] 原文: {data['ja→en']['ja_sentence'][i]}\n  文脈なし: {hyps['ja→en'][A][i]}\n  文脈あり: {hyps['ja→en'][B][i][:150]}")
+```
+
+- 結果（各方向 100 文）: いちばん良かった Qwen3-4B の few-shot は、日英で chrF 41.2・COMET 0.810、英日で chrF 22.6・COMET 0.890 で、NLLB（日英 37.1・0.758、英日 18.3・0.853）をどちらの指標でも上回った。Qwen2.5-1.5B も指示を工夫すれば COMET は NLLB より高い（日英 0.789、英日 0.872）。BSD は話し言葉の短い文が多く、1 つの原文に言い方の違う正しい訳がいくつもあるので、英日の chrF は低めに出る。値そのものより、同じデータでの比較として見る。
+- 後処理: 小さい Qwen2.5-1.5B に「英語にして: 」とだけ頼むと、日英の 100 文中 75 文に問題があった。前置き（「Here's the English translation of ...」）や複数行の説明が 67 文、引用符が 6 文。そのままでは COMET 0.687 だが、前置きの行・引用符を除いて訳文の行だけを取り出すと 0.754 まで戻る。Qwen3-4B は素朴な指示でもほとんど問題が出なかった（日英で 1 文、人名の一部が漢字のまま）。
+- 後処理では直せない失敗もある。質問に答えてしまう（「聞こえてますか？」→「Yes, I can hear you!」、「一般の方々にも販売する予定はありますか？」→「Yes, we plan to sell it ...」）、訳さずに原文を返す、別の言語（ドイツ語）に訳す、など。システムプロンプトで役割と「質問も答えずに訳す」ことを指示すると、問題のある出力は日英で 6 文、英日で 1 文に減った。出力が訳す先の言語で書かれているか、原文が疑問文なら訳も疑問文かを機械的に確かめ、怪しいものは訳し直すか人が見る。
+- 前後の文脈: Qwen3-4B に同じ会話の前の 5 発言と後の 1 発言を見せると、「もしもし？」が「May I ask?」から「Hello?」に、主語のない「取引先にもまた連絡メール出さないとだめなんだよね？」が「We'll have to send out another email ..., won't we?」になるなど、省略を補えた例がある。一方で、印を付けた発言ではなく隣の発言を訳してしまう失敗があり（「もしもし、お待たせしてすみません。」→「May I speak to Ms. Miyagi, please?」）、平均の COMET の差は日英 −0.008（95% 信頼区間 −0.025〜+0.009）、英日 −0.010（−0.023〜+0.002）で、この 100 文では効果ははっきりしなかった。
+- Qwen2.5-1.5B では、文脈を与えると別の発言を訳すことが多く、COMET が日英で 0.153 下がった（100 文中 69 文で 0.05 以上悪化）。小さいモデルに長い指示と文脈を渡すと、指示に従えなくなる。文脈を使うなら、文脈なしの訳と大きく食い違わないかを確かめる、前の発言の訳も渡す、大きいモデルを使う、などの工夫が要る。
+- 所要時間は検証の GPU で約 6.5 分（LLM の生成が約 4.5 分）。GPU メモリの最大は Qwen3-4B で 10.4GB（float16）。NLLB は LLM を読み込む前にメモリから消している。
+- comet は古い版の transformers と numpy 1 系を入れるので、そのままでは transformers が Colab の TensorFlow と JAX（numpy 2 向け）を読み込もうとして失敗する。NLLB のセルの最初で環境変数 `USE_TF`・`USE_FLAX` を 0 にして防いでいる。依存関係の衝突の赤い ERROR は、この章の「COMET で翻訳の品質を評価する」と同じで、実行には影響しない。
+- ライセンス: BSD は CC BY-NC-SA 4.0、NLLB は CC BY-NC 4.0 で、どちらも非商用に限る。Qwen2.5-1.5B-Instruct と Qwen3-4B-Instruct-2507 は Apache 2.0、COMET の wmt22-comet-da は Apache 2.0。

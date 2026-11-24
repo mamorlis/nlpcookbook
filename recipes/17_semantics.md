@@ -1,6 +1,6 @@
 # 意味解析
 
-「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
+「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。章の後半では、これらの部品を組み合わせてニュースから出来事を抜き出して時間順に並べるイベント抽出（小さな LLM による JSON 抽出との比較）と、含意関係認識の分類器の学習、仮説文だけで学習したモデルで分かるデータの偏りを扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
 
 ## 日本語の述語項構造解析をする (KWJA) {pas_kwja}
 
@@ -723,3 +723,381 @@ print(pd.crosstab(pd.Series(gold, name="正解"), pd.Series(pred, name="予測 (
 - 接続表現は 1 トークンとは限らない（「だから」は「だ / から」）。トークンを 1 つずつ隠して予測させる疑似対数尤度で、長さの違う表現を比べられるようにしている。ただし、表現によってスコアの出やすさが大きく違い、補正しないと特定の関係（ここでは原因・理由）ばかりが選ばれる。評価に使わない少数の組で関係ごとの平均スコアを求め、差し引いてから比べる。
 - 「また」「そして」のような付加の表現はコーパスでは最も多い（3325 組）が、モデルの予測はそこに偏っていない。補正後はむしろ例示の予測が多く（120 件）、原因・理由の 24 組と言い換えの 20 組が例示と予測されている。正解率だけでなく、混同行列や関係ごとの再現率も見る。
 - 注釈付きのデータとしては、英語の Penn Discourse Treebank、日本語の京都大学ウェブ文書リードコーパスの談話関係注釈がある。精度が必要なら、これらで分類器を学習する。
+
+## ニュースから出来事（誰が・いつ・どこで・何をした）を抜き出して時間順に並べる（イベント抽出） {event_extraction gpu}
+
+ニュース記事から「誰が・何を・どこで・いつ・どうした」の組を出来事ごとに取り出し、起きた順に並べたい。この章の部品（述語項構造、時間表現の正規化、否定・モダリティ）を組み合わせる方法と、小さなオープン LLM に JSON で抜き出させる方法を、手作りの小さな正解で比べる。
+
+```python
+!pip install -q kwja ja-timex
+```
+
+```python
+import re
+import pandas as pd
+
+# 架空のニュース 5 本（このレシピのために作ったもの）。日付は記事の掲載日で、「19日」「昨年」「来月」を解釈する基準になる
+DOCS = [("2026-11-20", "みなと市の山本市長は19日、市役所で記者会見を開き、新しい図書館が2028年に開館する予定だと発表した。市は昨年、駅前の土地を購入していた。"),
+        ("2026-11-21", "さくら電機の大阪工場で19日夜、火災が起きた。けが人はいなかった。同社は20日、来月にも生産を再開する見通しだと明らかにした。"),
+        ("2026-11-22", "東西大学の研究チームは、新しい電池を開発したと21日に発表した。チームは2030年までに実用化を目指す。ただ、量産の方法はまだ決まっていない。"),
+        ("2026-11-23", "北川選手は22日、東京で行われたマラソン大会で優勝した。北川選手は昨年の大会では途中で棄権していた。来年はアメリカで練習するかもしれない。"),
+        ("2026-11-24", "会社員の男が23日、詐欺の疑いで県警に逮捕された。男は先月、高齢の女性から現金200万円をだまし取った疑いがある。その翌日には別の女性にも電話をかけていたという。")]
+
+# 正解: (述語を見つける正規表現, 誰が, 何を, どこで, いつ, 事実性)。「|」は別解、「-」は書かれていない、「*」は採点しない
+# いつ: 記事の日付から計算して YYYY / YYYY-MM / YYYY-MM-DD にする。事実性: 事実 / 否定 / 未確定（予定・推量・目標）
+GOLD = [[("開[きくいけ]", "山本市長", "記者会見", "市役所", "2026-11-19", "事実"),
+         ("開館", "図書館", "-", "-", "2028", "未確定"),
+         ("発表", "山本市長", "*", "市役所|-", "2026-11-19", "事実"),     # 「何を」は「〜と」の引用（内容）なので採点しない
+         ("購入", "市|みなと市", "土地|駅前の土地", "駅前|-", "2025", "事実")],
+        [("起き", "火災", "-", "大阪工場|工場", "2026-11-19", "事実"),
+         ("い[なる]", "けが人", "-", "大阪工場|工場|-", "2026-11-19|-", "否定"),
+         ("再開", "さくら電機|同社", "生産", "大阪工場|工場|-", "2026-12", "未確定"),
+         ("明らか", "さくら電機|同社", "*", "-", "2026-11-20", "事実")],
+        [("開発", "研究チーム|チーム", "電池|新しい電池", "-", "-", "事実"),
+         ("発表", "研究チーム|チーム", "*", "-", "2026-11-21", "事実"),
+         ("目指", "研究チーム|チーム", "実用化", "-", "2030", "未確定"),
+         ("決ま", "方法|量産の方法", "-", "-", "-", "否定")],
+        [("行わ", "マラソン大会|大会", "-", "東京", "2026-11-22", "事実"),
+         ("優勝", "北川選手", "-", "マラソン大会|東京", "2026-11-22", "事実"),
+         ("棄権", "北川選手", "-", "大会|昨年の大会|-", "2025", "事実"),
+         ("練習", "北川選手", "-", "アメリカ", "2027", "未確定")],
+        [("逮捕", "県警", "男|会社員の男", "-", "2026-11-23", "事実"),             # 受け身: 逮捕したのは県警、されたのは男
+         ("だまし取", "男|会社員の男", "現金|現金200万円", "-", "2026-10", "未確定"),  # 「疑いがある」なので確定していない
+         ("かけ", "男|会社員の男", "電話", "-", "2026-10|-", "未確定")]]           # 「その翌日」は日付にできない。「という」は伝聞
+SLOTS = ["who", "what", "where", "when", "fact"]
+
+def match(gold, value, slot):
+    """正解の別解のどれかに合えば True。時は完全一致、それ以外は 2 文字以上なら部分一致も認める（「市長」と「山本市長」）"""
+    if gold == "*":
+        return None
+    v = "" if value is None else re.sub(r"\s", "", str(value))
+    v = "" if v in ("null", "None", "なし", "不明") else v
+    for g in gold.split("|"):
+        if g == "-":
+            if not v:
+                return True
+        elif v == g or (slot != "when" and len(v) >= 2 and (v in g or g in v)):
+            return True
+    return False
+
+def evaluate(pred_docs):
+    """pred_docs: 記事ごとの出来事のリスト。出来事は {"pred", "who", "what", "where", "when", "fact"} の辞書。
+    正解の出来事ごとに、述語が合う予測を 1 つ探して対応づけ、項ごとに採点する（見つからなければその項はすべて誤り）"""
+    found, hits, n = 0, {s: 0 for s in SLOTS}, {s: 0 for s in SLOTS}
+    for gold, preds in zip(GOLD, pred_docs):
+        used = set()
+        for pat, *values in gold:
+            j = next((j for j, p in enumerate(preds) if j not in used and re.search(pat, p["pred"] or "")), None)
+            if j is not None:
+                used.add(j); found += 1
+            for slot, g in zip(SLOTS, values):
+                ok = match(g, preds[j][slot] if j is not None else None, slot) if g != "*" else None
+                if ok is not None:
+                    n[slot] += 1; hits[slot] += bool(ok and j is not None)
+    n_gold, n_pred = sum(map(len, GOLD)), sum(map(len, pred_docs))
+    return {"出来事の再現率": f"{found}/{n_gold}", "出来事の適合率": f"{found}/{n_pred}",
+            **{f"{s} の一致率": round(hits[s] / n[s], 2) for s in SLOTS}}
+
+print(sum(map(len, GOLD)), "個の出来事。例:", GOLD[1][2])
+```
+
+```python
+# 方法 1: 部品を組み合わせる。KWJA の述語項構造（ガ格 = 誰が、ヲ格 = 何を、デ格 = どこで、時間格 = いつ）と、
+# 用言の素性（否定表現・時制・モダリティ）で事実性を決め、ja-timex で時間表現を記事の日付から正規化する
+import pathlib, subprocess
+import pendulum
+from ja_timex import TimexParser
+from rhoknp import Document
+
+for i, (_, text) in enumerate(DOCS):
+    pathlib.Path(f"doc{i}.txt").write_text(text + "\n")
+args = [a for i in range(len(DOCS)) for a in ("--filename", f"doc{i}.txt")]   # 1 回の起動でまとめて解析する（モデルの読み込みは 1 回）
+out = subprocess.run(["kwja", *args, "--tasks", "char,word", "--model-size", "base"], capture_output=True, text=True, check=True).stdout
+sents = {}                                        # S-ID の末尾は「記事の番号-文の番号」
+for block in re.findall(r"# S-ID:.*?\nEOS\n", out + "\n", flags=re.S):
+    doc_no = int(block.split()[1].split("-")[-2])
+    sents.setdefault(doc_no, []).append(block)
+kdocs = [Document.from_knp("".join(sents[i])) for i in range(len(DOCS))]
+
+def content(bp):
+    """項の基本句を含む文節から、助詞や記号を除いた部分（「山本市長は」→「山本市長」）。文章の外を指す項 (不特定:物 など) は空"""
+    return "".join(m.text for m in bp.phrase.morphemes if m.pos not in ("助詞", "特殊", "判定詞"))
+
+def normalize_time(t, ref):
+    """ja-timex の値を、記事の日付 ref を基準に YYYY / YYYY-MM / YYYY-MM-DD にする"""
+    if t.type == "DATE":
+        y, m, d = (t.value[:10].split("-") + ["XX", "XX"])[:3]
+        y = str(ref.year) if y == "XXXX" else y
+        if d != "XX":
+            return f"{y}-{f'{ref.month:02d}' if m == 'XX' else m}-{d}"
+        return f"{y}-{m}" if m != "XX" else (y if t.value[:4] != "XXXX" else None)
+    if t.type == "DURATION" and t.mod in ("BEFORE", "AFTER", "NOW"):        # 「昨年」= 1 年前、「来月」= 1 か月後
+        n, unit = int(t.value[1:-1] or 0), t.value[-1]
+        n = -n if t.mod == "BEFORE" else (0 if t.mod == "NOW" else n)
+        if unit == "Y":
+            return str(ref.add(years=n).year)
+        if unit == "M":
+            return ref.add(months=n).format("YYYY-MM")
+        if unit == "D":
+            return ref.add(days=n).format("YYYY-MM-DD")
+    return None
+
+def first_time(text, ref):
+    times = [normalize_time(t, ref) for t in TimexParser(reference=ref).parse(text)]
+    return next((x for x in times if x), None)
+
+def last_time(text, ref):
+    times = [normalize_time(t, ref) for t in TimexParser(reference=ref).parse(text)]
+    return next((x for x in reversed(times) if x), None)
+
+def factuality(bp):
+    if "否定表現" in bp.features:
+        return "否定"
+    if bp.features.get("時制") == "非過去" or any(k.startswith("モダリティ-") for k in bp.features):
+        return "未確定"                      # 「開館する予定だ」「再開する見通し」「練習するかもしれない」
+    return "事実"
+
+def pipeline(doc, date):
+    ref = pendulum.parse(date, tz="Asia/Tokyo")
+    events = []
+    for sent in doc.sentences:
+        for k, bp in enumerate(sent.base_phrases):
+            # 動詞の述語で、節の主辞になっているものを出来事とする（「新しい」のような形容詞や「予定だ」は除く）
+            if bp.features.get("用言") != "動" or "節-主辞" not in bp.features or not bp.pas:
+                continue
+            arg = {case: a[0] for case, a in bp.pas.get_all_arguments(relax=False).items() if a}
+            text_of = lambda case: content(arg[case].base_phrase) if case in arg and hasattr(arg[case], "base_phrase") else None
+            where = text_of("デ")
+            if where is None and "ニ" in arg and hasattr(arg["ニ"], "base_phrase"):     # ニ格は地名のときだけ場所とみなす
+                ne = [n for n in sent.named_entities if n.category.value == "LOCATION" and arg["ニ"].base_phrase.head in n.morphemes]
+                where = text_of("ニ") if ne else None
+            # いつ: 時間格の文節を正規化する。時間格がなければ、同じ文で述語より前にある最後の時間表現を使う
+            when = first_time(arg["時間"].base_phrase.phrase.text, ref) if "時間" in arg and hasattr(arg["時間"], "base_phrase") else None
+            if when is None:
+                when = last_time("".join(b.text for b in sent.base_phrases[:k]), ref)
+            events.append({"pred": bp.text.rstrip("。、"), "who": text_of("ガ"), "what": text_of("ヲ"), "where": where,
+                           "when": when, "fact": factuality(bp)})
+    return events
+
+pipe_events = [pipeline(doc, date) for doc, (date, _) in zip(kdocs, DOCS)]
+for i, events in enumerate(pipe_events):
+    for e in events:
+        print(i, e)
+print(evaluate(pipe_events))
+```
+
+```python
+# 方法 2: 小さなオープン LLM に JSON で抜き出させる（Qwen3-4B-Instruct-2507、Apache 2.0）
+import json, torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.utils import logging
+logging.disable_progress_bar()   # 重みの読み込みの進み具合のバーを出さない
+
+name = "Qwen/Qwen3-4B-Instruct-2507"
+tok = AutoTokenizer.from_pretrained(name)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+INSTRUCTION = """次のニュース記事から出来事を抜き出し、JSON だけを出力してください。
+- 出来事は動詞 1 つにつき 1 つとし、記事に出てくる順に並べる。
+- 各出来事は {"predicate": 動詞（記事の表記のまま）, "who": 動作や変化の主体, "what": 動作の対象（「〜を」に当たるもの）, "where": 場所, "when": 時, "factuality": 事実性}。
+- when は記事の日付を基準に YYYY、YYYY-MM、YYYY-MM-DD のどれかに直す。
+- factuality は「事実」「否定」「未確定」（予定・推量・目標など、まだ起きていないこと）のどれか。
+- 書かれていない項目は null。主語が省略されていれば、文脈から補う。
+出力の形: {"events": [...]}"""
+# 形式を示す例を 1 つ付ける（評価の記事とは別に作ったもの）
+EXAMPLE = ("記事の日付: 2026-10-05\n記事: 青空鉄道は4日、新しい駅を来年3月に開業すると発表した。工事は先月始まった。",
+           {"events": [{"predicate": "開業する", "who": "青空鉄道", "what": "駅", "where": None, "when": "2027-03", "factuality": "未確定"},
+                       {"predicate": "発表した", "who": "青空鉄道", "what": None, "where": None, "when": "2026-10-04", "factuality": "事実"},
+                       {"predicate": "始まった", "who": "工事", "what": None, "where": None, "when": "2026-09", "factuality": "事実"}]})
+
+@torch.no_grad()
+def llm_extract(date, text):
+    messages = [{"role": "user", "content": f"{INSTRUCTION}\n\n{EXAMPLE[0]}"},
+                {"role": "assistant", "content": json.dumps(EXAMPLE[1], ensure_ascii=False)},
+                {"role": "user", "content": f"{INSTRUCTION}\n\n記事の日付: {date}\n記事: {text}"}]
+    ids = tok.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    out = llm.generate(**ids, max_new_tokens=600, do_sample=False)
+    raw = tok.decode(out[0, ids["input_ids"].shape[1]:], skip_special_tokens=True)
+    try:
+        events = json.JSONDecoder().raw_decode(raw[raw.find("{"):])[0]["events"]
+    except (ValueError, KeyError):
+        print("JSON として読めない:", raw[:200]); return []
+    fact = lambda f: "否定" if "否定" in str(f) else ("事実" if "事実" in str(f) else "未確定")
+    return [{"pred": e.get("predicate"), "who": e.get("who"), "what": e.get("what"), "where": e.get("where"),
+             "when": e.get("when"), "fact": fact(e.get("factuality"))} for e in events]
+
+llm_events = [llm_extract(date, text) for date, text in DOCS]
+for i, events in enumerate(llm_events):
+    for e in events:
+        print(i, e)
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+pd.DataFrame({"部品の組み合わせ": evaluate(pipe_events), "LLM (JSON)": evaluate(llm_events)}).T
+```
+
+```python
+# 時間順に並べる。いつが分かった出来事だけを日付の文字列で並べる（粒度が違うと、「2026-11」は「2026-11-19」より前に来る）
+def timeline(pred_docs):
+    rows = [(e["when"], i, e["pred"], e["who"], e["fact"]) for i, events in enumerate(pred_docs) for e in events if e["when"]]
+    return [f"{w:10} [{i}] {who or '（不明）'}が {p}（{f}）" for w, i, p, who, f in sorted(rows, key=lambda r: str(r[0]))]
+
+for title, events in [("部品の組み合わせ", pipe_events), ("LLM", llm_events)]:
+    print(f"--- {title}"); print("\n".join(timeline(events)))
+```
+
+- イベント抽出は、出来事を表す語（述語）と、その参加者・時・場所を組にして取り出す課題である。この章の「文から関係の三つ組を抽出する (REBEL)」が 2 つのエンティティの間の関係を取るのに対し、ここでは述語を中心に、誰が・何を・どこで・いつを 1 つの組にする。方法 1 は、この章の「日本語の述語項構造解析をする (KWJA)」の格（ガ格・ヲ格・デ格・時間格）を項に当て、「日本語の時間表現を抽出して正規化する (ja-timex)」で時を日付に直し、事実性は KWJA が用言に付ける素性（否定表現・時制・モダリティ）から決めている。「否定・モダリティ・時制を取り出す」の規則を、述語から節の終わりまでの文字列にかけてもよい。
+- 手作りの 19 個の出来事では、部品の組み合わせは出来事を 19 個すべて見つけ（余分が 1 個）、項の一致率は 0.89〜0.95 だった。LLM (Qwen3-4B-Instruct-2507) は 14 個しか見つけず、項の一致率は 0.53〜0.74 だった。ただし、記事も正解も筆者が作った 19 個だけで、「誰が = ガ格」「どこで = デ格」という決め方も KWJA の出力に近い。整った短いニュース文は解析器に有利でもある。一般的な優劣の結論ではなく、どこで間違えるかを見るための比較である。
+- LLM は出来事を 5 個落とした。「〜と発表した」「〜と明らかにした」の 3 か所では、引用の中と外の述語のどちらか一方しか出さず、ほかに「いなかった」「行われた」も落とした。また、日付を細かくしすぎた（「昨年の大会」を 2025-11-22、「先月」を 2026-10-23）。「開発した」に発表の日付を付けた。「その翌日」を 2026-11-24 にしたのは根拠がない。事実性も、「疑いがある」「〜という」を事実とし、「決まっていない」を未確定とした。
+- 部品の組み合わせの誤りは、どれも部品の限界によるものである。受け身の「男が県警に逮捕された」では、KWJA の格は表層の格なので、ガ格の「男」が「誰が」になる（逮捕したのは県警）。受け身・使役では格を入れ替える必要がある。「その翌日」は ja-timex が記事の日付の翌日と解釈し、2026-11-25（記事より後）になって、時系列でも逮捕の後に並んでしまった。前の出来事を基準にする時間表現は、その出来事の日付から計算しなければならない。「だまし取った疑いがある」は、述語自身の素性だけを見るので事実になり、「ある」が余分な出来事として拾われた。デ格は手段や原因も表すので、「途中」「疑い」が場所になった。
+- 時系列は、日付の文字列で並べただけである。粒度の違う日付（「2026-10」と「2026-10-23」）の前後や、日付のない出来事の前後（「開発した」は「発表した」より前）は決められない。出来事の間の前後関係を直接推定する課題は時間関係の認識と呼ばれ、英語の TimeBank や TempEval、日本語の BCCWJ-TimeBank などのデータがある。
+- 実用では、両方を組み合わせるとよい。解析器で述語と格を漏れなく取り出し、受け身の扱いや、時の基準の解決、事実性の判定のような文脈が必要なところを LLM に確かめさせる。LLM の出力は、大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」のように、形式と値（日付の書式、事実性のラベル）を検証してから使う。
+- 検証の GPU では、KWJA のセルが 1 分弱、LLM のセルがモデルの読み込みを含めて 1 分余り（初回のモデルのダウンロードは別）で、LLM の GPU メモリの最大は 8.2 GB だった。`kwja` を入れると transformers などのバージョンが入れ替わるので、すでに transformers を読み込んでいたらランタイムを再起動する。
+- 記事は架空のもの。KWJA と ja-timex は MIT ライセンス、Qwen3-4B-Instruct-2507 は Apache 2.0。
+
+## 文ペアを分類する BERT を学習し、仮説文だけでどこまで当たるかを調べる（含意関係認識、JNLI） {nli_hypothesis_only gpu}
+
+前提文と仮説文の組を「含意・矛盾・中立」に分類する BERT を、日本語の JNLI でファインチューニングしたい。あわせて、前提文を見せずに仮説文だけで学習したモデル（hypothesis-only）がどこまで当たるかを調べ、データの作り方に由来する偏りを確かめる。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import pandas as pd
+
+# JGLUE の JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）。画像キャプション (YJ Captions) の文を前提文にして、仮説文をクラウドソーシングで書いたもの
+gh = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jnli-v1.3/"
+data = {s: pd.read_json(gh + f"{s}-v1.3.json", lines=True) for s in ["train", "valid", "test"]}
+LABELS = ["entailment", "contradiction", "neutral"]
+for s, d in data.items():
+    print(f"{s:5} {len(d):6} 組  ラベルの割合:", d["label"].value_counts(normalize=True).round(3).to_dict())
+pd.set_option("display.width", 200)
+print(data["train"][["sentence1", "sentence2", "label"]].head(4).to_string(index=False))
+```
+
+```python
+import numpy as np
+import torch
+from datasets import Dataset
+from sklearn.metrics import accuracy_score, f1_score
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
+                          PrinterCallback, Trainer, TrainingArguments, set_seed)
+from transformers.utils import logging
+
+import datasets
+logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
+logging.disable_progress_bar(); datasets.disable_progress_bars()   # 重みの読み込みと map の進み具合のバーを出さない
+datasets.logging.set_verbosity_error()   # map に渡す関数をキャッシュ用にハッシュできないという警告を出さない
+model_name = "tohoku-nlp/bert-base-japanese-v3"   # Apache 2.0
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+
+# 2 文を渡すと [CLS] 前提文 [SEP] 仮説文 [SEP] の 1 列になり、token_type_ids で 1 文目 (0) と 2 文目 (1) を区別する。
+# transformers 5 系のこのトークナイザー (BertJapaneseTokenizer) は、既定では token_type_ids を返さない（全部 0 とみなされる）ので、明示して返させる
+enc = tokenizer("男性がギターを弾いている。", "人が楽器を演奏している。", return_token_type_ids=True)
+print(tokenizer.convert_ids_to_tokens(enc["input_ids"]))
+print(enc["token_type_ids"])
+
+def encode(df, inputs):
+    """inputs: "pair" は前提文と仮説文の組、"hypothesis" は仮説文だけ、"premise" は前提文だけ"""
+    ds = Dataset.from_dict({"p": list(df["sentence1"]), "h": list(df["sentence2"]), "label": [LABELS.index(l) for l in df["label"]]})
+    def tok(b):
+        if inputs == "pair":
+            return tokenizer(b["p"], b["h"], truncation=True, max_length=128, return_token_type_ids=True)
+        return tokenizer(b["h"] if inputs == "hypothesis" else b["p"], truncation=True, max_length=64)
+    return ds.map(tok, batched=True, remove_columns=["p", "h"])
+
+def train(inputs, epochs=2):
+    set_seed(0)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name, num_labels=3, id2label=dict(enumerate(LABELS)), label2id={l: i for i, l in enumerate(LABELS)})
+    args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=3e-5, weight_decay=0.01, warmup_steps=0.1,
+                             per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
+                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
+    trainer = Trainer(model=model, args=args, train_dataset=encode(data["train"], inputs), data_collator=DataCollatorWithPadding(tokenizer))
+    trainer.remove_callback(PrinterCallback)   # 学習の終わりに train_runtime などの辞書を print しない
+    trainer.train()
+    return trainer
+```
+
+```python
+import time
+
+gold = np.array([LABELS.index(l) for l in data["test"]["label"]])
+print("多数派（中立）を答え続けたとき: 正解率", round(float((gold == 2).mean()), 3))
+preds, trainers = {}, {}
+for inputs, title in [("pair", "前提文 + 仮説文"), ("hypothesis", "仮説文だけ"), ("premise", "前提文だけ")]:
+    t = time.time()
+    trainers[inputs] = train(inputs)
+    preds[inputs] = trainers[inputs].predict(encode(data["test"], inputs)).predictions.argmax(-1)
+    print(f"{title:10} 正解率 {accuracy_score(gold, preds[inputs]):.3f}  macro-F1 {f1_score(gold, preds[inputs], average='macro'):.3f}"
+          f"  （学習と予測に {time.time() - t:.0f} 秒）")
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 仮説文だけで当たる例（易しい例）と当たらない例（難しい例）に評価データを分けて、組で学習したモデルの正解率を比べる
+easy = preds["hypothesis"] == gold
+for name, mask in [("仮説文だけで当たる", easy), ("仮説文だけでは外れる", ~easy)]:
+    print(f"{name}: {mask.sum():4} 組  組で学習したモデルの正解率 {(preds['pair'][mask] == gold[mask]).mean():.3f}")
+print(pd.crosstab(pd.Series([LABELS[g] for g in gold], name="正解"),
+                  pd.Series([LABELS[p] for p in preds["hypothesis"]], name="仮説文だけのモデルの予測")).to_string())
+```
+
+```python
+# 偏りの正体を探す: 仮説文に出てくる語のうち、特定のラベルに偏るもの（学習データで 50 回以上出る語）
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+train_df = data["train"]
+words = [set((w.feature.lemma or w.surface).split("-")[0] for w in tagger(h)) for h in train_df["sentence2"]]   # 「サーフィン-surfing」→「サーフィン」
+prior = train_df["label"].value_counts(normalize=True)
+count, by_label = Counter(), {l: Counter() for l in LABELS}
+for ws, label in zip(words, train_df["label"]):
+    count.update(ws); by_label[label].update(ws)
+rows = [(w, l, by_label[l][w] / count[w], count[w]) for w in count if count[w] >= 50 for l in LABELS]
+table = pd.DataFrame(rows, columns=["語", "ラベル", "割合", "出現数"])
+table["全体の割合との比"] = table["割合"] / table["ラベル"].map(prior)
+for l in LABELS:
+    top = table[table["ラベル"] == l].nlargest(6, "全体の割合との比")
+    print(f"{l:13} (全体 {prior[l]:.2f}):", ", ".join(f"{r.語}({r.割合:.2f}, {r.出現数})" for r in top.itertuples()))
+
+# 前提文と仮説文の文字の重なり（仮説文の文字のうち、前提文にも出てくるものの割合）。ラベルごとの平均
+overlap = [len(set(h) & set(p)) / len(set(h)) for p, h in zip(train_df["sentence1"], train_df["sentence2"])]
+print("文字の重なり:", pd.Series(overlap).groupby(train_df["label"]).mean().round(3).to_dict())
+
+# 文体: JNLI の文はほとんどが です・ます調。そうでない仮説文のラベルの割合
+polite = train_df["sentence2"].str.contains("(?:ます|です)。$")
+print(f"仮説文が です・ます調でない組: {(~polite).sum()} 組 ({(~polite).mean():.2f})  ラベルの割合:",
+      train_df["label"][~polite].value_counts(normalize=True).round(2).to_dict())
+```
+
+```python
+# 同じ仮説文に別の前提文を付けて、2 つのモデルの予測を比べる。仮説文だけのモデルは前提文を見ないので、予測は変わらない
+def predict(trainer, inputs, pairs):
+    df = pd.DataFrame(pairs, columns=["sentence1", "sentence2"]).assign(label="neutral")
+    return [LABELS[i] for i in trainer.predict(encode(df, inputs)).predictions.argmax(-1)]
+
+# JNLI に合わせて です・ます調で書く。最後の 2 組は、同じ内容を常体（〜ている）にしたもの
+pairs = [("男性が公園でギターを弾いています。", "男性が楽器を演奏しています。"),
+         ("男性が部屋で本を読んでいます。", "男性が楽器を演奏しています。"),
+         ("犬が芝生の上を走っています。", "犬は寝ていません。"),
+         ("犬が芝生の上で寝ています。", "犬は寝ていません。"),
+         ("女性がキッチンで料理をしています。", "女性が家族のために夕食を作っています。"),
+         ("女性が夕食を作り、家族が待っています。", "女性が家族のために夕食を作っています。"),
+         ("男性が公園でギターを弾いている。", "男性が楽器を演奏している。"),
+         ("女性が夕食を作り、家族が待っている。", "女性が家族のために夕食を作っている。")]
+for (p, h), a, b in zip(pairs, predict(trainers["pair"], "pair", pairs), predict(trainers["hypothesis"], "hypothesis", pairs)):
+    print(f"組: {a:13} 仮説文だけ: {b:13} {p} → {h}")
+```
+
+- 含意関係認識（自然言語推論、NLI）は、2 つの文の組を 3 クラスに分ける文ペアの分類である。トークナイザーに 2 文を渡せば `[CLS] 前提文 [SEP] 仮説文 [SEP]` の 1 列になり、あとはテキスト分類の章の「BERT をファインチューニングして文書分類する (Trainer)」（記事の題名と本文の組を分類する）と同じ流れで学習できる。学習済みの NLI モデルで推論するだけなら、Transformers の章の「2 つの文の含意関係を判定する (NLI)」を使う。ここでは自分で学習し、入力を変えたモデルと比べることで、データの性質を調べている。
+- `tohoku-nlp/bert-base-japanese-v3` のトークナイザー (BertJapaneseTokenizer) は、transformers 5 系では既定で `token_type_ids` を返さない（`model_input_names` に入っていない）。そのまま学習すると、前提文と仮説文の区別が [SEP] だけになる。`return_token_type_ids=True` を付けて返させる。
+- 結果は、組で学習したモデルが正解率 0.881（macro-F1 0.842）、仮説文だけが 0.576（0.454）、前提文だけが 0.572（0.396）で、多数派の中立を答え続けると 0.544 だった。仮説文だけで多数派を上回り、macro-F1 では差がはっきりする。ただし英語の SNLI で報告されている差（多数派 0.34 に対して仮説文だけで 0.67 前後、Gururangan ら 2018、Poliak ら 2018）よりずっと小さく、JNLI の仮説文の偏りは比較的弱い。前提文だけでも同じくらい当たるのは、JNLI では同じ 2 文が前後を入れ替えて別の組としても入っており（データの先頭の 4 組を参照）、前提文と仮説文の役割がはっきり分かれていないためと考えられる。
+- 仮説文だけのモデルが当てた評価データ 1444 組では、組で学習したモデルの正解率は 0.939、外した 1064 組では 0.802 だった。仮説文だけで解ける組は易しい組で、評価データ全体の正解率にはその分の「下駄」が含まれる。Gururangan ら (2018) は、この方法で評価データを易しい組と難しい組に分け、難しい組で報告することを提案している。
+- 偏りの手がかりとしては、否定（「ず」「ない」「無い」）や「だけ」を含む仮説文が矛盾に、「複数」や色・位置の語を含む仮説文が中立に偏る。クラウドソーシングで「矛盾する文を書いて」と頼むと否定を使いやすい、といった書き方の癖がそのまま手がかりになる。文字の重なりも、中立だけが低い（0.57、含意と矛盾は 0.78）。前提文にない情報を足すと中立になるからである。
+- 文体の偏りもある。JNLI の文のほとんどは です・ます調だが、そうでない仮説文（学習データの 8%）は 54% が矛盾である。最後のセルでも、同じ内容を常体（〜ている）にした組は、組で学習したモデルでも矛盾と判定された。自分の入力を分類するときは、学習データの文体に合わせるか、学習データに文体の違う例を入れる。
+- 学習時間は、検証の GPU で 3 つのモデルを合わせて約 4 分（学習データ 20,073 組、2 エポック、系列長は組が 128、1 文が 64）、GPU メモリの最大は 5.1 GB だった。T4 ではその 2〜3 倍の見込み。ここでは学習率やエポック数を調整しておらず、評価データで 1 回だけ測っている。調整するなら valid を使う。同じ設定でも実行のたびに正解率が 0.005 程度ぶれる。
+- JNLI の入手: 公式の配布は GitHub の yahoojapan/JGLUE で、v1.3 には train・valid・test がそろっている（JGLUE の論文の時点では test は非公開だった）。HF の `shunk031/JGLUE` は読み込みスクリプト (JGLUE.py) の形式で、`trust_remote_code=True` が必要だった。datasets 4 系は読み込みスクリプトを実行しないので、そのままでは読めない。ここでは公式の JSON Lines を直接読んでいる。
+- データは JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）、モデルは `tohoku-nlp/bert-base-japanese-v3` (Apache 2.0)。JNLI の別の使い方（英語のデータから日本語への言語間転移）は、テキスト分類の章の「英語のデータだけで学習して日本語を分類する（ゼロショットの言語間転移）」にある。

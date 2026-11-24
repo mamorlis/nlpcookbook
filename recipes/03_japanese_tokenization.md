@@ -1,6 +1,6 @@
 # 日本語の形態素解析と文分割
 
-MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd やユーザー辞書の追加、解析器の比べ方、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
+MeCab (fugashi)・Sudachi・Janome・Juman++・KyTea で単語に区切り、品詞や原形、読みを取り出す。NEologd や MeCab・Sudachi・Janome へのユーザー辞書の追加、解析器の比べ方、FLR や C-value による専門用語の候補の抽出、KyTea のモデルの学習による分野への適応、pyopenjtalk による発音・モーラ数・アクセント、文への分割と句読点の復元も扱う。単語分割や品詞タグ付けの仕組み（系列ラベリング、HMM、ビタビアルゴリズム）を自分で実装するレシピは、付録の「仕組みを理解するための実装」にある。日本語の形態素解析や辞書の構築・運用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章・第 5 章も参照。
 
 ## MeCab (fugashi + UniDic) で形態素解析する {mecab_fugashi}
 
@@ -267,7 +267,7 @@ text = "深層学習に基づく自然言語処理では、大規模言語モデ
 print(Counter(compound_nouns(text)).most_common())
 ```
 
-- 専門用語抽出の最も単純なベースライン。頻度や連接の多様性でスコア付けすると用語抽出らしくなる。
+- 専門用語抽出の最も単純なベースライン。頻度や連接の多様性でスコア付けすると用語抽出らしくなる（この章の「専門用語の候補を FLR と C-value でスコア付けして抽出する」）。
 
 ## 日本語のストップワードを除去する {stopwords_ja}
 
@@ -1353,6 +1353,7 @@ df
 - 読み分けは自作の 17 例で、正解は MeCab + UniDic が 10、KyTea と pyopenjtalk が 11 だった。例が少ないので、優劣ではなく誤り方の違いとして見る。「市場（イチバ）」「生物（ナマモノ）」「人気（ヒトケ）」は 3 つとも誤り、「舞台の上手（カミテ）」は UniDic だけ、「一枚上手（ウワテ）」「大人気ない」は pyopenjtalk だけ、「今日では（コンニチ）」「辛いカレー（カライ）」は KyTea だけが当てた。読みの候補とスコアを見たいときは、KyTea の `getAllTags` を使う（「KyTea で単語分割と読みの推定をする」を参照）。
 - 決まった語の読みやアクセントを直したいときは、pyopenjtalk のユーザー辞書（`mecab_dict_index` で CSV から作り、`update_global_jtalk_with_user_dict` で読み込む）を使う。文脈で読みが変わる語は、辞書の登録では直らない。
 - pyopenjtalk は PyPI に wheel がなく、インストール時に C++ のコードをビルドする（検証では 2 コアでインストールのセル全体が約 3 分）。派生版の pyopenjtalk-plus は、ビルド済みの wheel と独自に修正した辞書を同梱し、同じ `import pyopenjtalk` で使えると README にある（MIT ライセンス）。両方を同じ環境に入れると衝突するので、どちらか一方を入れる。
+- pyopenjtalk の `tts` で音声合成まで行い、LLM の答えを読み上げる例は、対話システムの章の「音声で話せる対話システムを作る（音声認識・LLM・音声合成）」を参照。
 
 ## 古文を形態素解析する（中古和文 UniDic） {classical_japanese}
 
@@ -1746,3 +1747,229 @@ for k in (1, 2):
 - LLM（sarashina2.2-3b-instruct、1-shot）は、同じ 100 件で読点 F1 0.663、句点 F1 0.808 と BERT（0.791、0.957）より低く、F1 の差のブートストラップ 95% 信頼区間（100 件のもとの 27 記事を単位に復元抽出。読点 [0.093, 0.167]、句点 [0.109, 0.189]）も 0 を含まなかった。句読点以外の文字を変えなかった出力は 100 件中 1 件だけで、文の途中で切れた断片の続きを書き足したり、記号を足したりした。そのため出力を difflib で元の文字列に対応づけてから評価している。より大きな LLM や API のモデルでの結果は確かめていない。
 - GPU メモリの最大使用量は、BERT の学習と 3B の LLM の推論を合わせて 9.0 GB で、T4 (16GB) に収まる。
 - データとモデルの出典とライセンス: 日本語 Wikipedia（wikimedia/wikipedia、CC BY-SA 3.0 / GFDL）、tohoku-nlp/bert-base-japanese-char-v3（東北大学、Apache 2.0）、sbintuitions/sarashina2.2-3b-instruct-v0.1（SB Intuitions、MIT）。sarashina のトークナイザーを直すコードについては、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
+
+## MeCab (fugashi + UniDic) にユーザー辞書を追加する {mecab_userdic}
+
+UniDic で細かく切れてしまう専門用語や固有名詞を、MeCab のユーザー辞書に登録して 1 語にしたい。CSV に表層形・左右文脈 ID・生起コスト・品詞・読みを書き、`mecab-dict-index` に当たるコンパイラで `user.dic` にして `Tagger('-u user.dic')` で読み込む。fugashi の wheel にはコンパイラが同梱されているので、apt で MeCab を入れなくてよい。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+from fugashi import Tagger
+
+tagger = Tagger()
+# 各語の左文脈 ID (%phl)・右文脈 ID (%phr)・生起コスト (%pw) と品詞を出す出力形式
+info = Tagger(r'-O "" -F "%m\t%phl\t%phr\t%pw\t%f[0],%f[1],%f[2]\n" -U "%m\t%phl\t%phr\t%pw\t未知語\n"')
+
+sents = ["大規模言語モデルで検索拡張生成を試す。", "外国人参政権について話し合った。",
+         "形態素解析にフガシを使う。", "都立大に行く。"]
+for s in sents:
+    print(" | ".join(w.surface for w in tagger(s)))
+print()
+print(info.parse("大規模言語モデルを東大で試す"))
+```
+
+```python
+import csv, subprocess, sys
+import unidic_lite
+
+def ref_entry(surface, kana, ref, cost=None):
+    """似た既存語 ref から左右文脈 ID・生起コスト・品詞を借りて、ユーザー辞書の CSV の 1 行を作る"""
+    lid, rid, ref_cost = info.parse(ref).split("\n")[0].split("\t")[1:4]
+    f = tagger(ref)[0].feature
+    # unidic-lite の素性は 26 列（dicrc の先頭に一覧がある）。品詞・活用・語種は ref のものを使い、表記と読みを差し替える。
+    # 語彙素読み・発音・アクセントなどは簡単のため読みか * で埋める
+    feats = [f.pos1, f.pos2, f.pos3, f.pos4, f.cType, f.cForm,
+             kana, surface, surface, kana, surface, kana, f.goshu, "*", "*", "*", "*",
+             kana, kana, kana, kana, "*", "*", "*", "*", "*"]
+    return [surface, lid, rid, str(ref_cost if cost is None else cost)] + feats
+
+def build_userdic(rows, name):
+    """CSV を書き、fugashi 同梱のコンパイラ（mecab-dict-index と同じもの）で name.dic にする"""
+    with open(f"{name}.csv", "w", newline="", encoding="utf-8") as fp:
+        csv.writer(fp).writerows(rows)
+    # build_dictionary は失敗するとプロセスごと終了するので、カーネルを巻き込まないよう別プロセスで呼ぶ
+    code = "import sys, fugashi; fugashi.build_dictionary('mecab-dict-index ' + ' '.join(sys.argv[1:]))"
+    r = subprocess.run([sys.executable, "-c", code, "-d", unidic_lite.DICDIR, "-u", f"{name}.dic",
+                        "-f", "utf-8", "-t", "utf-8", f"{name}.csv"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return Tagger(f"-u {name}.dic")
+
+entries = [  # (表層形, 読み, 品詞・ID・コストを借りる既存語)
+    ("大規模言語モデル", "ダイキボゲンゴモデル", "言語"),
+    ("検索拡張生成", "ケンサクカクチョウセイセイ", "生成"),
+    ("参政権", "サンセイケン", "政権"),
+    ("フガシ", "フガシ", "グーグル"),
+    ("都立大", "トリツダイ", "東大"),
+]
+rows = [ref_entry(*e) for e in entries]
+for row in rows:
+    print(",".join(row[:10]), "...", f"({len(row)} 列)")
+user = build_userdic(rows, "user")
+print()
+for s in sents:
+    print("前:", " | ".join(w.surface for w in tagger(s)))
+    print("後:", " | ".join(w.surface for w in user(s)))
+print()
+for w in user("形態素解析にフガシを使う。"):
+    f = w.feature
+    print(w.surface, f.pos1, f.pos2, f.pos3, f.kana, w.is_unk, sep="\t")
+```
+
+```python
+# 「都立大」の生起コストだけを変えて作り直し、ほかの文の分割が崩れないかを見る（コストが小さいほど 1 語として選ばれやすい）
+checks = ["都立大に行く。", "都立大の学生", "都立大学に行く。", "東京都立大学に行く。"]
+ref_cost = int(ref_entry("都立大", "トリツダイ", "東大")[3])
+for cost in [0, ref_cost, 11000, 14000]:
+    t = build_userdic([ref_entry("都立大", "トリツダイ", "東大", cost)], f"toritsu_{cost}")
+    print(f"{cost:>6}", " / ".join(" ".join(w.surface for w in t(s)) for s in checks))
+```
+
+```python
+# 「都立大」のコストを 11000 にして辞書を作り直し、期待どおりに分割されるかを単体テスト（回帰テスト）で確かめる
+rows = [ref_entry(*e) for e in entries[:-1]] + [ref_entry("都立大", "トリツダイ", "東大", 11000)]
+user = build_userdic(rows, "user")
+cases = [
+    ("大規模言語モデルを作る", ["大規模言語モデル", "を", "作る"]),
+    ("検索拡張生成で答える", ["検索拡張生成", "で", "答える"]),
+    ("外国人参政権の議論", ["外国", "人", "参政権", "の", "議論"]),
+    ("フガシで解析する", ["フガシ", "で", "解析", "する"]),
+    ("都立大に行く", ["都立大", "に", "行く"]),
+    ("都立大学に行く", ["都立", "大学", "に", "行く"]),          # 登録した語が他の語の一部を奪わない
+    ("東京都立大学の言語モデル", ["東京", "都立", "大学", "の", "言語", "モデル"]),
+]
+for sent, expected in cases:
+    got = [w.surface for w in user(sent)]
+    assert got == expected, f"{sent}: {got}"
+print(f"単体テスト: {len(cases)}/{len(cases)} 件合格")
+```
+
+- MeCab のユーザー辞書の CSV は「表層形,左文脈 ID,右文脈 ID,生起コスト,素性…」の形で、素性の列はシステム辞書と同じ並び（unidic-lite は 26 列、IPA 辞書は 9 列）にする。左右文脈 ID は前後の語とのつながりやすさ（連接コスト）を引くための番号で、UniDic では品詞だけでなく語種でも分かれる（上の出力では、漢語の普通名詞「言語」が 5146、外来語の「モデル」が 5144、固有名詞の「東大」が 4786）。ID は辞書ごとに違うので、同じ品詞・語種の既存語から借りるのが確実で、システム辞書を変えたら取り直して作り直す。ID の列を空にすると、`mecab-dict-index` が辞書の `left-id.def`・`right-id.def`・`rewrite.def` を使って素性から自動で付ける（手元で試すと、上と同じ 4786 や 5146 が付いた）。
+- 生起コストは小さいほどその語が選ばれやすい。長い複合語は、元の分割の語のコストと連接コストの合計に勝てばよいので、似た語のコストを借りれば多くの場合 1 語になる（「大規模言語モデル」「検索拡張生成」「参政権」）。一方、短い語はほかの語の一部を奪いやすい。上の例では、「東大」から借りたコスト（8591）でも「都立大学」が「都立大 / 学」に、0 では「東京都立大学」まで「東京 / 都立大 / 学」に崩れ、14000 では「都立大」自体が 1 語にならなかった。11000 なら 4 文とも期待どおりで、このように「変わってほしい文」と「変わってほしくない文」を並べて、両方を満たすコストを探す。`mecab-dict-index` には学習済みのモデルからコストを推定する `-m`・`-a` もあるが、unidic-lite にはモデルのファイルが含まれていない。
+- 「都立大学生」のような文は「都立大 / 学生」とも「都立大学 / 生」とも読めて、辞書だけでは決まらない（手元で試すと、コスト 11000 では前者、12000 では後者になった）。語を足したら、ここの単体テストのように期待する分割を並べた文で回帰テストを続ける。
+- `fugashi.build_dictionary` は fugashi の wheel に同梱の libmecab の `mecab-dict-index` をそのまま呼ぶ関数で、コマンドの `fugashi-build-dict` からも使える（引数は `mecab-dict-index` と同じ）。エラー時には Python の例外にならずプロセスが終わるので、ノートブックでは別プロセスで呼んでいる。apt の `mecab-utils` や MeCab のソースからのビルドは要らない（検証はコンテナの中で root にならずに行った）。
+- 使い分け: 数語〜数千語を UniDic の単位と品詞体系のまま足したいならこのレシピ。表記ゆれも正規化形でまとめたいなら、この章の「Sudachi にユーザー辞書をコンパイルして追加する」（18 列の CSV と `sudachipy ubuild`、分割の単位 A/B/C も指定できる）。コンパイルせずに手早く試すなら「Janome にユーザー辞書を追加する」（表層形・品詞・読みの 3 列の簡易辞書）。ウェブ上の新語・固有名詞を大量にまとめて入れたいなら「NEologd 辞書で新語・固有名詞をまとまりとして解析する」（IPA 辞書に追加したシステム辞書。2020 年で更新が止まっている）。登録する候補は、この章の「辞書にない未知語を見つける」や「専門用語の候補を FLR と C-value でスコア付けして抽出する」で集められる。
+- unidic-lite（UniDic 2.1.2）のライセンスは BSD・LGPL・GPL のいずれか。fugashi は MIT ライセンス。
+
+## 専門用語の候補を FLR と C-value でスコア付けして抽出する {term_extraction}
+
+専門的な文書から、その分野の用語らしい語（単名詞と複合名詞）を、頻度だけでなく「どれだけ多様な語と結び付くか」や「より長い語の一部としてだけ出ていないか」も考えてスコア付けし、上位から取り出したい。名詞の連続を候補にして、中川・森の FLR と Frantzi らの C-value を自分で実装する。題材は青空文庫の中谷宇吉郎『雪』（1938 年）。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import requests
+from bs4 import BeautifulSoup
+
+# 青空文庫の中谷宇吉郎『雪』の XHTML 版（Shift_JIS）。ルビ（読み）と入力者の注記を除いて本文だけにする
+url = "https://www.aozora.gr.jp/cards/001569/files/52468_49669.html"
+soup = BeautifulSoup(requests.get(url, timeout=60).content.decode("cp932"), "html.parser")
+for tag in soup.select("rp, rt, span.notes"):
+    tag.decompose()
+text = soup.select_one("div.main_text").get_text()
+lines = [l.strip() for l in text.splitlines() if l.strip()]
+print(len(text), "文字、", len(lines), "行")
+print(next(l for l in lines if len(l) > 50)[:100])
+```
+
+```python
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+STOP = {"こと", "もの", "ところ"}   # unidic-lite では普通名詞-一般になる形式名詞
+
+def is_part(w):
+    """複合名詞を作る語か（名詞・接頭辞・接尾辞。数詞、「的」、副詞的・助数詞的な名詞は除く）"""
+    f = w.feature
+    return (f.pos1 in ("名詞", "接頭辞", "接尾辞") and f.pos2 not in ("数詞", "形状詞的")
+            and f.pos3 not in ("副詞可能", "助数詞可能") and w.surface not in STOP)
+
+def noun_seqs(line):
+    """名詞の連続を (語, 品詞) のタプルで返す。先頭の接尾辞と末尾の接頭辞は外す"""
+    seqs, buf = [], []
+    for w in list(tagger(line)) + [None]:
+        if w is not None and is_part(w):
+            buf.append((w.surface, w.feature.pos1))
+            continue
+        while buf and buf[0][1] == "接尾辞":
+            buf.pop(0)
+        while buf and buf[-1][1] == "接頭辞":
+            buf.pop()
+        if buf:
+            seqs.append(tuple(buf))
+        buf = []
+    return seqs
+
+raw = [s for l in lines for s in noun_seqs(l)]
+POS = {w: p for s in raw for w, p in s}
+seqs = [tuple(w for w, _ in s) for s in raw]      # 出現ごとの候補（語のタプル）
+freq = Counter(seqs)                               # 候補がそのままの形（より長い名詞連続の一部でなく）で出た回数
+print("候補の出現:", len(seqs), " 異なり:", len(freq), " うち複合名詞:", sum(len(s) > 1 for s in freq))
+```
+
+```python
+import math
+from collections import defaultdict
+
+# FLR（中川・森）: 単名詞 N の左右に連接する単名詞の異なり数 LN(N), RN(N) から、候補 CN = N1…NL の
+#   LR(CN) = (Π (LN(Ni)+1)(RN(Ni)+1)) ^ (1/2L)、FLR(CN) = f(CN) × LR(CN)（f は単独での出現回数）
+left, right = defaultdict(set), defaultdict(set)
+for s in freq:
+    for a, b in zip(s, s[1:]):
+        right[a].add(b)
+        left[b].add(a)
+
+def lr(s):
+    return math.prod((len(left[n]) + 1) * (len(right[n]) + 1) for n in s) ** (1 / (2 * len(s)))
+
+flr = {s: freq[s] * lr(s) for s in freq}
+for n in ["結晶", "雪", "研究"]:
+    examples = [("".join(s), f) for s, f in freq.most_common() if n in s and len(s) > 1][:4]
+    print(f"{n}: 左 {len(left[n])} 種、右 {len(right[n])} 種、LR {lr((n,)):.1f}、単独 {freq[(n,)]} 回、例 {examples}")
+
+# C-value（Frantzi ら）: 2 語以上の候補 a について
+#   C(a) = log2|a| × f(a)                          （a がより長い候補に含まれないとき）
+#   C(a) = log2|a| × (f(a) − t(a) / c(a))          （t: より長い候補の中での出現回数、c: その長い候補の種類数）
+# f(a) はより長い候補の一部としての出現も数える。長い候補から順に、単独の出現回数を部分列に配る
+def spans(s):
+    for i in range(len(s)):
+        for j in range(i + 2, len(s) + 1):
+            if (i, j) != (0, len(s)) and POS[s[i]] != "接尾辞" and POS[s[j - 1]] != "接頭辞":
+                yield s[i:j]
+
+sub = Counter()
+for s in seqs:
+    if len(s) > 1:
+        sub[s] += 1
+        sub.update(spans(s))
+t, c, cvalue = Counter(), Counter(), {}
+for a in sorted(sub, key=len, reverse=True):
+    cvalue[a] = math.log2(len(a)) * (sub[a] - (t[a] / c[a] if c[a] else 0))
+    for b in spans(a):
+        t[b] += sub[a] - t[a]
+        c[b] += 1
+print("C-value を付けた候補:", len(cvalue))
+```
+
+```python
+import pandas as pd
+
+def top(score, k=20, multi=False):
+    items = [s for s in sorted(score, key=score.get, reverse=True) if not multi or len(s) > 1]
+    return [f"{''.join(s)} ({score[s]:.0f})" for s in items[:k]]
+
+pd.DataFrame({"頻度（複合名詞）": top(freq, multi=True), "FLR": top(flr), "FLR（複合名詞）": top(flr, multi=True),
+              "C-value": top(cvalue)}, index=range(1, 21))
+```
+
+- 候補は、この章の「連続する名詞をつなげて複合名詞を抽出する」と同じく名詞の連続（UniDic の短単位をつないだもの）。そこに「こと・もの」などの形式名詞、副詞的に使う名詞（時・上・ため）、助数詞的な名詞（度・年）、数詞、「的」を加えないという条件を足した。「雪の結晶」のように助詞をはさむ用語は取れない。
+- FLR は、多くの異なる語と複合語を作る単名詞を重要な構成要素とみなし、その語を含む候補を上げる。「結晶」は左に 16 種、右に 19 種の語が付き（「側面結晶」「平板結晶」「結晶形」「結晶質」など）LR が 18.4、「研究」は左 3 種・右 9 種で 6.3 だった。『雪』では単名詞の「結晶」「雪」が飛び抜けて高く、複合名詞だけで見ると「水蒸気」「樹枝状」「角板」「雪華」「人工雪」が上位に来た。頻度に掛け算するので、頻度の高い一般語（「研究」「図」「写真」）も上位に残る。
+- C-value は、長い候補ほど重み (log2|a|) を付け、より長い候補の一部として出た回数も数えたうえで、それを含む長い候補の種類数で割った分を割り引く。決まった長い候補の中にしか出ない部分列は低くなり、いろいろな長い候補に入る語は上がる（「六角板」「小角板」「角板状」に入る「角板」は、単独の頻度 34 より高い 45 になった）。log2 1 = 0 なので単名詞にはスコアが付かず、2 語以上の候補の順位付けに向く。『雪』では長い候補が少ないので、上位は複合名詞の頻度順に近く、3 語の「顕微鏡写真」「雪華図説」は頻度より上がった。
+- どちらも正解のない教師なしの順位付けなので、上位を人が見て用語集や辞書の候補にする使い方が基本。分野の文書の頻度を一般の文書（新聞や Wikipedia など）の頻度と比べる方法（TF-IDF や対数尤度比）を組み合わせると、「研究」「写真」のような一般語を下げられる。取り出した用語を MeCab のユーザー辞書に入れるには、この章の「MeCab (fugashi + UniDic) にユーザー辞書を追加する」を参照。
+- FLR と C-value をまとめて計算する Python 版の termextract もあるが、PyPI には登録されていない（検証時に `pip install termextract` では入らなかった）。ここでは定義どおりに数十行で実装した。FLR の LR は、ここでは連接の異なり数で数えた（延べ数で数える流儀もある）。
+- 『雪』（中谷宇吉郎、1938 年）は著作権の保護期間が満了しており、青空文庫の本文は自由に使える（入力・校正は青空文庫のボランティア）。

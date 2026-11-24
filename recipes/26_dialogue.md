@@ -1,6 +1,6 @@
 # 対話システム
 
-FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向、LLM による雑談、応答の評価まで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3B の LLM で何度も生成するレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+FAQ 検索、意図の分類と問い合わせの振り分け、タスク指向（実際の対話データでの対話状態の追跡の評価を含む）、LLM による雑談、応答の評価、音声で話せる対話システムまで。チャットボットを組み立てる部品を、なるべく CPU で動く範囲で（3〜4B の LLM で何度も生成するレシピと、音声認識を使うレシピは GPU を使う）。規則だけで応答するチャットボット（ELIZA 方式）は付録の「仕組みを理解するための実装」にある。対話システムの設計や応用（ルールベース・用例検索型・タスク指向対話・RAG を組み込んだ知識接地型対話とマルチターン文脈補完を含む）については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 ## よくある質問に自動で答える FAQ ボットを作る {faq_bot}
 
@@ -448,6 +448,7 @@ for turns in [["予約をお願いします", "明日の夜7時に4人で", "山
 - 聞いた項目だけでなく、発話に含まれる情報はすべて取り込む。「明日の 7 時に 4 人」と言った客に「何名様ですか」と聞き返さないため。
 - 実用では、確定前の復唱と訂正（「19 時ではなく 20 時で」）の扱い、営業時間外や満席の確認が必要になる。
 - 抽出を LLM に任せて（JSON で出力させて）、状態管理と最終確認だけを規則で行う構成も多い。予約や決済のように間違えられない処理は、LLM に直接やらせない。
+- 実際の対話データで、LLM による対話状態の推定を全スロット一致率 (JGA) で評価する例は、この章の「対話状態の追跡を評価する（JMultiWOZ、全スロット一致率）」。
 
 ## 対話の履歴を管理して、長くなったら古いターンを捨てる {chat_history}
 
@@ -1152,3 +1153,316 @@ demo.launch(share=True)   # Colab では share=True にすると、72 時間有�
 - 止めるときは `demo.close()`。Colab のランタイムが切れると URL も無効になる。
 - 関数の中身を、RAG のチャットボットや FAQ ボットに差し替えれば、同じ画面でそのまま試せる。
 - GPU ランタイムで実行する。CPU でも動くが、3B のモデルでは応答が 1 文字ずつゆっくり出る。CPU で試すなら `sarashina2.2-0.5b-instruct-v0.1` に替える。
+
+## 音声で話せる対話システムを作る（音声認識・LLM・音声合成） {voice_dialogue gpu}
+
+マイクに話しかけると声で答えるボットを作りたい。音声認識 (Whisper) で書き起こし、LLM で応答を作り、音声合成 (Open JTalk) で読み上げる 3 段をつなぎ、話し終えてから返事が聞こえるまでの遅延がどこで生じるかを測る。
+
+```python
+# pyopenjtalk は PyPI にソースだけがあり、インストール時にビルドする（Colab で 2〜5 分ほど）
+!pip install -q pyopenjtalk==0.4.1
+```
+
+```python
+import numpy as np
+import pyopenjtalk
+from IPython.display import Audio, display
+from scipy.signal import resample_poly
+
+SR = 16000                                     # Whisper は 16kHz のモノラルを前提にする
+
+def tts(text):
+    """Open JTalk で読み上げ、16kHz の float32 の波形にする。初回の呼び出しで辞書（約 23MB）をダウンロードする"""
+    wav, sr = pyopenjtalk.tts(text)            # 48kHz。値は int16 の範囲の float
+    return resample_poly(wav / 32768, SR, sr).astype(np.float32)
+
+# 利用者の発話の代わりに、音声合成で作った音声を入力にする（マイクの録音を使う方法は注を参照）
+user_texts = ["こんにちは。今度の週末に京都へ行くんですが、雨の日でも楽しめる場所はありますか？",
+              "いいですね。そこへは京都駅からどうやって行けばいいですか？",
+              "ありがとう。最後に、お昼におすすめの京都の食べ物を一つ教えてください。"]
+user_audio = [tts(t) for t in user_texts]
+print([f"{len(a) / SR:.1f} 秒" for a in user_audio])
+display(Audio(user_audio[0], rate=SR))
+```
+
+```python
+import re
+import time
+from threading import Thread
+
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import models
+from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, TextIteratorStreamer, pipeline
+
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+DTYPE = torch.bfloat16 if BF16 else torch.float16
+asr = pipeline("automatic-speech-recognition", model="openai/whisper-large-v3-turbo", dtype=DTYPE, device_map="auto")   # MIT
+
+name = "sbintuitions/sarashina2.2-3b-instruct-v0.1"
+tokenizer = AutoTokenizer.from_pretrained(name)
+# transformers 5 系は、このモデルの SentencePiece (Unigram) を BPE に変換してしまい、学習時と違う分割になる。
+# 元の tokenizer.model から語彙とスコアを読み、分割の方式だけを Unigram に戻す（特殊トークンやチャットテンプレートはそのまま）
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "tokenizer.model"))
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=DTYPE, device_map="auto").eval()
+
+def transcribe(audio):
+    return asr(audio, generate_kwargs={"language": "ja", "task": "transcribe"})["text"].strip()
+
+class StopAfterSentences(StoppingCriteria):
+    """読み上げる応答は短くてよいので、n 文を生成したところで止める（3B のモデルは「1〜2 文で」の指示を守らないことが多い）"""
+    def __init__(self, start, n=2):
+        self.start, self.n = start, n
+    def __call__(self, input_ids, scores, **kwargs):
+        return len(re.findall(r"[。？]", tokenizer.decode(input_ids[0, self.start:]))) >= self.n     # 「もちろんです！」は数えない
+
+def generate(messages, max_new_tokens=100):
+    """応答を逐次受け取り、最初の文ができた時刻と、生成が終わった時刻を記録する"""
+    inputs = tokenizer.apply_chat_template(messages, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(llm.device)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    t0 = time.perf_counter()
+    Thread(target=llm.generate, kwargs=dict(**inputs, max_new_tokens=max_new_tokens, do_sample=False, streamer=streamer,
+                                            stopping_criteria=[StopAfterSentences(inputs["input_ids"].shape[1])],
+                                            pad_token_id=tokenizer.eos_token_id)).start()
+    text, t_first = "", None
+    for chunk in streamer:
+        text += chunk
+        if t_first is None and re.search(r"[。！？]", text):
+            t_first = time.perf_counter() - t0
+    t_all = time.perf_counter() - t0
+    return text.strip(), t_first or t_all, t_all
+
+# 1 回目は初期化で遅いので、測る前に 1 回ずつ動かしておく
+transcribe(user_audio[0]); generate([{"role": "user", "content": "こんにちは"}], max_new_tokens=5); tts("こんにちは")
+print("GPU メモリ:", round(torch.cuda.memory_allocated() / 1e9, 1), "GB（Whisper と LLM）")
+```
+
+```python
+import pandas as pd
+
+SYSTEM = ("あなたは旅行の相談に音声で答えるアシスタントです。答えはそのまま読み上げられるので、"
+          "記号や箇条書きを使わず、1〜2 文の短い話し言葉で答えてください。場所を聞かれたら、具体的な名前を 1 つ挙げてください。")
+history = [{"role": "system", "content": SYSTEM}]
+rows, replies = [], []
+for text, audio in zip(user_texts, user_audio):
+    t = time.perf_counter(); heard = transcribe(audio); torch.cuda.synchronize(); t_asr = time.perf_counter() - t
+    history.append({"role": "user", "content": heard})
+    reply, t_llm_first, t_llm = generate(history)
+    history.append({"role": "assistant", "content": reply})
+    sentences = re.findall(r".+?[。！？]", reply) or [reply]
+    t = time.perf_counter(); first_wav = tts(sentences[0]); t_tts_first = time.perf_counter() - t
+    t = time.perf_counter(); wav = tts(reply); t_tts = time.perf_counter() - t
+    replies.append(wav)
+    print(f"利用者: {text}\n認識: {heard}\nボット: {reply}\n")
+    rows.append({"発話の長さ": len(audio) / SR, "音声認識": t_asr, "LLM（最初の文）": t_llm_first, "LLM（全体）": t_llm,
+                 "音声合成（最初の文）": t_tts_first, "音声合成（全体）": t_tts, "応答の長さ": len(wav) / SR})
+df = pd.DataFrame(rows)
+df["最初の音まで"] = df["音声認識"] + df["LLM（最初の文）"] + df["音声合成（最初の文）"]   # 文ごとに逐次処理した場合
+df["全部そろうまで"] = df["音声認識"] + df["LLM（全体）"] + df["音声合成（全体）"]            # 段ごとに全部終えてから次へ渡す場合
+display(df.round(2))
+display(Audio(replies[0], rate=SR))
+```
+- 音声対話は、音声認識 → 対話（LLM）→ 音声合成の 3 段をつないだカスケード型で作るのが基本。各段を別々に取り替えられ、途中の書き起こしや応答の文字列を確かめられる。音声を直接入出力する end-to-end のモデルもあるが、日本語で T4 に載るものはまだ少ない。
+- 検証の GPU では、5〜7 秒の発話の認識が約 0.2 秒、2 文の応答の生成が 0.5〜1.0 秒、10〜17 秒の応答の音声合成（CPU）が 0.5〜0.8 秒で、全部そろうまで 1.2〜2.0 秒かかった。長い応答では生成と合成が同じくらいの時間を占める。T4 では GPU の段が数倍遅くなる。
+- 人の会話では、相手が話し終えてから返事が始まるまでの間はふつう 1 秒もない。応答を全部作ってから読み上げるのではなく、LLM が 1 文を出すたびに合成して再生を始めると、最初の音が出るまでは 0.4〜0.8 秒になった（表の「最初の音まで」）。残りの文は、最初の文を再生している間に作ればよい。
+- 書き言葉の長い応答は、聞くには長すぎる。最初の応答は読み上げると 13 秒を超えた。システムプロンプトで「1〜2 文の話し言葉で」「記号や箇条書きを使わない」と指示し、それでも長くなるので、2 文を生成したところで止めている（`StopAfterSentences`）。数字や英字、記号は読み上げで誤りやすいので、合成の前に読みを確かめるとよい（日本語の形態素解析と文分割の章の「発音・モーラ数・アクセントを取り出し、5-7-5 や読みの違いを調べる (pyopenjtalk)」）。
+- 入力も同じ合成音声なので、認識はほぼ完全だった（句読点の全角・半角だけが違う）。実際の声、雑音、言いよどみのある音声では誤りが増え、その誤りが応答に響く。モデルによる精度と速さの違いは、データの収集と入出力の章の「Whisper で日本語の音声を書き起こす（モデルの比較、長い音声、字幕）」を参照。
+- 応答の中身は、この章のほかのレシピと同じく 3B のモデルが知識から作ったもので、誤りを含みうる。この例では雨の日の行き先に、屋外を歩く清水寺を挙げた。
+- Colab でマイクから録音するには、ブラウザの JavaScript で録音して Python に渡す必要がある（`google.colab` の `eval_js` を使う例が多い）。ブラウザの画面で話しかけるなら、この章の「ブラウザで使えるチャット画面を作る (Gradio)」の `gr.Audio(sources=["microphone"])` が手軽。話し終わりの検出（VAD）や、ボットの発話中に割り込まれたときの処理も、実用では必要になる。
+- Open JTalk の音声合成は CPU だけで速く動くが、声は機械的で、声質も 1 種類（同梱の HTS の音声 mei）。より自然な声には、ニューラルの音声合成（VITS 系など）を使う。合成音声を公開するときは、音声モデルの利用条件を確かめる。pyopenjtalk は MIT ライセンス、同梱の音声は CC BY 3.0（名古屋工業大学）、Whisper large-v3-turbo は MIT、sarashina2.2 は MIT ライセンス。
+
+## 対話状態の追跡を評価する（JMultiWOZ、全スロット一致率） {dst_eval gpu}
+
+タスク指向対話のシステムは、利用者がここまでに伝えた条件（都市、店のジャンル、予約の人数や日時）を対話状態として持ち続ける。この章の「必要な情報を聞き出しながら予約を受け付ける（スロットフィリング）」では規則で取り出したが、実際の対話データで、LLM が各ターンの対話状態をどれだけ正しく追跡できるかを、全スロット一致率 (JGA) とスロット単位の正解率で測りたい。
+
+```python
+import collections
+import json
+import unicodedata
+import urllib.request
+import zipfile
+
+# JMultiWOZ（名古屋大学ほか、CC BY-SA 4.0）: 旅行案内の 6 ドメイン（飲食店、宿泊施設、観光名所、買い物、タクシー、天気）の日本語の対話 4,246 件
+urllib.request.urlretrieve("https://github.com/nu-dialogue/jmultiwoz/raw/master/dataset/JMultiWOZ_1.0.zip", "JMultiWOZ_1.0.zip")   # 約 11MB
+with zipfile.ZipFile("JMultiWOZ_1.0.zip") as z:
+    dialogues, split, ontology = (json.loads(z.read(f"JMultiWOZ_1.0/{f}.json")) for f in ["dialogues", "split_list", "ontology"])
+
+# スロットの一覧（「飲食店-ジャンル」のような名前にする）。着目しているドメイン (active_domain) は利用者の条件ではないので除く
+SLOTS = {(dom, s): f"{v['ja']}-{x['ja']}" for dom, v in ontology.items() for s, x in v["slots"].items()
+         if (x["informable"] or x["book"]) and s != "active_domain"}
+
+def state_of(turn):
+    """SYSTEM のターンに付いた対話状態（belief_state と予約の book_state）から、値のあるスロットだけを取り出す"""
+    st = turn["dialogue_state"]
+    return {SLOTS[dom, s]: v for part in ["belief_state", "book_state"] for dom, slots in st[part].items()
+            for s, v in slots.items() if (dom, s) in SLOTS and v is not None}
+
+def examples(names):
+    """利用者の発話ごとに、直前の案内係の発話、1 つ前の利用者のターンの正解の状態、このターンの正解の状態を組にする"""
+    out = []
+    for n in names:
+        turns, prev = dialogues[n]["turns"], {}
+        for i, t in enumerate(turns[:-1]):
+            if t["speaker"] == "USER":
+                gold = state_of(turns[i + 1])
+                out.append({"dialogue": n, "turn": i // 2, "system": turns[i - 1]["utterance"] if i else "",
+                            "user": t["utterance"], "prev": prev, "gold": gold})
+                prev = gold
+    return out
+
+train = examples(split["train"])
+# 値の種類が少ないスロット（値段帯、wifi の有無など）は、学習データに出る値を候補としてプロンプトに書く
+values = collections.defaultdict(collections.Counter)
+for x in train:
+    for k, v in x["gold"].items():
+        values[k][v] += 1
+CHOICES = {k: sorted(values[k]) for k in SLOTS.values() if 0 < len(values[k]) <= 6 and not k.endswith(("人数", "日数"))}
+
+test = examples(split["test"][:20])                    # 評価用 300 対話のうち 20 対話に絞る
+print(len(SLOTS), "スロット", len(test), "ターン（20 対話）")
+for x in test[:4]:
+    print(f"案内係: {x['system']}\n利用者: {x['user']}\n  → {x['gold']}")
+```
+
+```python
+import re
+import time
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Qwen3-4B-Instruct-2507（Apache 2.0）。T4 では float16 で約 8GB。この章のほかのレシピの sarashina2.2-3b より、JSON の出力と指示に従うのが安定していた
+name = "Qwen/Qwen3-4B-Instruct-2507"
+tokenizer = AutoTokenizer.from_pretrained(name, padding_side="left")
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+llm = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16 if BF16 else torch.float16, device_map="auto").eval()
+
+INSTRUCTION = ("旅行案内の対話で、利用者の最新の発話によって新しく決まった条件や、変わった条件を JSON で書いてください。"
+               "「これまでの状態」に既にあって変わらない項目は書かず、何も変わらなければ {} と書いてください。\n"
+               f"項目の名前: {'、'.join(SLOTS.values())}\n"
+               "次の項目は、値をこの中から 1 つ選ぶ: " + "、".join(f"{k}（{'、'.join(v)}）" for k, v in CHOICES.items()) + "\n"
+               "日付は 1/17 のような「月/日」、時刻は 09:40 のような 2 桁の 24 時間制、人数と宿泊日数は 2 のような数字だけで書く。")
+# データの付け方の約束。プロンプトの最後に置く（冒頭に置いたときは、都市や施設名をよく書き漏らした）
+RULES = ("# 注意\n"
+         "- 旅行先の都市が出てきたら、一般-都市 に書く。\n"
+         "- 案内係が勧めた施設を利用者が受け入れたり、その施設について質問したりしたら、その名前を案内係の発話のとおりに"
+         "名前の項目（店名、施設名、名称、店舗名、タクシー会社名）に書く。\n"
+         "- 利用者が条件を取り消したら（「〜でなくてもいい」）、その項目の値を null にする。")
+
+def prompt(prev, system, user):
+    return (f"{INSTRUCTION}\n\n# これまでの状態\n{json.dumps(prev, ensure_ascii=False)}\n\n"
+            f"# 案内係の直前の発話\n{system or '(なし)'}\n\n# 利用者の最新の発話\n{user}\n\n{RULES}")
+
+def update_of(x):
+    """正解の状態の差分: 1 つ前のターンから増えた・変わった項目と、消えた項目 (null)"""
+    return {**{k: v for k, v in x["gold"].items() if x["prev"].get(k) != v}, **{k: None for k in x["prev"] if k not in x["gold"]}}
+
+# 学習データから、都市・施設名の受け入れ・条件の取り消し・予約の日時の 4 例を選んで見せる（少数例 = few-shot）
+wants = [lambda x, u: x["turn"] == 0 and "一般-都市" in u and len(u) >= 2,
+         lambda x, u: any(k.endswith(("店名", "施設名", "名称")) and v and v not in x["user"] for k, v in u.items()),
+         lambda x, u: None in u.values(),
+         lambda x, u: any("日付" in k for k in u) and any("時刻" in k for k in u)]
+SHOTS = []
+for want in wants:
+    x = next(x for x in train if want(x, update_of(x)))
+    SHOTS += [{"role": "user", "content": prompt(x["prev"], x["system"], x["user"])},
+              {"role": "assistant", "content": json.dumps(update_of(x), ensure_ascii=False)}]
+
+def parse(text):
+    """出力から最初の {...} を取り出して JSON として読む。読めなければ「変化なし」とする"""
+    m = re.search(r"\{.*?\}", text, re.S)
+    try:
+        d = json.loads(m.group(0)) if m else {}
+    except json.JSONDecodeError:
+        return {}
+    return {k: None if v in (None, "", "null") else str(v) for k, v in d.items() if k in SLOTS.values()}
+
+@torch.no_grad()
+def generate(prompts, bs=4):
+    out = []
+    for k in range(0, len(prompts), bs):
+        msgs = [SHOTS + [{"role": "user", "content": p}] for p in prompts[k:k + bs]]
+        enc = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True, padding=True).to(llm.device)
+        o = llm.generate(**enc, max_new_tokens=100, do_sample=False, pad_token_id=tokenizer.pad_token_id)
+        out += tokenizer.batch_decode(o[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+    return out
+
+def track(xs, oracle=False):
+    """ターンごとに状態の差分を推定し、前の状態に足していく。oracle=True なら、前の状態に正解を使う（そのターンだけの誤りを見る）"""
+    by_dialogue = collections.defaultdict(list)
+    for x in xs:
+        by_dialogue[x["dialogue"]].append(x)
+    state = {d: {} for d in by_dialogue}
+    preds = {}
+    for t in range(max(len(v) for v in by_dialogue.values())):          # 同じターン目を対話をまたいでまとめて生成する
+        items = [v[t] for v in by_dialogue.values() if t < len(v)]
+        prevs = [x["prev"] if oracle else state[x["dialogue"]] for x in items]
+        for x, prev, out in zip(items, prevs, generate([prompt(p, x["system"], x["user"]) for x, p in zip(items, prevs)])):
+            new = {k: v for k, v in {**prev, **parse(out)}.items() if v is not None}
+            preds[id(x)] = state[x["dialogue"]] = new
+    return [preds[id(x)] for x in xs]
+
+t = time.time()
+pred = track(test)                      # 自分の推定を引き継ぐ（実際の使い方）
+print(f"推定した状態を引き継ぐ: {time.time() - t:.0f} 秒")
+t = time.time()
+pred_oracle = track(test, oracle=True)  # 前のターンの正解から始める
+print(f"前のターンの正解から: {time.time() - t:.0f} 秒")
+print("GPU メモリの最大使用量:", round(torch.cuda.max_memory_allocated() / 1e9, 1), "GB")
+```
+
+```python
+import pandas as pd
+
+def norm(state):
+    """全角半角と空白の違いは無視して比べる"""
+    return {k: unicodedata.normalize("NFKC", v).replace(" ", "").lower() for k, v in state.items()}
+
+def scores(preds):
+    golds, preds = [norm(x["gold"]) for x in test], [norm(p) for p in preds]
+    jga = sum(g == p for g, p in zip(golds, preds)) / len(test)                     # 全スロットが一致したターンの割合
+    slot_acc = sum(g.get(s) == p.get(s) for g, p in zip(golds, preds) for s in SLOTS.values()) / (len(test) * len(SLOTS))
+    tp = sum(g.get(s) == v for g, p in zip(golds, preds) for s, v in p.items())
+    prec, rec = tp / max(1, sum(map(len, preds))), tp / sum(map(len, golds))
+    return {"JGA": jga, "スロット正解率": slot_acc, "適合率": prec, "再現率": rec}
+
+print(pd.DataFrame({"何も埋めない": scores([{} for _ in test]),
+                    "1 つ前のターンの正解を写す（参考）": scores([x["prev"] for x in test]),
+                    "LLM: 推定した状態を引き継ぐ": scores(pred),
+                    "LLM: 前のターンの正解から（参考）": scores(pred_oracle)}).T.round(3))
+
+# ターンが進むほど状態は大きくなり、全スロット一致は難しくなる
+df = pd.DataFrame({"ターン": [min(x["turn"], 8) for x in test], "スロット数": [len(x["gold"]) for x in test],
+                   "一致": [norm(x["gold"]) == norm(p) for x, p in zip(test, pred)]})
+print(df.groupby("ターン").agg(件数=("一致", "size"), 正解のスロット数=("スロット数", "mean"), JGA=("一致", "mean")).round(2).T)
+```
+
+```python
+# スロットごとに: 正解に値があるターンで値を当てた割合（再現率）と、正解にない値を書いた回数
+rows = []
+for s in SLOTS.values():
+    g = [(norm(x["gold"]).get(s), norm(p).get(s)) for x, p in zip(test, pred)]
+    with_gold = [(a, b) for a, b in g if a is not None]
+    if with_gold:
+        rows.append({"スロット": s, "正解に値がある": len(with_gold), "再現率": sum(a == b for a, b in with_gold) / len(with_gold),
+                     "余計な値": sum(a is None and b is not None for a, b in g)})
+print(pd.DataFrame(rows).sort_values("正解に値がある", ascending=False).head(12).round(2).to_string(index=False))
+
+# 誤りの例: 前のターンの正解から始めても間違えたターンについて、違うスロットだけを並べる
+for x, p in [(x, p) for x, p in zip(test, pred_oracle) if norm(x["gold"]) != norm(p)][:5]:
+    g, q = norm(x["gold"]), norm(p)
+    print(f"\n案内係: {x['system'][:50]}\n利用者: {x['user'][:50]}")
+    print("  違い（正解, 予測）:", {s: (g.get(s), q.get(s)) for s in sorted(set(g) | set(q)) if g.get(s) != q.get(s)})
+```
+
+- データは JMultiWOZ（Ohashi ら, LREC-COLING 2024、CC BY-SA 4.0）。英語の MultiWOZ と同じく、利用者役と案内係役の 2 人の作業者が対話し、案内係のターンごとに対話状態（スロットと値）が付いている。ここでは評価用の 20 対話（151 ターン、42 スロット）に絞った。
+- JGA（Joint Goal Accuracy）は、そのターンのすべてのスロットの値が正解と一致した割合で、1 つでも違えば 0 になる。LLM が自分の推定を引き継ぐと 0.258 だった。ターンが進んで正解のスロットが増えるほど下がり、最初のターンは 0.90、4 ターン目は 0.11、6 ターン目以降は 0 だった。一度間違えた値は、直さない限り後のターンにずっと残る。
+- スロット正解率は、値のないスロットも「値なし」が一致すれば正解に数えるので、高く出る。何も埋めなくても 0.844、LLM は 0.948 で、1 つ前のターンの正解を写すだけのほう (0.962) が高い。値のあるスロットの適合率と再現率（LLM は 0.949 と 0.693）や JGA と並べて見る。
+- 誤りがどこから来るかを分けるため、前のターンの状態に正解を与えて、そのターンの更新だけを推定させた（`oracle=True`）。JGA は 0.589 で、1 ターンごとの誤りは少なくても、それが積み重なると大きく下がることが分かる。対話全体を毎回読み直して状態をまるごと出力させる方法も試したが、sarashina2.2-3b-instruct では出力の 4 分の 1 ほどが JSON として読めず、JGA は 0.04 だった。
+- 一番落とすのは施設の名前（再現率 0.11〜0.21）。正解のデータでは、案内係が勧めた施設を利用者が受け入れたり、その施設について尋ねたりした時点で名前が状態に入るが、利用者は「いいですね」「そこの最寄り駅は」としか言わない。注意書きに書いても多くは拾えず、本屋を飲食店の店名に入れるようなドメインの取り違えもあった。逆に、利用者が「ジャンボタクシーには対応していますか」と尋ねただけでは、正解の状態には入らない。どこまでを状態とするかはデータの付け方の約束で決まり、プロンプトでそれを伝えきるのは難しい。
+- 都市の書き漏らしは、データの付け方の約束（注意書き）をプロンプトの最後に移したら無くなった。別に試した 15 対話では、冒頭に置いたときの JGA は最後に置いたときの約半分だった。約束を書き足す前の同じ方法で比べると、sarashina2.2-3b-instruct の JGA (0.035) は Qwen3-4B (0.088) より低かった。
+- 実用の DST は、学習データでモデルを fine-tuning することが多い。JMultiWOZ の論文（評価用の全 300 対話）では、fine-tuning した T5-large の JGA が 0.77、少数例を与えた GPT-4 が 0.36 と報告されている（スロットの範囲や比べ方がこのレシピとは違うので、数値はそのまま比べられない）。
+- 2 回の推定は検証の GPU でそれぞれ約 6 分かかった。T4 ではさらに数倍かかる。GPU メモリの最大使用量は 13.4GB で、T4 の 16GB に近い。足りなければ `generate` の `bs` を 2 にするか、対話数を減らす。モデルは Apache 2.0 ライセンス。

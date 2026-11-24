@@ -1,6 +1,6 @@
 # 文法誤り訂正と文章校正
 
-学習者の作文を訂正する、訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5、参照なし評価）、日本語の文章の校正すべき箇所を指摘する、スペルミスを直す。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
+学習者の作文を訂正する、擬似誤りデータで訂正モデルを学習する、訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5、参照なし評価）、日本語の文章の校正すべき箇所を指摘する、スペルミスを直す。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
 
 ## 2 つの文の違いを色付きで表示する {diff_highlight}
 
@@ -295,6 +295,7 @@ for s in clean:
 - 擬似データで事前学習してから実データでファインチューニングするのが、GEC の定番の手順。
 - 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
 - 逆翻訳（正しい文 → 誤り文を生成するモデル）や、LLM に誤りを書かせる方法もある。
+- こうして作った擬似データで T5 を学習し、少量の実データで続けて学習する例は、この章の「擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ）」にある。
 
 ## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
 
@@ -1200,3 +1201,209 @@ for sys_name, f in systems.items():
 - 文脈を使う訂正は遅い。この実行では 2 コアの CPU で 35 文に 38 秒（1 文 1 秒ほど）かかり、symspellpy だけなら 0.1 秒以下だった。大量に処理するなら GPU を使う、取り違えやすい語の組（their / there、then / than など）だけを調べる、といった工夫がいる。
 - 小文字にしてから扱うので、大文字・小文字の情報は失われる。辞書にない語は、編集距離 2 以内に候補があれば必ずどれかに書き換えるので、固有名詞や専門用語は `sym.create_dictionary_entry("tokenizer", 1000)` のように辞書に足しておく。学習者のつづりの誤りは打ち間違いと傾向が違う（発音に引きずられる、母語の影響を受ける）ので、学習者の作文で確かめる。日本語では、スペル誤りにあたるのは誤変換や脱字である。日本語入力の章と、この章の「マスク言語モデルで誤りのありそうな箇所を見つける（文法誤り検出）」を参照。
 - 仕組みを自分で実装して確かめる版（編集距離 1・2 の候補を作り、頻度で選ぶ Norvig 方式）は、付録「仕組みを理解するための実装」の「編集距離と単語の頻度で英語のスペル誤りを訂正する（Norvig 方式を自分で実装）」にある。
+
+## 擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ） {gec_synthetic_train gpu}
+
+文法誤り訂正の学習データが少ない。正しい文に規則で誤りを入れた大量の擬似データで小さな系列変換モデル (T5) を学習し、少量の実データで続けて学習すると、どれだけ良くなるかを確かめたい。
+
+```python
+!pip install -q fugashi unidic-lite datasets
+```
+
+```python
+import gzip, random, re, urllib.request
+from datasets import load_dataset
+from fugashi import Tagger
+
+# 正しい文: 田中コーパス (EDRDG 配布版、CC BY)。Tatoeba の日英対訳の日本語側で、教科書の例文のような短い文
+raw = gzip.decompress(urllib.request.urlopen("https://www.edrdg.org/pub/Nihongo/examples.utf.gz").read()).decode("utf-8")
+clean = sorted({m.group(1) for m in re.finditer(r"^A: (.+?)\t", raw, re.M) if 8 <= len(m.group(1)) <= 40})
+random.Random(0).shuffle(clean)
+
+# この章の「規則で誤りを注入して GEC の擬似学習データを作る」と同じ規則（助詞の置換・脱落・余剰、活用語尾の誤り）
+tagger = Tagger()
+PARTICLES = ["が", "を", "に", "で", "は", "と", "へ", "の"]
+
+def corrupt(sentence, rng, p=0.15):
+    out = []
+    for w in tagger(sentence):
+        surface, pos1, pos2 = w.surface, w.feature.pos1, w.feature.pos2
+        if pos1 == "助詞" and pos2 in ("格助詞", "係助詞") and surface in PARTICLES and rng.random() < p:
+            r = rng.random()
+            if r < 0.6:
+                out.append(rng.choice([x for x in PARTICLES if x != surface]))   # 置換
+            elif r < 0.8:
+                pass                                                              # 脱落
+            else:
+                out += [surface, rng.choice(PARTICLES)]                           # 余剰
+        elif pos1 == "動詞" and w.feature.cForm and w.feature.cForm.startswith("連用形") and rng.random() < p:
+            out.append(w.feature.orthBase or surface)                             # 活用させずに辞書形のままにする
+        else:
+            out.append(surface)
+    return "".join(out)
+
+rng = random.Random(0)
+N_SYN = 20000
+synthetic = [(corrupt(s, rng, p=0.2), s) for s in clean[:N_SYN]]   # 誤りが入らなかった文も（同じ文, 同じ文）として残す
+print(len(clean), "文から", N_SYN, "組 / 誤りが入った割合", round(sum(a != b for a, b in synthetic) / N_SYN, 3))
+for noisy, ok in [x for x in synthetic if x[0] != x[1]][:4]:
+    print(f"   {noisy}  →  {ok}")
+
+# 実データ: JFLEG-JA の validation (711 文、訂正は各 4 通り)。先頭 100 文はこの章の「LLM で日本語の文法誤りを訂正して評価する」と同じ評価用、残りを学習に使う
+ds = load_dataset("ronantakizawa/jfleg-japanese", split="validation")
+test = ds.select(range(100))
+real = [(ex["sentence"], c) for ex in ds.select(range(100, len(ds))) for c in ex["corrections"]]
+print("実データ:", len(ds) - 100, "文 →", len(real), "組 / 評価", len(test), "文")
+print("評価の文が擬似データの正しい文にもある数:", len({c for ex in test for c in ex["corrections"]} & set(clean[:N_SYN])))
+```
+
+```python
+import difflib
+
+# この章の「文法誤り訂正を編集単位の F0.5 で評価する」と同じ集計（TP・FP・FN から P・R・F0.5）。
+# 編集は「LLM で日本語の文法誤りを訂正して評価する」と同じく文字単位の差分で作り、4 つの参照のうち F0.5 が最も高いものと比べる
+def edits(source, target):
+    ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
+    return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
+
+def counts(src, hyp, refs, beta=0.5):
+    """1 文の TP・FP・FN"""
+    h = edits(src, hyp)
+    r = max((edits(src, ref) for ref in refs),
+            key=lambda r: ((1 + beta ** 2) * len(h & r) / (len(h) + beta ** 2 * len(r) + 1e-9), -len(r)))
+    return len(h & r), len(h - r), len(r - h)
+
+def gec_score(sources, hypotheses, references, beta=0.5):
+    tp, fp, fn = map(sum, zip(*[counts(s, h, r) for s, h, r in zip(sources, hypotheses, references)]))
+    p = tp / (tp + fp) if tp + fp else 1.0
+    r = tp / (tp + fn) if tp + fn else 1.0
+    f = (1 + beta ** 2) * p * r / (beta ** 2 * p + r) if p + r else 0.0
+    return {"TP": tp, "FP": fp, "FN": fn, "P": round(p, 3), "R": round(r, 3), f"F{beta}": round(f, 3),
+            "変更なし": sum(s == h for s, h in zip(sources, hypotheses))}
+
+sources, references = test["sentence"], test["corrections"]
+results = {"何もしない": gec_score(sources, sources, references)}
+print(results)
+```
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import decoders, models
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
+
+name = "sonoisa/t5-base-japanese-v1.1"     # 日本語の T5（約 2.5 億パラメータ）。CC BY-SA 4.0
+# 要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」と同じく、transformers 5 系で落ちる byte_fallback を戻す
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
+tokenizer = AutoTokenizer.from_pretrained(name)
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tokenizer.backend_tokenizer.decoder = decoders.Sequence(
+    [decoders.ByteFallback(), decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True)])
+
+MAX_LEN = 64
+def load_model():
+    set_seed(0)
+    return AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda")   # 学習するので float32 のまま
+
+def correct(model, texts, batch_size=50, num_beams=4):
+    model.eval()
+    outputs = []
+    for i in range(0, len(texts), batch_size):
+        x = tokenizer(list(texts[i:i + batch_size]), max_length=MAX_LEN, truncation=True, padding=True, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**x, max_new_tokens=MAX_LEN, num_beams=num_beams)
+        outputs += [s.strip() for s in tokenizer.batch_decode(out, skip_special_tokens=True)]
+    return outputs
+
+print("トークン数（擬似データの正しい文、最大）:", max(len(tokenizer(s)["input_ids"]) for s in clean[:2000]))
+```
+
+```python
+import time
+from datasets import Dataset, disable_progress_bars
+from transformers.utils import logging as hf_logging
+from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
+
+disable_progress_bars(); hf_logging.disable_progress_bar()
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # T5 v1.1 は float16 で値があふれるので、T4 では float32 で学習する
+
+def train(model, pairs, epochs, lr, batch_size=32):
+    def encode(batch):
+        x = tokenizer(batch["src"], max_length=MAX_LEN, truncation=True)
+        x["labels"] = tokenizer(text_target=batch["tgt"], max_length=MAX_LEN, truncation=True)["input_ids"]
+        return x
+    data = Dataset.from_dict({"src": [a for a, _ in pairs], "tgt": [b for _, b in pairs]}).map(encode, batched=True, remove_columns=["src", "tgt"])
+    args = Seq2SeqTrainingArguments(
+        output_dir="t5-gec", num_train_epochs=epochs, per_device_train_batch_size=batch_size, learning_rate=lr,
+        warmup_steps=30, lr_scheduler_type="linear", weight_decay=0.01, logging_steps=100,
+        save_strategy="no", report_to="none", bf16=BF16, seed=0, disable_tqdm=True)
+    trainer = Seq2SeqTrainer(model=model, args=args, train_dataset=data,
+                             data_collator=DataCollatorForSeq2Seq(tokenizer, model=model), processing_class=tokenizer)
+    t0 = time.time()
+    trainer.train()
+    losses = [round(h["loss"], 3) for h in trainer.state.log_history if "loss" in h]
+    print(f"  {len(pairs)} 組 × {epochs} エポック: {time.time() - t0:.0f} 秒、損失 {losses[0]} → {losses[-1]}")
+
+outputs = {}
+
+# (1) 擬似データだけで学習する（2 万組 × 1 エポック）
+model = load_model()
+train(model, synthetic, epochs=1, lr=3e-4)
+outputs["擬似データだけ"] = correct(model, sources)
+
+# (2) (1) に続けて、実データ (約 2,400 組) で学習する
+train(model, real, epochs=3, lr=3e-4)
+outputs["擬似データ → 実データ"] = correct(model, sources)
+
+# (3) 比較: 擬似データを使わず、実データだけで学習する
+del model; torch.cuda.empty_cache()
+model = load_model()
+train(model, real, epochs=3, lr=3e-4)
+outputs["実データだけ"] = correct(model, sources)
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+for label, hyps in outputs.items():
+    results[label] = gec_score(sources, hyps, references)
+print(pd.DataFrame(results).T.to_string())
+
+# 擬似データの誤りに近い文（2 字以内の置き換え・脱落・挿入だけで、いずれかの参照に直せる文。助詞や活用語尾の誤りが多い）と、それ以外に分けて見る
+def small_edits_only(ex):
+    return any(all(i2 - i1 <= 2 and len(t) <= 2 for i1, i2, t in edits(ex["sentence"], ref)) for ref in ex["corrections"])
+groups = [small_edits_only(ex) for ex in test]
+print("\n擬似データに近い誤りの文:", sum(groups), "/ それ以外:", len(groups) - sum(groups))
+for label, hyps in outputs.items():
+    f = [gec_score([s for s, g in zip(sources, groups) if g == want], [h for h, g in zip(hyps, groups) if g == want],
+                   [r for r, g in zip(references, groups) if g == want])["F0.5"] for want in (True, False)]
+    print(f"   {label:12}  近い {f[0]:.3f}  それ以外 {f[1]:.3f}")
+
+# 100 文なので差はぶれる。文を再標本化して F0.5 の差の 95% 信頼区間を見る（対応のあるブートストラップ）
+def f05(c):
+    tp, fp, fn = c.sum(0)
+    p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
+    return 1.25 * p * r / (0.25 * p + r) if p + r else 0.0
+c = {label: np.array([counts(s, h, r) for s, h, r in zip(sources, hyps, references)]) for label, hyps in outputs.items()}
+idx = np.random.default_rng(0).integers(0, len(sources), (1000, len(sources)))
+for a, b in [("擬似データ → 実データ", "実データだけ"), ("擬似データ → 実データ", "擬似データだけ")]:
+    d = [f05(c[a][k]) - f05(c[b][k]) for k in idx]
+    print(f"F0.5 の差（{a} − {b}）: {f05(c[a]) - f05(c[b]):+.3f}（95%CI {np.percentile(d, 2.5):+.3f}〜{np.percentile(d, 97.5):+.3f}）")
+
+for i in range(6):
+    print(f"\n{sources[i]}  （参照: {references[i][0]}）")
+    for label, hyps in outputs.items():
+        print(f"   {label:12} {hyps[i]}")
+```
+
+- 擬似データだけで学習したモデルは慎重で、100 文中 74 文を変えずに残した。適合率は 0.821 と高いが再現率は 0.176 で、F0.5 は 0.473。続けて実データ（JFLEG-JA の残り 611 文 × 4 通りの訂正）で学習すると F0.5 は 0.667 に上がった（差 +0.193、95% 信頼区間 +0.057〜+0.348）。擬似データを使わず実データだけで学習すると 0.600 で、擬似データで先に学習したほうが 0.067 高かった。ただし 95% 信頼区間は −0.001〜+0.142 で、100 文の評価では差があるとはっきりは言えない。
+- 誤りの種類で分けると、2 字以内の置き換え・挿入・脱落で直せる文（助詞や活用語尾の誤りが多い。78 文）では、擬似データだけで F0.5 0.525、それ以外の文（語の選び方や言い回しの誤り。22 文）では 0.323 だった。擬似データの規則にない種類の誤りは、実データで学習しないと直らない。擬似データの効果は、実データで学習したあとも、規則の誤りに近い文（0.760 対 0.665）のほうで大きかった。
+- 規則にある助詞の誤りでも、直らないものがある（「電車を乗りました」）。規則は助詞をでたらめに置き換えるので、動詞と助詞の結びつき（「に乗る」）を学ぶ手がかりにならない。この章の「規則で誤りを注入して GEC の擬似学習データを作る」の注のとおり、誤りの種類と割合を実際の学習者の誤りに近づけるほど効果が上がる。
+- 実データの参照には流暢な書き直しも含まれるので、それで学習すると言い換えも覚える（「駅の近く」→「駅のすぐそば」）。実データだけで学習したモデルは、主語まで変えて意味の違う文を作った（「私の家を駅の近くあります。」→「彼は駅の近くに住んでいます。」）。最小限の訂正が欲しいなら、参照のうち編集の少ないものだけで学習する。
+- 同じ 100 文を、同じ編集の取り出し方と参照の選び方で評価しているので、この章の「LLM で日本語の文法誤りを訂正して評価する」の数値と比べられる。そのレシピの LLM (3B) は、最小限の訂正の指示で F0.5 0.441 だった。約 2.5 億パラメータの T5 でも、同じ分布のデータで学習すれば上回る。ただし学習に使った 611 文と評価の 100 文は JFLEG-JA の同じ分割から取ったもので、作り方も誤りの傾向も同じなので、T5 に有利な条件である。
+- 時間の目安: 学習は 3 回合わせて、検証の GPU で約 2 分（ほかの処理と共有したときは約 4 分）だった。T4 では 10 分前後の見込み。T5 v1.1 の構造は float16 で値があふれるので、T4 では float32 で学習する（要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」を参照）。擬似データを増やす、エポックを増やす、といった調整の余地は大きい。実際の研究では数百万〜数千万文の擬似データを使う。
+- 評価用の 100 文の参照訂正のうち 1 文が、擬似データの正しい文（田中コーパス）にもあった。短く平易な文はコーパスをまたいで重なりやすいので、学習データと評価データの重なりは確かめておく。
+- データとモデルの出典とライセンス: 田中コーパス（EDRDG 配布版）は CC BY。JFLEG-JA (ronantakizawa/jfleg-japanese) は、データセットのページのメタデータでは MIT だが、本文には CC BY-NC-SA 4.0 とあるので、非営利で使うものとして扱う。誤り文の多くは GPT-4 で作られたもので、実際の学習者の文ではない。sonoisa/t5-base-japanese-v1.1 は CC BY-SA 4.0。

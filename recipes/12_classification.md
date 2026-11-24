@@ -1795,8 +1795,9 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer, Data
 model_name = "tohoku-nlp/bert-base-japanese-v3"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+# 題名と本文の 2 文を渡す。このトークナイザーは transformers 5 系では既定で token_type_ids（1 文目か 2 文目か）を返さないので、明示して返させる
 def preprocess(batch):
-    return tokenizer(batch["title"], batch["text"], truncation="only_second", max_length=256)
+    return tokenizer(batch["title"], batch["text"], truncation="only_second", max_length=256, return_token_type_ids=True)
 
 tokenized = ds.map(preprocess, batched=True, remove_columns=["title", "text"])
 model = AutoModelForSequenceClassification.from_pretrained(
@@ -1843,11 +1844,12 @@ articles = [
      "text_pair": "サッカー日本代表は後半に 2 点を奪って逆転勝ちし、決勝トーナメントへの進出を決めた。"
                   "監督は試合後「選手が最後まで走り切ってくれた」と話した。"},
 ]
-for a, pred in zip(articles, clf(articles)):
+for a, pred in zip(articles, clf(articles, return_token_type_ids=True)):   # 推論でも学習と同じく返させる
     print(f"{pred['label']:15s} {pred['score']:.3f}  {a['text']}")
 ```
 
-- 検証の GPU では、3 エポックの学習に約 1 分半かかった。テストセットでの正解率は 0.967、macro-F1 は 0.964 だった。
+- 検証の GPU では、3 エポックの学習に約 1 分半かかった。テストセットでの正解率は 0.957、macro-F1 は 0.952 だった。
+- 題名と本文の 2 文を渡すと `[CLS] 題名 [SEP] 本文 [SEP]` の 1 列になり、`token_type_ids` で 1 文目と 2 文目を区別する。このトークナイザー (BertJapaneseTokenizer) は transformers 5 系では既定で `token_type_ids` を返さない（全部 0 とみなされる）ので、`return_token_type_ids=True` を付ける。この課題では、付けない場合も正解率 0.958 とほとんど変わらなかった（区別が [SEP] だけでも足りる）が、2 文の役割が違う課題では効くことがある。
 - 学習率 (1e-5〜5e-5) とエポック数 (2〜5) が最も効くハイパーパラメータ。小さいデータではシードによるばらつきも大きいので、複数シードで平均をとる。
 - 各エポックの後に開発セットで評価し、macro-F1 が最も高いチェックポイントを復元する。学習率などの調整にも開発セットを使い、テストセットはモデルと設定が決まってから最後に 1 回だけ使う。
 

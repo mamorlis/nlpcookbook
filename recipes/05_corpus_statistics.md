@@ -1,6 +1,6 @@
 # コーパスの統計と可視化
 
-単語を数える、共起や特徴語を調べる、分布を図にする、n-gram 言語モデルでノイズの混じった文を見つける。コーパスを手に入れたらまずやること。
+単語を数える、共起や特徴語を調べる、分布を図にする、n-gram 言語モデルでノイズの混じった文を見つける。コーパスを手に入れたらまずやること。グラフの日本語を文字化けさせずに表示する方法は、付録の「Colab と Python の小技」の「matplotlib で日本語を文字化けさせずに表示する」を参照。
 
 ## 文の長さや文字数の基本統計をとる {corpus_stats}
 
@@ -93,38 +93,6 @@ df.head(10)
 
 - 何も絞らないと上位は助詞と句読点で埋まる。見たいものに応じて品詞で絞る。
 - `[w for line in lines for w in tagger(line)]` のようにノードそのものを溜め込むと、中身が壊れて品詞や原形がでたらめになる（fugashi の落とし穴）。
-
-## matplotlib で日本語を文字化けさせずに表示する {matplotlib_ja}
-
-グラフの軸ラベルや凡例の日本語が □□□（豆腐）になるのを直したい。
-
-```python
-!pip install -q matplotlib-fontja
-```
-
-```python
-import matplotlib.pyplot as plt
-import matplotlib_fontja  # import するだけで IPAex ゴシックが既定のフォントになる
-
-words, counts = ["猫", "主人", "人間", "先生", "迷亭"], [270, 933, 280, 250, 340]
-plt.bar(words, counts)
-plt.title("単語の出現頻度"); plt.xlabel("単語"); plt.ylabel("頻度")
-plt.show()
-```
-
-```python
-# seaborn を使う場合は、set_theme がフォントを上書きするので後からもう一度設定する
-import seaborn as sns
-
-sns.set_theme(style="whitegrid")
-matplotlib_fontja.japanize()
-sns.barplot(x=words, y=counts)
-plt.title("seaborn でも日本語")
-plt.show()
-```
-
-- 以前の定番 `japanize-matplotlib` は Python 3.12 以降で動かない（distutils 廃止のため）。`matplotlib-fontja` はその後継。
-- 別のフォントを使いたいときは `!apt-get -y install fonts-noto-cjk` して `plt.rcParams["font.family"] = "Noto Sans CJK JP"`。
 
 ## Zipf の法則を確かめる（順位-頻度プロット） {zipf}
 
@@ -403,6 +371,7 @@ print([" ".join(t) for t in tri.nbest(TrigramAssocMeasures().likelihood_ratio, 8
 
 - PMI は固有名詞などの稀な組、尤度比や t 検定は高頻度の機能語の組を上位に出しやすい。目的に合う指標を選ぶ。
 - 日本語なら、分かち書きした単語リストをそのまま `from_words` に渡せばよい。
+- 慣用句が文脈で慣用の意味か字義どおりの意味かを判定する例は、語の意味と意味の変化の章の「慣用句・機能表現を見つけて字義どおりの用法と区別する」を参照。
 
 ## 2 つのコーパスを比べて特徴語を見つける（対数尤度比） {keyness}
 
