@@ -89,7 +89,6 @@ print(stats.most_common())
 
 - 「置換:助詞」が多ければ助詞の指導を重点的に、といった分析ができる。
 - 語順の入れ替えや、複数の誤りが隣り合う場合は、差分アルゴリズムだけでは人間の直感と違う対応付けになることがある。英語では、言語学的な情報を使って対応付ける ERRANT が標準（次項）。
-- 動的計画法によるトークンアライメントから連続編集を M2 / ERRANT 形式の編集スパンへ統合し、マルチリファレンス $F_{0.5}$ で評価する演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [編集距離と n-gram 言語モデルによる誤り検出・訂正](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_edit_distance_lm.ipynb)（第 6 節）も参照。
 
 ## ERRANT で英語の訂正を誤りタイプ付きの編集に変換する {errant}
 
@@ -169,7 +168,6 @@ for tokens, edits in read_m2(m2):
 
 - `S` 行が原文、`A` 行が 1 つの編集 (`開始 終了|||タイプ|||訂正|||必須か|||コメント|||アノテータ ID`)。位置はトークン単位で、終了は含まない。
 - 訂正が不要な文は `noop` の行が 1 つ付く。アノテータが複数いる場合は、同じ文に対して ID の違う編集の集合が並ぶ。
-- 複数アノテータの M2 編集スパンを復元・統合してマルチリファレンス Best-Annotator $F_{0.5}$ を算出する演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [編集距離と n-gram 言語モデルによる誤り検出・訂正](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_edit_distance_lm.ipynb)（第 6 節）も参照。
 
 ## 文法誤り訂正を編集単位の F0.5 で評価する {gec_f05}
 
@@ -214,7 +212,6 @@ for name, hyp in systems.items():
 - F0.5 は適合率を再現率の 2 倍重視する。間違った訂正を学習者に見せる害のほうが、見逃しより大きいという考え方。
 - 正しい訂正は 1 通りではない。参照が 1 つだけだと、妥当な別解（「very much → a lot」）が誤りとして数えられる。複数参照の場合は、文ごとに最も F 値が高くなる参照を選ぶ。
 - 流暢性まで含めた訂正の評価には GLEU や、参照なしの指標（IMPARA、SOME など）が使われる。
-- Token Accuracy の罠（何もしないベースラインが約 90% になる問題）、$F_1$ との比較による過剰訂正ペナルティ、および 1 参照 vs 3 参照 Best-Annotator $F_{0.5}$ の比較演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [編集距離と n-gram 言語モデルによる誤り検出・訂正](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_edit_distance_lm.ipynb)（第 6 節）も参照。
 
 ## 学習済みモデルで英語の文法誤りを訂正する {gec_model_en}
 

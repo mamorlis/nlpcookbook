@@ -543,7 +543,6 @@ print(mask(text))
 - 単にマスクすると文脈が失われる。「山田太郎 → 人物A」のように同じ実体に同じ仮名を割り当てると、後段の分析に使いやすい。
 - 郵便番号や電話番号の正規表現には `(?<![\d-])...(?![\d-])` や `(?<!\d)...(?!\d)` のような否定後読み・先読み境界を入れ、カード番号や会員番号（例: `1234-5678-9012-3456` の一部）など長い番号列への誤マッチを防ぐ。
 - 英語を含む多言語なら Microsoft Presidio (`presidio-analyzer`) が定番。
-- 言語資源のクレンジング・重複排除と組み合わせた PII マスキングの実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [言語資源のクレンジング・重複排除と PII マスキング](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_data_cleaning.ipynb) も参照。
 
 ## 音声認識の結果から固有表現を抽出する {asr_ner}
 

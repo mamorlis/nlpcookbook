@@ -555,7 +555,7 @@ for s in ["附属病院でシュミレーションを行なう", "付属病院�
 ```
 
 - `dictionary_form()` は活用を戻すだけ、`normalized_form()` は表記ゆれまで統一する。頻度集計や検索では後者が便利。
-- ユーザー辞書を作って表記ゆれや専門用語を登録する方法は、次の「Sudachi にユーザー辞書をコンパイルして追加する」を参照。専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) も参照。
+- ユーザー辞書を作って表記ゆれや専門用語を登録する方法は、次の「Sudachi にユーザー辞書をコンパイルして追加する」を参照。
 
 ## Sudachi にユーザー辞書をコンパイルして追加する {sudachi_userdic}
 
@@ -646,7 +646,7 @@ with tempfile.TemporaryDirectory() as tmp:
 - Sudachi のユーザー辞書は 18 列の CSV で表層形・連接コスト ID・生起コスト・品詞・読み・正規化形・分割タイプ（`A`/`B`/`C` のどの単位で登録するか）などを指定し、`sudachipy ubuild` でバイナリの `user.dic` に変換してから設定 JSON の `userDict` に登録する。
 - 名詞として追加する場合は左・右連接 ID に標準的な名詞の ID (`4785`) を流用でき、生起コストを小さめ（`4000` など）にするとシステム辞書の細かな分割（「ラベル / バイアス / 問題」「検索 / 拡張 / 生成」）より 1 語としての分割が選ばれやすくなる。
 - 表記ゆれ（「スダチパイ」→ `SudachiPy`、「フガシ」→ `fugashi`）を正規化形欄に書いておくと、`m.normalized_form()` で表記を統一できる。辞書に語を足したときは、想定外の文で誤分割が起きないかも含めて単体テストで継続的に検証する。
-- 設定不要で手早く簡易 CSV を試したい場合は、この章の「Janome にユーザー辞書を追加する」も使える。詳しい設計・運用の解説は姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
+- 設定不要で手早く簡易 CSV を試したい場合は、この章の「Janome にユーザー辞書を追加する」も使える。
 
 ## Janome で形態素解析する (Pure Python) {janome}
 
@@ -708,7 +708,6 @@ print(list(t.tokenize(text, wakati=True)))
 ```
 
 - MeCab や Sudachi のユーザー辞書はコンパイルが必要。手早く試すなら Janome の簡易辞書が楽。
-- `SudachiPy` で専門用語の表層形・品詞・読み・正規化形を CSV に定義して `sudachipy ubuild` でユーザー辞書をビルドし、単体テストを行う実践例は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 5 章の [形態素解析のユーザ辞書作成と単体テスト](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch5_dictionary.ipynb) を参照。
 - 辞書を作らずに済ませるなら、この章の「連続する名詞をつなげて複合名詞を抽出する」のように名詞の連続を後処理でつなげる手もある。
 
 ## 解析器・辞書による分割の違いを比べる {tokenizer_compare}
@@ -1453,7 +1452,7 @@ for s in split_sentences(text):
 print(re.findall(r"[^。！？]+[。！？]*", "今日は晴れ。明日は雨？そうかも！"))
 ```
 
-- 単純な規則では、括弧内の句点だけでなく「モーニング娘。」のように句点を含む固有名詞や、略語・小数点などでも誤って文を切ってしまうことがある（背景や開発サイクルでの扱いは姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 1 章の [自然言語処理システムの開発サイクル（文分割・データ分割・計算量・遠距離教師あり学習・半教師あり学習）](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch1_design_cycle.ipynb) を参照）。
+- 単純な規則では、括弧内の句点だけでなく「モーニング娘。」のように句点を含む固有名詞や、略語・小数点などでも誤って文を切ってしまうことがある。
 - 改行・絵文字・小数点・URL などにも対応した既存ライブラリの比較は、次のレシピ「日本語の文分割をライブラリで行って比べる」を参照。
 
 ## 日本語の文分割をライブラリで行って比べる {sentence_split_libs}

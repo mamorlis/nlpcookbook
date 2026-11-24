@@ -1,6 +1,6 @@
 # 日本語入力（かな漢字変換）
 
-ローマ字からかなへの変換、辞書とラティス、ビタビアルゴリズムによるかな漢字変換、候補の提示、予測入力、履歴の学習、ニューラルかな漢字変換、評価まで、日本語入力システムの部品を作る。単語ラティスやビタビアルゴリズム・系列ラベリングの基礎については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [単語ラティス・仮名漢字変換・CRF vs MEMM・Pointwise 予測](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_viterbi_crf.ipynb)（確率的仮名漢字変換と Pointwise 予測を含む）も参照。
+ローマ字からかなへの変換、辞書とラティス、ビタビアルゴリズムによるかな漢字変換、候補の提示、予測入力、履歴の学習、ニューラルかな漢字変換、評価まで、日本語入力システムの部品を作る。単語ラティスやビタビアルゴリズム・系列ラベリングの基礎については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
 
 ## ローマ字をかなに変換する {romaji_to_kana}
 
@@ -443,7 +443,6 @@ for lam in [0.0, 0.5, 0.8, 0.95]:
 - 学習データにない単語の並びの確率が 0 にならないよう、unigram と混ぜる（平滑化）。混ぜる割合は、学習に使っていないデータで決める。
 - 実用の変換エンジン（Mozc など）は、単語そのものではなく品詞や単語クラスの bigram を使う。単語 bigram より少ないデータで学習でき、メモリも小さくて済む。
 - 文正解率は厳しい指標（1 か所でも違えば不正解）。部分的な正しさも測る指標は、この章の評価のレシピを参照。
-- 単語ラティス上の確率的かな漢字変換や Viterbi アルゴリズム、Pointwise 予測・CRF・MEMM の比較を扱う演習は、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』第 3 章の [単語ラティス・仮名漢字変換・CRF vs MEMM・Pointwise 予測](https://github.com/mamorlis/nlpbook/blob/main/notebooks/ch3_viterbi_crf.ipynb)（確率的仮名漢字変換と Pointwise 予測を含む）も参照。
 
 ## 変換候補を複数出す (N-best) {kkc_nbest}
 
