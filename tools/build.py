@@ -2,6 +2,7 @@
 """recipes/*.md から Colab 用ノートブック (notebooks/**/*.ipynb) と README の目次を生成する。
 
     python tools/build.py              # ノートブックと目次を生成 (実行はしない)
+    python tools/build.py --lint       # 書式・相互参照・表記ルールを検査し、警告があれば終了コード 1
     python tools/build.py --run        # 未実行・変更ありのレシピを実行して出力を埋め込む
     python tools/build.py --run -k bm25  # スラッグに bm25 を含むレシピだけ実行
     python tools/build.py --run --force  # すべて再実行
@@ -398,11 +399,81 @@ def slugify(title: str) -> str:
     return s.replace(" ", "-")
 
 
+def _sanitize_prose(text: str) -> str:
+    """インラインコードと Markdown リンクの URL を除いて、散文の検査用テキストを作る。"""
+    # ASCII のみのコードは "CODE" に（(`oracle=True`) を検出するため）、日本語を含むコードは "日本語" に置換する
+    text = re.sub(r"`([^`]+)`", lambda m: "CODE" if m.group(1).isascii() else "日本語", text)
+    return re.sub(r"\]\([^)]+\)", "]", text)
+
+
+def _scan_quoted(text: str, start: int) -> tuple[str | None, int]:
+    """start 位置の '「' に対応する '」' までをネストを数えて取り出す。"""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "「":
+            depth += 1
+        elif text[i] == "」":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : i], i + 1
+    return None, len(text)
+
+
+def lint_chapters(chapters: list[tuple[str, str, list[Recipe]]]) -> list[str]:
+    """章タイトル・レシピタイトルの相互参照、全角括弧、非推奨パッケージを検査する。"""
+    warnings: list[str] = []
+    chap_titles = {ct for ct, _, _ in chapters}
+    recipe_titles = {r.title for _, _, rs in chapters for r in rs}
+    chap_ref_re = re.compile(r"「([^」]+)」の章")
+    recipe_ref_re = re.compile(r"(?:(?:この章|「[^」]+」の章|[^\s、。（「]+の章)の|(?:前|次)のレシピ)(?=「)")
+    fw_ascii_re = re.compile(r"（([\x20-\x7E]+)）")
+    fw_space_re = re.compile(r"（ | ）")
+
+    for ct, intro, rs in chapters:
+        chap_dir = rs[0].chapter_dir if rs else ct
+        prose_targets: list[tuple[str, str]] = [(f"{chap_dir} (intro)", intro)] if intro else []
+        for r in rs:
+            prose_targets.append((f"{r.ident} {r.slug} (title)", r.title))
+            for kind, src in r.cells:
+                if kind == "markdown":
+                    prose_targets.append((f"{r.ident} {r.slug}", src))
+                elif kind == "code":
+                    if "japanize-matplotlib" in src or "japanize_matplotlib" in src:
+                        warnings.append(f"{r.ident} {r.slug}: 非推奨の japanize-matplotlib が使われています")
+
+        for loc, raw in prose_targets:
+            prose = _sanitize_prose(raw)
+            for m in chap_ref_re.finditer(prose):
+                if m.group(1) not in chap_titles:
+                    warnings.append(f"{loc}: 章タイトルの参照が見つかりません: 「{m.group(1)}」")
+            for m in recipe_ref_re.finditer(prose):
+                pos = m.end()
+                while pos < len(prose):
+                    title, end = _scan_quoted(prose, pos)
+                    if title is None:
+                        warnings.append(f"{loc}: レシピ参照の括弧が閉じていません: {prose[pos:pos + 30]!r}")
+                        break
+                    if title not in recipe_titles:
+                        warnings.append(f"{loc}: レシピの参照が見つかりません: 「{title}」")
+                    nxt = re.match(r"^(?:[とや・、]?\s*)?(?=「)", prose[end:])
+                    if not nxt:
+                        break
+                    pos = end + nxt.end()
+            for m in fw_ascii_re.finditer(prose):
+                warnings.append(f"{loc}: ASCII のみに全角括弧が使われています: {m.group(0)}")
+            for m in fw_space_re.finditer(prose):
+                ctx = prose[max(0, m.start() - 10) : min(len(prose), m.end() + 10)].replace("\n", " ")
+                warnings.append(f"{loc}: 全角括弧の内側に空白があります: ...{ctx}...")
+
+    return warnings
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", action="store_true", help="レシピを実行して出力を埋め込む")
     ap.add_argument("--force", action="store_true", help="実行済みでも再実行する")
     ap.add_argument("--allow-cpu-for-gpu", action="store_true", help="CPU 環境でも gpu タグのレシピを実行する")
+    ap.add_argument("--lint", action="store_true", help="書式・相互参照・表記ルールを検査し、警告があれば終了コード 1 で終了する")
     ap.add_argument("-k", default="", help="スラッグまたは章ディレクトリ名の部分一致で絞り込む")
     ap.add_argument("-j", type=int, default=3, help="並列数")
     ap.add_argument("--timeout", type=int, default=1200)
@@ -464,6 +535,15 @@ def main() -> None:
 
     write_index(chapters)
     print(f"{len(recipes)} recipes / {len(chapters)} chapters")
+
+    warnings = lint_chapters(chapters)
+    for w in warnings:
+        print(f"lint: {w}", file=sys.stderr)
+    if args.lint:
+        if warnings:
+            print(f"lint: {len(warnings)} warnings", file=sys.stderr)
+            sys.exit(1)
+        print("lint: 0 warnings")
 
     failed = []
     if todo:

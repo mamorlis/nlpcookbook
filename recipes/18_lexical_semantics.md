@@ -762,7 +762,7 @@ import pandas as pd
 - 小さな LLM (Qwen3-4B-Instruct-2507) に 2 つの意味から選ばせると、例なしで 92%、8 例を見せて 95% だった。例なしでは「夜の仕事から足を洗いたい」を字義と、「有名な先生について習った」（付き従う）を機能表現と、「手を焼いた跡」を慣用と誤った。学習データを用意しなくてよい代わりに、表現ごとに 2 つの意味の説明を書く必要がある。
 - 検証の環境では、モデルを読み込み済みの状態で全体が約 1 分。Colab では BERT（約 0.4GB）と LLM（約 8GB） のダウンロードに数分かかる。LLM の比較のセルだけ GPU を多く使う（float16 で T4 に収まる）。
 - 語の意味を文脈から決める点で、前の「多義語の語義を文脈から判定する（語義曖昧性解消）」「文脈化ベクトルをクラスタリングして語義を自動で分ける（語義推定）」と同じ問題である。慣用句の辞書そのものを作るには、コーパス統計の章の「よく使われる言い回し（コロケーション）を抽出する」のように、よく一緒に現れる語の組を集めて候補にする方法がある（ただしコロケーションには「雨が降る」のように字義どおりのものも多い）。
-- 日本語の慣用句コーパス OpenMWE（Hashimoto and Kawahara, 2008）は、慣用句 146 個の約 10 万例に慣用・字義のラベルを付けたもの。文字コードは EUC-JP。利用条件は BSD 3 条項に似た再配布可のライセンスで、Web の文を集めたものなので削除の依頼があれば利用者にも削除を求めるとされている。tohoku-nlp/bert-base-japanese-v3 と Qwen3-4B-Instruct-2507 は Apache 2.0、fugashi は MIT、unidic-lite はパッケージが MIT で、同梱の UniDic は GPL、LGPL、BSD から選べる。
+- 日本語の慣用句コーパス OpenMWE (Hashimoto and Kawahara, 2008) は、慣用句 146 個の約 10 万例に慣用・字義のラベルを付けたもの。文字コードは EUC-JP。利用条件は BSD 3 条項に似た再配布可のライセンスで、Web の文を集めたものなので削除の依頼があれば利用者にも削除を求めるとされている。tohoku-nlp/bert-base-japanese-v3 と Qwen3-4B-Instruct-2507 は Apache 2.0、fugashi は MIT、unidic-lite はパッケージが MIT で、同梱の UniDic は GPL、LGPL、BSD から選べる。
 
 ## 時代別のコーパスを作って頻度が変わった単語を調べる {diachronic_corpus}
 
@@ -1101,7 +1101,7 @@ for t in ["原子", "同志", "活動", "放送"]:
 3 つ以上の時代にわたって、ある単語の使われ方がいつ変わったのかを見たい。時代ごとのモデルの位置合わせをせずに済ませたい。
 
 ```python
-!pip install -q datasets fugashi unidic-lite gensim japanize-matplotlib
+!pip install -q datasets fugashi unidic-lite gensim matplotlib-fontja
 ```
 
 ```python
@@ -1156,7 +1156,7 @@ for w in ["原子", "同志", "言葉"]:
 ```
 
 ```python
-import japanize_matplotlib
+import matplotlib_fontja
 import matplotlib.pyplot as plt
 
 labels = [f"{a}-{b - 1}" for a, b in PERIODS]

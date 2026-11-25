@@ -1,6 +1,6 @@
 # 意味解析
 
-「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。章の後半では、これらの部品を組み合わせてニュースから出来事を抜き出して時間順に並べるイベント抽出（小さな LLM による JSON 抽出との比較）と、含意関係認識の分類器の学習、仮説文だけで学習したモデルで分かるデータの偏りを扱う。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
+「誰が何をどうした」「それは何を指すか」「2 つの文はどうつながるか」を取り出す。構文の一歩先の解析。関係の抽出では、学習済みモデルの利用と、関係分類器の学習を扱う。章の後半では、含意関係認識の分類器の学習・仮説文だけで学習したモデルで分かるデータの偏りを扱い、最後にこれらの部品を組み合わせてニュースから出来事を抜き出して時間順に並べるイベント抽出（小さな LLM による JSON 抽出との比較）に取り組む。語義の判定は「語の意味と意味の変化」の章、文を一階述語論理の式に変換するレシピは付録の「仕組みを理解するための実装」にある。開発サイクルの設計や遠距離教師あり学習による関係抽出データの構築については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 1 章も参照。
 
 ## 日本語の述語項構造解析をする (KWJA) {pas_kwja}
 
@@ -724,6 +724,154 @@ print(pd.crosstab(pd.Series(gold, name="正解"), pd.Series(pred, name="予測 (
 - 「また」「そして」のような付加の表現はコーパスでは最も多い（3325 組）が、モデルの予測はそこに偏っていない。補正後はむしろ例示の予測が多く（120 件）、原因・理由の 24 組と言い換えの 20 組が例示と予測されている。正解率だけでなく、混同行列や関係ごとの再現率も見る。
 - 注釈付きのデータとしては、英語の Penn Discourse Treebank、日本語の京都大学ウェブ文書リードコーパスの談話関係注釈がある。精度が必要なら、これらで分類器を学習する。
 
+## 文ペアを分類する BERT を学習し、仮説文だけでどこまで当たるかを調べる（含意関係認識、JNLI） {nli_hypothesis_only gpu}
+
+前提文と仮説文の組を「含意・矛盾・中立」に分類する BERT を、日本語の JNLI でファインチューニングしたい。あわせて、前提文を見せずに仮説文だけで学習したモデル (hypothesis-only) がどこまで当たるかを調べ、データの作り方に由来する偏りを確かめる。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+import pandas as pd
+
+# JGLUE の JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）。画像キャプション (YJ Captions) の文を前提文にして、仮説文をクラウドソーシングで書いたもの
+gh = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jnli-v1.3/"
+data = {s: pd.read_json(gh + f"{s}-v1.3.json", lines=True) for s in ["train", "valid", "test"]}
+LABELS = ["entailment", "contradiction", "neutral"]
+for s, d in data.items():
+    print(f"{s:5} {len(d):6} 組  ラベルの割合:", d["label"].value_counts(normalize=True).round(3).to_dict())
+pd.set_option("display.width", 200)
+print(data["train"][["sentence1", "sentence2", "label"]].head(4).to_string(index=False))
+```
+
+```python
+import numpy as np
+import torch
+from datasets import Dataset
+from sklearn.metrics import accuracy_score, f1_score
+from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
+                          PrinterCallback, Trainer, TrainingArguments, set_seed)
+from transformers.utils import logging
+
+import datasets
+logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
+logging.disable_progress_bar(); datasets.disable_progress_bars()   # 重みの読み込みと map の進み具合のバーを出さない
+datasets.logging.set_verbosity_error()   # map に渡す関数をキャッシュ用にハッシュできないという警告を出さない
+model_name = "tohoku-nlp/bert-base-japanese-v3"   # Apache 2.0
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
+
+# 2 文を渡すと [CLS] 前提文 [SEP] 仮説文 [SEP] の 1 列になり、token_type_ids で 1 文目 (0) と 2 文目 (1) を区別する。
+# transformers 5 系のこのトークナイザー (BertJapaneseTokenizer) は、既定では token_type_ids を返さない（全部 0 とみなされる）ので、明示して返させる
+enc = tokenizer("男性がギターを弾いている。", "人が楽器を演奏している。", return_token_type_ids=True)
+print(tokenizer.convert_ids_to_tokens(enc["input_ids"]))
+print(enc["token_type_ids"])
+
+def encode(df, inputs):
+    """inputs: "pair" は前提文と仮説文の組、"hypothesis" は仮説文だけ、"premise" は前提文だけ"""
+    ds = Dataset.from_dict({"p": list(df["sentence1"]), "h": list(df["sentence2"]), "label": [LABELS.index(l) for l in df["label"]]})
+    def tok(b):
+        if inputs == "pair":
+            return tokenizer(b["p"], b["h"], truncation=True, max_length=128, return_token_type_ids=True)
+        return tokenizer(b["h"] if inputs == "hypothesis" else b["p"], truncation=True, max_length=64)
+    return ds.map(tok, batched=True, remove_columns=["p", "h"])
+
+def train(inputs, epochs=2):
+    set_seed(0)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name, num_labels=3, id2label=dict(enumerate(LABELS)), label2id={l: i for i, l in enumerate(LABELS)})
+    args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=3e-5, weight_decay=0.01, warmup_steps=0.1,
+                             per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
+                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
+    trainer = Trainer(model=model, args=args, train_dataset=encode(data["train"], inputs), data_collator=DataCollatorWithPadding(tokenizer))
+    trainer.remove_callback(PrinterCallback)   # 学習の終わりに train_runtime などの辞書を print しない
+    trainer.train()
+    return trainer
+```
+
+```python
+import time
+
+gold = np.array([LABELS.index(l) for l in data["test"]["label"]])
+print("多数派（中立）を答え続けたとき: 正解率", round(float((gold == 2).mean()), 3))
+preds, trainers = {}, {}
+for inputs, title in [("pair", "前提文 + 仮説文"), ("hypothesis", "仮説文だけ"), ("premise", "前提文だけ")]:
+    t = time.time()
+    trainers[inputs] = train(inputs)
+    preds[inputs] = trainers[inputs].predict(encode(data["test"], inputs)).predictions.argmax(-1)
+    print(f"{title:10} 正解率 {accuracy_score(gold, preds[inputs]):.3f}  macro-F1 {f1_score(gold, preds[inputs], average='macro'):.3f}"
+          f"  （学習と予測に {time.time() - t:.0f} 秒）")
+print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
+```
+
+```python
+# 仮説文だけで当たる例（易しい例）と当たらない例（難しい例）に評価データを分けて、組で学習したモデルの正解率を比べる
+easy = preds["hypothesis"] == gold
+for name, mask in [("仮説文だけで当たる", easy), ("仮説文だけでは外れる", ~easy)]:
+    print(f"{name}: {mask.sum():4} 組  組で学習したモデルの正解率 {(preds['pair'][mask] == gold[mask]).mean():.3f}")
+print(pd.crosstab(pd.Series([LABELS[g] for g in gold], name="正解"),
+                  pd.Series([LABELS[p] for p in preds["hypothesis"]], name="仮説文だけのモデルの予測")).to_string())
+```
+
+```python
+# 偏りの正体を探す: 仮説文に出てくる語のうち、特定のラベルに偏るもの（学習データで 50 回以上出る語）
+from collections import Counter
+from fugashi import Tagger
+
+tagger = Tagger()
+train_df = data["train"]
+words = [set((w.feature.lemma or w.surface).split("-")[0] for w in tagger(h)) for h in train_df["sentence2"]]   # 「サーフィン-surfing」→「サーフィン」
+prior = train_df["label"].value_counts(normalize=True)
+count, by_label = Counter(), {l: Counter() for l in LABELS}
+for ws, label in zip(words, train_df["label"]):
+    count.update(ws); by_label[label].update(ws)
+rows = [(w, l, by_label[l][w] / count[w], count[w]) for w in count if count[w] >= 50 for l in LABELS]
+table = pd.DataFrame(rows, columns=["語", "ラベル", "割合", "出現数"])
+table["全体の割合との比"] = table["割合"] / table["ラベル"].map(prior)
+for l in LABELS:
+    top = table[table["ラベル"] == l].nlargest(6, "全体の割合との比")
+    print(f"{l:13} (全体 {prior[l]:.2f}):", ", ".join(f"{r.語}({r.割合:.2f}, {r.出現数})" for r in top.itertuples()))
+
+# 前提文と仮説文の文字の重なり（仮説文の文字のうち、前提文にも出てくるものの割合）。ラベルごとの平均
+overlap = [len(set(h) & set(p)) / len(set(h)) for p, h in zip(train_df["sentence1"], train_df["sentence2"])]
+print("文字の重なり:", pd.Series(overlap).groupby(train_df["label"]).mean().round(3).to_dict())
+
+# 文体: JNLI の文はほとんどが です・ます調。そうでない仮説文のラベルの割合
+polite = train_df["sentence2"].str.contains("(?:ます|です)。$")
+print(f"仮説文が です・ます調でない組: {(~polite).sum()} 組 ({(~polite).mean():.2f})  ラベルの割合:",
+      train_df["label"][~polite].value_counts(normalize=True).round(2).to_dict())
+```
+
+```python
+# 同じ仮説文に別の前提文を付けて、2 つのモデルの予測を比べる。仮説文だけのモデルは前提文を見ないので、予測は変わらない
+def predict(trainer, inputs, pairs):
+    df = pd.DataFrame(pairs, columns=["sentence1", "sentence2"]).assign(label="neutral")
+    return [LABELS[i] for i in trainer.predict(encode(df, inputs)).predictions.argmax(-1)]
+
+# JNLI に合わせて です・ます調で書く。最後の 2 組は、同じ内容を常体（〜ている）にしたもの
+pairs = [("男性が公園でギターを弾いています。", "男性が楽器を演奏しています。"),
+         ("男性が部屋で本を読んでいます。", "男性が楽器を演奏しています。"),
+         ("犬が芝生の上を走っています。", "犬は寝ていません。"),
+         ("犬が芝生の上で寝ています。", "犬は寝ていません。"),
+         ("女性がキッチンで料理をしています。", "女性が家族のために夕食を作っています。"),
+         ("女性が夕食を作り、家族が待っています。", "女性が家族のために夕食を作っています。"),
+         ("男性が公園でギターを弾いている。", "男性が楽器を演奏している。"),
+         ("女性が夕食を作り、家族が待っている。", "女性が家族のために夕食を作っている。")]
+for (p, h), a, b in zip(pairs, predict(trainers["pair"], "pair", pairs), predict(trainers["hypothesis"], "hypothesis", pairs)):
+    print(f"組: {a:13} 仮説文だけ: {b:13} {p} → {h}")
+```
+
+- 含意関係認識（自然言語推論、NLI）は、2 つの文の組を 3 クラスに分ける文ペアの分類である。トークナイザーに 2 文を渡せば `[CLS] 前提文 [SEP] 仮説文 [SEP]` の 1 列になり、あとはテキスト分類の章の「BERT をファインチューニングして文書分類する (Trainer)」（記事の題名と本文の組を分類する）と同じ流れで学習できる。学習済みの NLI モデルで推論するだけなら、Transformers の章の「2 つの文の含意関係を判定する (NLI)」を使う。ここでは自分で学習し、入力を変えたモデルと比べることで、データの性質を調べている。
+- `tohoku-nlp/bert-base-japanese-v3` のトークナイザー (BertJapaneseTokenizer) は、transformers 5 系では既定で `token_type_ids` を返さない（`model_input_names` に入っていない）。そのまま学習すると、前提文と仮説文の区別が [SEP] だけになる。`return_token_type_ids=True` を付けて返させる。
+- 結果は、組で学習したモデルが正解率 0.881 (macro-F1 0.842)、仮説文だけが 0.576 (0.454)、前提文だけが 0.572 (0.396) で、多数派の中立を答え続けると 0.544 だった。仮説文だけで多数派を上回り、macro-F1 では差がはっきりする。ただし英語の SNLI で報告されている差（多数派 0.34 に対して仮説文だけで 0.67 前後、Gururangan ら 2018、Poliak ら 2018）よりずっと小さく、JNLI の仮説文の偏りは比較的弱い。前提文だけでも同じくらい当たるのは、JNLI では同じ 2 文が前後を入れ替えて別の組としても入っており（データの先頭の 4 組を参照）、前提文と仮説文の役割がはっきり分かれていないためと考えられる。
+- 仮説文だけのモデルが当てた評価データ 1444 組では、組で学習したモデルの正解率は 0.939、外した 1064 組では 0.802 だった。仮説文だけで解ける組は易しい組で、評価データ全体の正解率にはその分の「下駄」が含まれる。Gururangan ら (2018) は、この方法で評価データを易しい組と難しい組に分け、難しい組で報告することを提案している。
+- 偏りの手がかりとしては、否定（「ず」「ない」「無い」）や「だけ」を含む仮説文が矛盾に、「複数」や色・位置の語を含む仮説文が中立に偏る。クラウドソーシングで「矛盾する文を書いて」と頼むと否定を使いやすい、といった書き方の癖がそのまま手がかりになる。文字の重なりも、中立だけが低い（0.57、含意と矛盾は 0.78）。前提文にない情報を足すと中立になるからである。
+- 文体の偏りもある。JNLI の文のほとんどは です・ます調だが、そうでない仮説文（学習データの 8%）は 54% が矛盾である。最後のセルでも、同じ内容を常体（〜ている）にした組は、組で学習したモデルでも矛盾と判定された。自分の入力を分類するときは、学習データの文体に合わせるか、学習データに文体の違う例を入れる。
+- 学習時間は、検証の GPU で 3 つのモデルを合わせて約 4 分（学習データ 20,073 組、2 エポック、系列長は組が 128、1 文が 64）、GPU メモリの最大は 5.1 GB だった。T4 ではその 2〜3 倍の見込み。ここでは学習率やエポック数を調整しておらず、評価データで 1 回だけ測っている。調整するなら valid を使う。同じ設定でも実行のたびに正解率が 0.005 程度ぶれる。
+- JNLI の入手: 公式の配布は GitHub の yahoojapan/JGLUE で、v1.3 には train・valid・test がそろっている（JGLUE の論文の時点では test は非公開だった）。HF の `shunk031/JGLUE` は読み込みスクリプト (JGLUE.py) の形式で、`trust_remote_code=True` が必要だった。datasets 4 系は読み込みスクリプトを実行しないので、そのままでは読めない。ここでは公式の JSON Lines を直接読んでいる。
+- データは JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）、モデルは `tohoku-nlp/bert-base-japanese-v3` (Apache 2.0)。JNLI の別の使い方（英語のデータから日本語への言語間転移）は、テキスト分類の章の「英語のデータだけで学習して日本語を分類する（ゼロショットの言語間転移）」にある。
+
 ## ニュースから出来事（誰が・いつ・どこで・何をした）を抜き出して時間順に並べる（イベント抽出） {event_extraction gpu}
 
 ニュース記事から「誰が・何を・どこで・いつ・どうした」の組を出来事ごとに取り出し、起きた順に並べたい。この章の部品（述語項構造、時間表現の正規化、否定・モダリティ）を組み合わせる方法と、小さなオープン LLM に JSON で抜き出させる方法を、手作りの小さな正解で比べる。
@@ -953,151 +1101,3 @@ for title, events in [("部品の組み合わせ", pipe_events), ("LLM", llm_eve
 - 実用では、両方を組み合わせるとよい。解析器で述語と格を漏れなく取り出し、受け身の扱いや、時の基準の解決、事実性の判定のような文脈が必要なところを LLM に確かめさせる。LLM の出力は、大規模言語モデルの章の「LLM の出力から JSON を取り出して検証する」のように、形式と値（日付の書式、事実性のラベル）を検証してから使う。
 - 検証の GPU では、KWJA のセルが 1 分弱、LLM のセルがモデルの読み込みを含めて 1 分余り（初回のモデルのダウンロードは別）で、LLM の GPU メモリの最大は 8.2 GB だった。`kwja` を入れると transformers などのバージョンが入れ替わるので、すでに transformers を読み込んでいたらランタイムを再起動する。
 - 記事は架空のもの。KWJA と ja-timex は MIT ライセンス、Qwen3-4B-Instruct-2507 は Apache 2.0。
-
-## 文ペアを分類する BERT を学習し、仮説文だけでどこまで当たるかを調べる（含意関係認識、JNLI） {nli_hypothesis_only gpu}
-
-前提文と仮説文の組を「含意・矛盾・中立」に分類する BERT を、日本語の JNLI でファインチューニングしたい。あわせて、前提文を見せずに仮説文だけで学習したモデル（hypothesis-only）がどこまで当たるかを調べ、データの作り方に由来する偏りを確かめる。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-import pandas as pd
-
-# JGLUE の JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）。画像キャプション (YJ Captions) の文を前提文にして、仮説文をクラウドソーシングで書いたもの
-gh = "https://raw.githubusercontent.com/yahoojapan/JGLUE/main/datasets/jnli-v1.3/"
-data = {s: pd.read_json(gh + f"{s}-v1.3.json", lines=True) for s in ["train", "valid", "test"]}
-LABELS = ["entailment", "contradiction", "neutral"]
-for s, d in data.items():
-    print(f"{s:5} {len(d):6} 組  ラベルの割合:", d["label"].value_counts(normalize=True).round(3).to_dict())
-pd.set_option("display.width", 200)
-print(data["train"][["sentence1", "sentence2", "label"]].head(4).to_string(index=False))
-```
-
-```python
-import numpy as np
-import torch
-from datasets import Dataset
-from sklearn.metrics import accuracy_score, f1_score
-from transformers import (AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding,
-                          PrinterCallback, Trainer, TrainingArguments, set_seed)
-from transformers.utils import logging
-
-import datasets
-logging.set_verbosity_error()   # 分類用の層を新しく初期化したという報告を出さない
-logging.disable_progress_bar(); datasets.disable_progress_bars()   # 重みの読み込みと map の進み具合のバーを出さない
-datasets.logging.set_verbosity_error()   # map に渡す関数をキャッシュ用にハッシュできないという警告を出さない
-model_name = "tohoku-nlp/bert-base-japanese-v3"   # Apache 2.0
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-BF16 = torch.cuda.get_device_capability()[0] >= 8      # bfloat16 は Ampere (A100, L4) 以降。T4 では float16 を使う
-
-# 2 文を渡すと [CLS] 前提文 [SEP] 仮説文 [SEP] の 1 列になり、token_type_ids で 1 文目 (0) と 2 文目 (1) を区別する。
-# transformers 5 系のこのトークナイザー (BertJapaneseTokenizer) は、既定では token_type_ids を返さない（全部 0 とみなされる）ので、明示して返させる
-enc = tokenizer("男性がギターを弾いている。", "人が楽器を演奏している。", return_token_type_ids=True)
-print(tokenizer.convert_ids_to_tokens(enc["input_ids"]))
-print(enc["token_type_ids"])
-
-def encode(df, inputs):
-    """inputs: "pair" は前提文と仮説文の組、"hypothesis" は仮説文だけ、"premise" は前提文だけ"""
-    ds = Dataset.from_dict({"p": list(df["sentence1"]), "h": list(df["sentence2"]), "label": [LABELS.index(l) for l in df["label"]]})
-    def tok(b):
-        if inputs == "pair":
-            return tokenizer(b["p"], b["h"], truncation=True, max_length=128, return_token_type_ids=True)
-        return tokenizer(b["h"] if inputs == "hypothesis" else b["p"], truncation=True, max_length=64)
-    return ds.map(tok, batched=True, remove_columns=["p", "h"])
-
-def train(inputs, epochs=2):
-    set_seed(0)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name, num_labels=3, id2label=dict(enumerate(LABELS)), label2id={l: i for i, l in enumerate(LABELS)})
-    args = TrainingArguments(output_dir="out", num_train_epochs=epochs, learning_rate=3e-5, weight_decay=0.01, warmup_steps=0.1,
-                             per_device_train_batch_size=32, per_device_eval_batch_size=128, save_strategy="no",
-                             logging_strategy="no", report_to="none", bf16=BF16, fp16=not BF16, seed=0)
-    trainer = Trainer(model=model, args=args, train_dataset=encode(data["train"], inputs), data_collator=DataCollatorWithPadding(tokenizer))
-    trainer.remove_callback(PrinterCallback)   # 学習の終わりに train_runtime などの辞書を print しない
-    trainer.train()
-    return trainer
-```
-
-```python
-import time
-
-gold = np.array([LABELS.index(l) for l in data["test"]["label"]])
-print("多数派（中立）を答え続けたとき: 正解率", round(float((gold == 2).mean()), 3))
-preds, trainers = {}, {}
-for inputs, title in [("pair", "前提文 + 仮説文"), ("hypothesis", "仮説文だけ"), ("premise", "前提文だけ")]:
-    t = time.time()
-    trainers[inputs] = train(inputs)
-    preds[inputs] = trainers[inputs].predict(encode(data["test"], inputs)).predictions.argmax(-1)
-    print(f"{title:10} 正解率 {accuracy_score(gold, preds[inputs]):.3f}  macro-F1 {f1_score(gold, preds[inputs], average='macro'):.3f}"
-          f"  （学習と予測に {time.time() - t:.0f} 秒）")
-print(f"GPU メモリの最大: {torch.cuda.max_memory_allocated() / 1e9:.1f} GB")
-```
-
-```python
-# 仮説文だけで当たる例（易しい例）と当たらない例（難しい例）に評価データを分けて、組で学習したモデルの正解率を比べる
-easy = preds["hypothesis"] == gold
-for name, mask in [("仮説文だけで当たる", easy), ("仮説文だけでは外れる", ~easy)]:
-    print(f"{name}: {mask.sum():4} 組  組で学習したモデルの正解率 {(preds['pair'][mask] == gold[mask]).mean():.3f}")
-print(pd.crosstab(pd.Series([LABELS[g] for g in gold], name="正解"),
-                  pd.Series([LABELS[p] for p in preds["hypothesis"]], name="仮説文だけのモデルの予測")).to_string())
-```
-
-```python
-# 偏りの正体を探す: 仮説文に出てくる語のうち、特定のラベルに偏るもの（学習データで 50 回以上出る語）
-from collections import Counter
-from fugashi import Tagger
-
-tagger = Tagger()
-train_df = data["train"]
-words = [set((w.feature.lemma or w.surface).split("-")[0] for w in tagger(h)) for h in train_df["sentence2"]]   # 「サーフィン-surfing」→「サーフィン」
-prior = train_df["label"].value_counts(normalize=True)
-count, by_label = Counter(), {l: Counter() for l in LABELS}
-for ws, label in zip(words, train_df["label"]):
-    count.update(ws); by_label[label].update(ws)
-rows = [(w, l, by_label[l][w] / count[w], count[w]) for w in count if count[w] >= 50 for l in LABELS]
-table = pd.DataFrame(rows, columns=["語", "ラベル", "割合", "出現数"])
-table["全体の割合との比"] = table["割合"] / table["ラベル"].map(prior)
-for l in LABELS:
-    top = table[table["ラベル"] == l].nlargest(6, "全体の割合との比")
-    print(f"{l:13} (全体 {prior[l]:.2f}):", ", ".join(f"{r.語}({r.割合:.2f}, {r.出現数})" for r in top.itertuples()))
-
-# 前提文と仮説文の文字の重なり（仮説文の文字のうち、前提文にも出てくるものの割合）。ラベルごとの平均
-overlap = [len(set(h) & set(p)) / len(set(h)) for p, h in zip(train_df["sentence1"], train_df["sentence2"])]
-print("文字の重なり:", pd.Series(overlap).groupby(train_df["label"]).mean().round(3).to_dict())
-
-# 文体: JNLI の文はほとんどが です・ます調。そうでない仮説文のラベルの割合
-polite = train_df["sentence2"].str.contains("(?:ます|です)。$")
-print(f"仮説文が です・ます調でない組: {(~polite).sum()} 組 ({(~polite).mean():.2f})  ラベルの割合:",
-      train_df["label"][~polite].value_counts(normalize=True).round(2).to_dict())
-```
-
-```python
-# 同じ仮説文に別の前提文を付けて、2 つのモデルの予測を比べる。仮説文だけのモデルは前提文を見ないので、予測は変わらない
-def predict(trainer, inputs, pairs):
-    df = pd.DataFrame(pairs, columns=["sentence1", "sentence2"]).assign(label="neutral")
-    return [LABELS[i] for i in trainer.predict(encode(df, inputs)).predictions.argmax(-1)]
-
-# JNLI に合わせて です・ます調で書く。最後の 2 組は、同じ内容を常体（〜ている）にしたもの
-pairs = [("男性が公園でギターを弾いています。", "男性が楽器を演奏しています。"),
-         ("男性が部屋で本を読んでいます。", "男性が楽器を演奏しています。"),
-         ("犬が芝生の上を走っています。", "犬は寝ていません。"),
-         ("犬が芝生の上で寝ています。", "犬は寝ていません。"),
-         ("女性がキッチンで料理をしています。", "女性が家族のために夕食を作っています。"),
-         ("女性が夕食を作り、家族が待っています。", "女性が家族のために夕食を作っています。"),
-         ("男性が公園でギターを弾いている。", "男性が楽器を演奏している。"),
-         ("女性が夕食を作り、家族が待っている。", "女性が家族のために夕食を作っている。")]
-for (p, h), a, b in zip(pairs, predict(trainers["pair"], "pair", pairs), predict(trainers["hypothesis"], "hypothesis", pairs)):
-    print(f"組: {a:13} 仮説文だけ: {b:13} {p} → {h}")
-```
-
-- 含意関係認識（自然言語推論、NLI）は、2 つの文の組を 3 クラスに分ける文ペアの分類である。トークナイザーに 2 文を渡せば `[CLS] 前提文 [SEP] 仮説文 [SEP]` の 1 列になり、あとはテキスト分類の章の「BERT をファインチューニングして文書分類する (Trainer)」（記事の題名と本文の組を分類する）と同じ流れで学習できる。学習済みの NLI モデルで推論するだけなら、Transformers の章の「2 つの文の含意関係を判定する (NLI)」を使う。ここでは自分で学習し、入力を変えたモデルと比べることで、データの性質を調べている。
-- `tohoku-nlp/bert-base-japanese-v3` のトークナイザー (BertJapaneseTokenizer) は、transformers 5 系では既定で `token_type_ids` を返さない（`model_input_names` に入っていない）。そのまま学習すると、前提文と仮説文の区別が [SEP] だけになる。`return_token_type_ids=True` を付けて返させる。
-- 結果は、組で学習したモデルが正解率 0.881（macro-F1 0.842）、仮説文だけが 0.576（0.454）、前提文だけが 0.572（0.396）で、多数派の中立を答え続けると 0.544 だった。仮説文だけで多数派を上回り、macro-F1 では差がはっきりする。ただし英語の SNLI で報告されている差（多数派 0.34 に対して仮説文だけで 0.67 前後、Gururangan ら 2018、Poliak ら 2018）よりずっと小さく、JNLI の仮説文の偏りは比較的弱い。前提文だけでも同じくらい当たるのは、JNLI では同じ 2 文が前後を入れ替えて別の組としても入っており（データの先頭の 4 組を参照）、前提文と仮説文の役割がはっきり分かれていないためと考えられる。
-- 仮説文だけのモデルが当てた評価データ 1444 組では、組で学習したモデルの正解率は 0.939、外した 1064 組では 0.802 だった。仮説文だけで解ける組は易しい組で、評価データ全体の正解率にはその分の「下駄」が含まれる。Gururangan ら (2018) は、この方法で評価データを易しい組と難しい組に分け、難しい組で報告することを提案している。
-- 偏りの手がかりとしては、否定（「ず」「ない」「無い」）や「だけ」を含む仮説文が矛盾に、「複数」や色・位置の語を含む仮説文が中立に偏る。クラウドソーシングで「矛盾する文を書いて」と頼むと否定を使いやすい、といった書き方の癖がそのまま手がかりになる。文字の重なりも、中立だけが低い（0.57、含意と矛盾は 0.78）。前提文にない情報を足すと中立になるからである。
-- 文体の偏りもある。JNLI の文のほとんどは です・ます調だが、そうでない仮説文（学習データの 8%）は 54% が矛盾である。最後のセルでも、同じ内容を常体（〜ている）にした組は、組で学習したモデルでも矛盾と判定された。自分の入力を分類するときは、学習データの文体に合わせるか、学習データに文体の違う例を入れる。
-- 学習時間は、検証の GPU で 3 つのモデルを合わせて約 4 分（学習データ 20,073 組、2 エポック、系列長は組が 128、1 文が 64）、GPU メモリの最大は 5.1 GB だった。T4 ではその 2〜3 倍の見込み。ここでは学習率やエポック数を調整しておらず、評価データで 1 回だけ測っている。調整するなら valid を使う。同じ設定でも実行のたびに正解率が 0.005 程度ぶれる。
-- JNLI の入手: 公式の配布は GitHub の yahoojapan/JGLUE で、v1.3 には train・valid・test がそろっている（JGLUE の論文の時点では test は非公開だった）。HF の `shunk031/JGLUE` は読み込みスクリプト (JGLUE.py) の形式で、`trust_remote_code=True` が必要だった。datasets 4 系は読み込みスクリプトを実行しないので、そのままでは読めない。ここでは公式の JSON Lines を直接読んでいる。
-- データは JNLI v1.3（ヤフーと早稲田大学、CC BY-SA 4.0）、モデルは `tohoku-nlp/bert-base-japanese-v3` (Apache 2.0)。JNLI の別の使い方（英語のデータから日本語への言語間転移）は、テキスト分類の章の「英語のデータだけで学習して日本語を分類する（ゼロショットの言語間転移）」にある。

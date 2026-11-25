@@ -1,6 +1,6 @@
 # RAG（検索拡張生成）
 
-手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典・評価まで、CPU で動く小型モデルで一通り組み立てる（数十問を何度も生成する「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」「LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG）」は GPU を使う）。検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策と、LLM に検索語を決めさせて検索を繰り返させ、複数の文書をたどって答えさせる方法（エージェント型 RAG）も扱う。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
+手元の文書を検索して LLM に答えさせる。分割・検索・生成・出典から、LLM に検索語を決めさせて検索を繰り返させ、複数の文書をたどって答えさせる方法（エージェント型 RAG）、評価、検索した文書に紛れ込んだ指示（プロンプトインジェクション）への対策まで扱う。基本の組み立てと評価の多くは CPU で動く小型モデルで試せる（マルチホップの検索や数十問を何度も生成する「LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG）」「RAG 全体を評価して設定を比べる」「RAG の失敗を検索と生成に切り分けて分析する」「プロンプトインジェクションを再現し、防御で成功率がどう変わるか測る」は GPU を使う）。検索の部品（BM25、意味検索、ハイブリッド、リランキング）は「検索」の章を参照。RAG を組み込んだ対話とマルチターン文脈補完（クエリ書き換え・出典付与・閾値による回答拒否）の基礎演習については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 4 章も参照。
 
 ## 検索した文書を LLM に渡して答えさせる（最小の RAG） {rag_minimal}
 
@@ -455,6 +455,200 @@ for q in ["カレーはいくらですか？", "明日の東京の天気は？",
 - 断る指示がなくても断れることはある（ここでもアレルギーの質問には「その有無は不明です」と答えた）。ただ、言い方は毎回まちまちで、一般論を付け足して長くなることもある。指示があると「わかりません」と言い切るので、断ったかどうかを機械的に判定しやすい。
 - しきい値はモデルごとに違う（E5 は無関係な文でも 0.7 台後半が出る）。答えがある質問とない質問の例を用意して、分布を見て決める。
 - 「わかりません」と言わせすぎると、答えられる質問まで断るようになる。断るべき質問と答えるべき質問の両方で評価する。
+
+## LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG） {rag_agent gpu}
+
+「『ダイヤモンドは砕けない』の作者がデビューした年は？」のように、1 つ目の文書で分かったこと（作者は荒木飛呂彦）を使って 2 つ目の文書を引かないと答えられない質問（マルチホップ QA）がある。質問文のまま 1 回検索するだけでは 2 つ目の文書に届きにくい。LLM に「次に何を検索するか」を決めさせて検索を繰り返させ、1 回だけ検索する RAG と正解率と検索回数で比べたい。
+
+```python
+!pip install -q bitsandbytes
+```
+
+```python
+import json, re, time, unicodedata, urllib.request
+import numpy as np
+import pandas as pd
+import torch
+from huggingface_hub import hf_hub_download
+from sentence_transformers import SentenceTransformer
+
+# 質問と導出: JEMHopQA の訓練データ。2 つの記事をたどる「構成問題」のうち、時間がたっても答えが変わらないものを使う
+url = "https://raw.githubusercontent.com/aiishii/JEMHopQA/main/corpus_ver1.2/train_ver1.2.json"
+jem = json.load(urllib.request.urlopen(url))
+# 記事: llm-jp-longbench-JEMHop が各質問に付けた Wikipedia の 2 記事（改行と内部リンクを除いたウィキテキスト、約 100MB）
+ctx = pd.read_csv(hf_hub_download("llm-jp/llm-jp-longbench-JEMHop", "jemhop_with_context.csv", repo_type="dataset")).set_index("qid")["context"]
+
+def clean(text):
+    """ウィキテキストの残りを読める文にする。脚注などのテンプレートを消し、基礎情報（infobox）は「｜項目：値」の形にする"""
+    text = re.sub(r"[a-z\-]+\s*=\s*\"[^\"]*\"\s*\|?", "", text)                       # 表の style="..." などの属性
+    for _ in range(3):
+        text = re.sub(r"\{\{(?:R|efn|Efn|Sfn|Refnest|refnest|仮リンク|要出典|Lang|lang)\|[^{}]*\}\}|\{\{[^{}|=]{0,30}\}\}", "", text)
+    text = re.sub(r"\|\s*[^|=}]{1,20}?\s*=\s*(?=\||\}\})", "", text)                   # 基礎情報の空の項目
+    text = re.sub(r"\|\s*([^|=}]{1,20}?)\s*=\s*", r"｜\1：", text)
+    return re.sub(r"\s+", " ", re.sub(r"\{\||\|\}|\|-|\{\{|\}\}|!!?", " ", text)).strip()
+
+def split(text, size=300):
+    """文（。）と基礎情報の項目（｜）の切れ目で、size 文字程度のチャンクにまとめる"""
+    chunks, cur = [], ""
+    for u in re.split(r"(?<=[。｜])", text):
+        if cur and len(cur) + len(u) > size:
+            chunks.append(cur); cur = ""
+        cur += u
+    return [c[:2 * size] for c in chunks + [cur] if c.strip()]
+
+norm = lambda s: re.sub(r"[\s、。「」『』()（）]", "", unicodedata.normalize("NFKC", s))
+questions = [q for q in jem if q["type"] == "compositional" and not q["time_dependent"] and len(q["derivations"]) == 2
+             and q["qid"] in ctx.index and norm(q["answer"]) in norm(clean(ctx[q["qid"]]))]   # 答えが記事に書かれている問題だけ
+questions = [questions[i] for i in np.random.default_rng(0).permutation(len(questions))[:40]]
+
+chunks, cid, own = [], {}, {}
+for q in questions:      # 40 問の記事をまとめて 1 つの検索対象にする（同じチャンクは 1 つにまとめる）。own は質問ごとの自分の記事のチャンク
+    own[q["qid"]] = set()
+    for c in split(clean(ctx[q["qid"]])):
+        if c not in cid:
+            cid[c] = len(chunks); chunks.append(c)
+        own[q["qid"]].add(cid[c])
+embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+c_emb = embedder.encode(["passage: " + c for c in chunks], normalize_embeddings=True, batch_size=128, show_progress_bar=False)
+
+def search(query, k=3):
+    sims = c_emb @ embedder.encode("query: " + query, normalize_embeddings=True)
+    return sims.argsort()[::-1][:k].tolist()
+
+print(len(questions), "問 /", len(chunks), "チャンク")
+print(questions[0]["question"], "→", questions[0]["answer"], "\n  導出:", questions[0]["derivations"])
+```
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+name = "Qwen/Qwen3-4B-Instruct-2507"   # Apache 2.0。ツール呼び出しに対応したチャットテンプレートを持つ。4 ビットに量子化して約 4GB で動かす
+tokenizer = AutoTokenizer.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, device_map="auto", quantization_config=BitsAndBytesConfig(
+    load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)).eval()
+
+@torch.no_grad()
+def generate(messages, tools=None, max_new_tokens=100):
+    inputs = tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
+    # </tool_call> でいったん止め、検索結果を返してから次の判断に進ませる
+    out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, stop_strings=["</tool_call>"],
+                         tokenizer=tokenizer, pad_token_id=tokenizer.eos_token_id)
+    # <tool_call> は特殊トークンなので、skip_special_tokens=True で復号すると消えてしまう。終わりの記号だけを取り除く
+    text = tokenizer.decode(out[0, inputs["input_ids"].shape[1]:])
+    return re.sub(r"<\|im_end\|>|<\|endoftext\|>", "", text).strip()
+```
+
+```python
+ANSWER_RULE = "答えは語句だけを短く書いてください（例:「1986年」「稲城市」）。"
+
+def closed_book(question):
+    """比較用: 検索せずにモデルの知識だけで答える"""
+    return generate([{"role": "user", "content": question + "\n" + ANSWER_RULE}]), []
+
+def rag_once(question, k=3):
+    """1 回だけ検索する RAG: 質問文のまま検索し、上位 k 件を渡して答えさせる"""
+    ids = search(question, k)
+    context = "\n".join(f"[{i}] {chunks[i]}" for i in ids)
+    prompt = f"以下の資料に基づいて質問に答えてください。{ANSWER_RULE}\n\n# 資料\n{context}\n\n# 質問\n{question}"
+    return generate([{"role": "user", "content": prompt}]), [{"query": question, "ids": ids}]
+
+def search_wikipedia(query: str) -> str:
+    """日本語 Wikipedia の記事の断片を検索し、関連する上位 3 件を返す。
+
+    Args:
+        query: 検索語（調べたい人物・作品・地名などの名前と、知りたいこと）
+    """
+    return "\n".join(f"[{i}] {chunks[i]}" for i in search(query))
+
+SYS_AGENT = ("あなたは調べものの担当です。自分の知識では答えず、必ず search_wikipedia で検索し、検索結果に書かれたことだけを使って答えてください。"
+             "質問が「A の B の C は？」のように 2 段階になっているときは、まず「A の B」を検索して名前を突き止め、次にその名前で C を検索してください。"
+             "検索結果に答えが見つからないときは、検索語を変えて検索し直してください。1 回に呼び出すツールは 1 つだけにしてください。"
+             "答えがわかったら検索をやめて、" + ANSWER_RULE)
+
+def parse_call(text):
+    """<tool_call>{"name": ..., "arguments": {"query": ...}}</tool_call> から検索語を取り出す（小さなモデルはタグを付け忘れることがあるので、タグなしの JSON も受け付ける）"""
+    m = re.search(r'"name"\s*:\s*"search_wikipedia".*?"query"\s*:\s*"([^"]*)"', text, flags=re.DOTALL)
+    return m.group(1).strip() if m else None
+
+def rag_agent(question, max_searches=3):
+    """エージェント型 RAG: LLM が検索語を決めて検索を繰り返し、答えがわかったら検索せずに答える"""
+    messages = [{"role": "system", "content": SYS_AGENT}, {"role": "user", "content": question}]
+    trace = []
+    while True:
+        text = generate(messages, tools=[search_wikipedia], max_new_tokens=150)
+        query = parse_call(text)
+        if query is None:                                   # ツールを呼ばなければ、それが最終回答
+            return text, trace
+        if len(trace) == max_searches:                      # 上限に達したら、それまでの検索結果だけで答えさせる
+            messages.append({"role": "user", "content": "検索の回数の上限に達しました。これまでの検索結果だけを使って答えてください。" + ANSWER_RULE})
+            return generate(messages) + "（上限）", trace
+        ids = search(query)
+        trace.append({"query": query, "ids": ids})
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "search_wikipedia", "arguments": {"query": query}}}]})
+        messages.append({"role": "tool", "name": "search_wikipedia", "content": "\n".join(f"[{i}] {chunks[i]}" for i in ids)})
+
+q = questions[0]
+for method in [rag_once, rag_agent]:
+    ans, trace = method(q["question"])
+    print(f"--- {method.__name__}: {ans.replace(chr(10), ' ')[:80]}（正解: {q['answer']}）")
+    for t in trace:
+        print(f"  検索「{t['query']}」→ {[chunks[i][:24] for i in t['ids']]}")
+```
+
+```python
+def evaluate(method):
+    rows = []
+    for q in questions:
+        ans, trace = method(q["question"])
+        got = {i for t in trace for i in t["ids"]} & own[q["qid"]]
+        bridge = q["derivations"][0][2][0]                  # 1 段階目の答え（2 段階目の検索に使うべき名前）
+        rows.append({"質問": q["question"], "正解": q["answer"], "橋渡し": bridge, "回答": ans.replace("\n", " "),
+                     "正答": norm(q["answer"]) in norm(ans), "検索回数": len(trace), "チャンク数": sum(len(t["ids"]) for t in trace), "上限": ans.endswith("（上限）"),
+                     "答えの根拠を検索できた": any(norm(q["answer"]) in norm(chunks[i]) for i in got),
+                     "検索語": [t["query"] for t in trace], "橋渡しで検索": any(norm(bridge) in norm(t["query"]) for t in trace[1:])})
+    return pd.DataFrame(rows)
+
+# 40 問 × 4 通り。検証の GPU で 7 分程度（エージェントが 4 分）
+results = {}
+for label, method in [("検索なし", closed_book), ("1 回検索（3 件）", rag_once), ("1 回検索（9 件）", lambda q: rag_once(q, 9)),
+                      ("エージェント（上限 3 回、1 回 3 件）", rag_agent)]:
+    t0 = time.time(); results[label] = evaluate(method); print(f"{label}: {time.time() - t0:.0f} 秒")
+pd.DataFrame({k: {"正答率": df["正答"].mean(), "答えの根拠を検索できた割合": df["答えの根拠を検索できた"].mean(),
+                  "検索回数（平均）": df["検索回数"].mean(), "読ませたチャンク数（平均）": df["チャンク数"].mean()}
+              for k, df in results.items()}).T.round(3)
+```
+
+```python
+ag, once = results["エージェント（上限 3 回、1 回 3 件）"], results["1 回検索（3 件）"]
+print(f"エージェントだけ正解: {(ag['正答'] & ~once['正答']).sum()} 問 / 1 回検索（3 件）だけ正解: {(~ag['正答'] & once['正答']).sum()} 問")
+print("エージェントの検索回数の分布:", ag["検索回数"].value_counts().sort_index().to_dict())
+multi = ag[ag["検索回数"] >= 2]
+print(f"2 回以上検索した {len(multi)} 問のうち、2 回目以降の検索語に橋渡しの名前が入っていた割合: {multi['橋渡しで検索'].mean():.2f}")
+
+def failure(r):
+    if r["上限"]:
+        return "上限に達した"
+    if r["答えの根拠を検索できた"]:
+        return "根拠を読んだのに誤答"
+    return "途中で答えた（1 回の検索で根拠のないまま）" if r["検索回数"] <= 1 else "検索語が的外れ（根拠に届かず）"
+
+wrong = ag[~ag["正答"]].copy()
+wrong["失敗"] = wrong.apply(failure, axis=1)
+print("\n--- エージェントの誤答の内訳 ---\n" + wrong["失敗"].value_counts().to_string())
+for cat, g in wrong.groupby("失敗"):
+    for _, r in g.head(2).iterrows():
+        print(f"\n[{cat}] {r['質問']}（正解: {r['正解']}、橋渡し: {r['橋渡し']}）\n  検索語: {r['検索語']}\n  回答: {r['回答'][:70]}")
+```
+
+- エージェント型 RAG は、大規模言語モデルの章の「LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる」と同じループで作る。検索を 1 つのツール (`search_wikipedia`) として渡し、`</tool_call>` で生成を止めて検索結果を `role: "tool"` で返し、LLM がツールを呼ばずに答えたら終わる。上の例では、1 回だけの検索は河北省の記事しか拾えずに 1 段階目の答え（唐山市）を答えてしまったが、エージェントは 1 回目の検索で唐山市を突き止め、2 回目に「河北省 唐山市 市樹」と検索して正しく答えた。ReAct（Yao ら, 2023）や IRCoT（Trivedi ら, 2023）などが、推論と検索を交互に行うこの考え方の代表例。
+- 40 問の正答率は、検索なし 0.075、1 回検索（3 件）0.275、エージェント 0.475 だった。エージェントの検索は平均 1.55 回で、エージェントだけが正解した問題は 12 問、1 回検索（3 件）だけが正解した問題は 4 問。2 回以上検索した 20 問のうち 13 問 (0.65) で、2 回目以降の検索語に 1 段階目の答え（橋渡しの名前）が入っていた。
+- ただし、1 回の検索で 9 件渡すと 0.525 で、エージェント（読んだチャンクは平均 4.65 件）を上回った。検索対象が 3,580 チャンクと小さく、2 つ目の記事も質問文の言葉で上位に入ることが多いからである。エージェントは LLM を何度も呼ぶので時間もかかる（40 問で 211 秒。1 回検索は 55 秒）。まず渡す件数を増やす・リランキングするといった安い手を試し、それで届かない問題（検索対象が大きい、2 つ目の記事の名前が質問文にまったく出てこない）でエージェント型を使う。
+- エージェントの誤答 21 問の内訳は、途中で答えた 12、根拠を読んだのに誤答 6、検索語が的外れ 2、上限に達した 1。最も多いのは、1 回検索しただけで、2 段階目を調べずにもっともらしい値を答えるもの（「カップヌードルを販売している会社の創業年」に、日清食品の創業年ではなくカップヌードルの発売年の 1971 年を答えた）。検索語が的外れな例では、カルロス・ゴーンが 1974 年に卒業した大学（エコール・ポリテクニーク）ではなく出身高校の名前を検索語にしたり、推測した答え (1812) を検索語に入れたりしている。上限に達した例では、iPhone 11 の開発メーカーを Apple ではなく製造の委託先と思い込み、Foxconn と Pegatron を調べて上限の 3 回を使い切った。
+- 対策としては、答える前に「どの検索結果のどこに答えが書いてあるか」を引用させて、この章の「回答に出典を付けさせ、その出典を検証する」の方法で確かめる、引用できなければもう一度検索させる、質問を先に 2 つの小さな質問に分解させる、といった方法がある。モデルを大きくすると、途中で答えてしまうことは減る傾向がある。
+- 「根拠を読んだのに誤答」には判定の問題も混ざる。月光院の夫（徳川家宣）の生まれた「年号」を聞かれて 1662 年（寛文 2 年）と西暦で答えたものは、内容は合っているが文字列の照合では誤答になる。「答えの根拠を検索できた」も、正解の文字列を含むチャンクを拾ったかどうかで判定しているので、「A型」のような短い答えは別の人の記述に当たっても根拠ありと数える。40 問では 1 問で 2.5 ポイント動くので、差は目安として見る。
+- 小さなモデルは指示を守り切れない。Qwen2.5-1.5B-Instruct や Qwen3-1.7B では、検索せずに答えたり、`<tool_call>` のタグを付けずに JSON だけを書いたりして、エージェントは 1 回検索より悪くなった（`parse_call` がタグなしの JSON も受け付けるのはこのため）。日本語の質問に中国語の検索語を作ることもあった。
+- データは、JEMHopQA（Ishii ら, 2024）の訓練データの質問と導出、記事は llm-jp-longbench-JEMHop が各質問に付けた Wikipedia の記事で、どちらも CC BY-SA 4.0。答えが記事に書かれている構成問題から 40 問を選び、その記事をまとめて検索対象にした（JEMHopQA の比較問題は「どちらが早いか」のように 2 つの記事を並べて調べる問題で、ここでは使っていない）。モデルは Qwen3-4B-Instruct-2507 (Apache 2.0) と multilingual-e5-small (MIT)。
+- 時間とメモリ: 40 問 × 4 通りの評価は、検証の GPU で 4 ビットに量子化して 6 分程度（全体で 7 分程度。共有の GPU なので実行ごとに変わる）。GPU メモリの最大使用量は約 4GB で、T4 にも収まる。T4 ではこれより時間がかかる見込み。
 
 ## RAG の評価セットを用意する {rag_eval_dataset}
 
@@ -1174,197 +1368,3 @@ table[table["種類"] == "直接"].drop(columns="種類").astype({l: int for l i
 - 出力の検査まで重ねると成功率が最も低くなった（直接 0.06、間接 0.03）。ただし出力の検査は防御 3 の出力に重ねて測っただけで、単独の効果は分からない。ここで効いたのは、守るもの（合言葉）と混ざるもの（宣伝の定型句）があらかじめ分かっていたから。それでも、全角の「コスモス４２」と、定型句を含まない「スパークルソーダもおすすめです」はすり抜けた。前者は NFKC で正規化すれば止められるが、逆順、ひらがな、言い換えなどの抜け道はきりがない。
 - 完全には防げない前提で設計する。LLM は指示もデータも同じトークン列として読むので、両者の区別を仕組みで保証できない。秘密はプロンプトに入れない（入れた時点で漏れうる）、LLM にメールの送信やツールの実行などの権限を必要以上に与えない、外部の文書から作った出力は重要な操作の前に人が確かめる、といった、漏れても被害が小さくなる設計を優先する。
 - 成功の判定は文字列の照合なので、宣伝を断りつつ商品名に触れただけの回答も成功と数え、合言葉の一部だけを漏らした回答は数えない。正答の判定も文字列の照合で、漢数字や一部の言い換えは拾うようにしたが、想定外の言い回しは取りこぼし、正しい答えに余計な誤りを足した回答も正解と数えうる。件数も少なく、3B のモデルを貪欲法で 1 回ずつ生成しただけなので、割合は目安として見る（ここの数値は T4 と同じ float16 で生成したもの。bf16 の GPU では生成が変わり、数値がずれうる）。結果はモデルやプロンプトで大きく変わるので、実際に使うモデルで測り直す。トークナイザーを読み込んだあとの数行は、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
-
-## LLM に検索を繰り返させて、複数の文書をまたぐ質問に答えさせる（エージェント型 RAG） {rag_agent gpu}
-
-「『ダイヤモンドは砕けない』の作者がデビューした年は？」のように、1 つ目の文書で分かったこと（作者は荒木飛呂彦）を使って 2 つ目の文書を引かないと答えられない質問（マルチホップ QA）がある。質問文のまま 1 回検索するだけでは 2 つ目の文書に届きにくい。LLM に「次に何を検索するか」を決めさせて検索を繰り返させ、1 回だけ検索する RAG と正解率と検索回数で比べたい。
-
-```python
-!pip install -q bitsandbytes
-```
-
-```python
-import json, re, time, unicodedata, urllib.request
-import numpy as np
-import pandas as pd
-import torch
-from huggingface_hub import hf_hub_download
-from sentence_transformers import SentenceTransformer
-
-# 質問と導出: JEMHopQA の訓練データ。2 つの記事をたどる「構成問題」のうち、時間がたっても答えが変わらないものを使う
-url = "https://raw.githubusercontent.com/aiishii/JEMHopQA/main/corpus_ver1.2/train_ver1.2.json"
-jem = json.load(urllib.request.urlopen(url))
-# 記事: llm-jp-longbench-JEMHop が各質問に付けた Wikipedia の 2 記事（改行と内部リンクを除いたウィキテキスト、約 100MB）
-ctx = pd.read_csv(hf_hub_download("llm-jp/llm-jp-longbench-JEMHop", "jemhop_with_context.csv", repo_type="dataset")).set_index("qid")["context"]
-
-def clean(text):
-    """ウィキテキストの残りを読める文にする。脚注などのテンプレートを消し、基礎情報（infobox）は「｜項目：値」の形にする"""
-    text = re.sub(r"[a-z\-]+\s*=\s*\"[^\"]*\"\s*\|?", "", text)                       # 表の style="..." などの属性
-    for _ in range(3):
-        text = re.sub(r"\{\{(?:R|efn|Efn|Sfn|Refnest|refnest|仮リンク|要出典|Lang|lang)\|[^{}]*\}\}|\{\{[^{}|=]{0,30}\}\}", "", text)
-    text = re.sub(r"\|\s*[^|=}]{1,20}?\s*=\s*(?=\||\}\})", "", text)                   # 基礎情報の空の項目
-    text = re.sub(r"\|\s*([^|=}]{1,20}?)\s*=\s*", r"｜\1：", text)
-    return re.sub(r"\s+", " ", re.sub(r"\{\||\|\}|\|-|\{\{|\}\}|!!?", " ", text)).strip()
-
-def split(text, size=300):
-    """文（。）と基礎情報の項目（｜）の切れ目で、size 文字程度のチャンクにまとめる"""
-    chunks, cur = [], ""
-    for u in re.split(r"(?<=[。｜])", text):
-        if cur and len(cur) + len(u) > size:
-            chunks.append(cur); cur = ""
-        cur += u
-    return [c[:2 * size] for c in chunks + [cur] if c.strip()]
-
-norm = lambda s: re.sub(r"[\s、。「」『』()（）]", "", unicodedata.normalize("NFKC", s))
-questions = [q for q in jem if q["type"] == "compositional" and not q["time_dependent"] and len(q["derivations"]) == 2
-             and q["qid"] in ctx.index and norm(q["answer"]) in norm(clean(ctx[q["qid"]]))]   # 答えが記事に書かれている問題だけ
-questions = [questions[i] for i in np.random.default_rng(0).permutation(len(questions))[:40]]
-
-chunks, cid, own = [], {}, {}
-for q in questions:      # 40 問の記事をまとめて 1 つの検索対象にする（同じチャンクは 1 つにまとめる）。own は質問ごとの自分の記事のチャンク
-    own[q["qid"]] = set()
-    for c in split(clean(ctx[q["qid"]])):
-        if c not in cid:
-            cid[c] = len(chunks); chunks.append(c)
-        own[q["qid"]].add(cid[c])
-embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-c_emb = embedder.encode(["passage: " + c for c in chunks], normalize_embeddings=True, batch_size=128, show_progress_bar=False)
-
-def search(query, k=3):
-    sims = c_emb @ embedder.encode("query: " + query, normalize_embeddings=True)
-    return sims.argsort()[::-1][:k].tolist()
-
-print(len(questions), "問 /", len(chunks), "チャンク")
-print(questions[0]["question"], "→", questions[0]["answer"], "\n  導出:", questions[0]["derivations"])
-```
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-name = "Qwen/Qwen3-4B-Instruct-2507"   # Apache 2.0。ツール呼び出しに対応したチャットテンプレートを持つ。4 ビットに量子化して約 4GB で動かす
-tokenizer = AutoTokenizer.from_pretrained(name)
-model = AutoModelForCausalLM.from_pretrained(name, device_map="auto", quantization_config=BitsAndBytesConfig(
-    load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)).eval()
-
-@torch.no_grad()
-def generate(messages, tools=None, max_new_tokens=100):
-    inputs = tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, return_tensors="pt", return_dict=True).to(model.device)
-    # </tool_call> でいったん止め、検索結果を返してから次の判断に進ませる
-    out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, stop_strings=["</tool_call>"],
-                         tokenizer=tokenizer, pad_token_id=tokenizer.eos_token_id)
-    # <tool_call> は特殊トークンなので、skip_special_tokens=True で復号すると消えてしまう。終わりの記号だけを取り除く
-    text = tokenizer.decode(out[0, inputs["input_ids"].shape[1]:])
-    return re.sub(r"<\|im_end\|>|<\|endoftext\|>", "", text).strip()
-```
-
-```python
-ANSWER_RULE = "答えは語句だけを短く書いてください（例:「1986年」「稲城市」）。"
-
-def closed_book(question):
-    """比較用: 検索せずにモデルの知識だけで答える"""
-    return generate([{"role": "user", "content": question + "\n" + ANSWER_RULE}]), []
-
-def rag_once(question, k=3):
-    """1 回だけ検索する RAG: 質問文のまま検索し、上位 k 件を渡して答えさせる"""
-    ids = search(question, k)
-    context = "\n".join(f"[{i}] {chunks[i]}" for i in ids)
-    prompt = f"以下の資料に基づいて質問に答えてください。{ANSWER_RULE}\n\n# 資料\n{context}\n\n# 質問\n{question}"
-    return generate([{"role": "user", "content": prompt}]), [{"query": question, "ids": ids}]
-
-def search_wikipedia(query: str) -> str:
-    """日本語 Wikipedia の記事の断片を検索し、関連する上位 3 件を返す。
-
-    Args:
-        query: 検索語（調べたい人物・作品・地名などの名前と、知りたいこと）
-    """
-    return "\n".join(f"[{i}] {chunks[i]}" for i in search(query))
-
-SYS_AGENT = ("あなたは調べものの担当です。自分の知識では答えず、必ず search_wikipedia で検索し、検索結果に書かれたことだけを使って答えてください。"
-             "質問が「A の B の C は？」のように 2 段階になっているときは、まず「A の B」を検索して名前を突き止め、次にその名前で C を検索してください。"
-             "検索結果に答えが見つからないときは、検索語を変えて検索し直してください。1 回に呼び出すツールは 1 つだけにしてください。"
-             "答えがわかったら検索をやめて、" + ANSWER_RULE)
-
-def parse_call(text):
-    """<tool_call>{"name": ..., "arguments": {"query": ...}}</tool_call> から検索語を取り出す（小さなモデルはタグを付け忘れることがあるので、タグなしの JSON も受け付ける）"""
-    m = re.search(r'"name"\s*:\s*"search_wikipedia".*?"query"\s*:\s*"([^"]*)"', text, flags=re.DOTALL)
-    return m.group(1).strip() if m else None
-
-def rag_agent(question, max_searches=3):
-    """エージェント型 RAG: LLM が検索語を決めて検索を繰り返し、答えがわかったら検索せずに答える"""
-    messages = [{"role": "system", "content": SYS_AGENT}, {"role": "user", "content": question}]
-    trace = []
-    while True:
-        text = generate(messages, tools=[search_wikipedia], max_new_tokens=150)
-        query = parse_call(text)
-        if query is None:                                   # ツールを呼ばなければ、それが最終回答
-            return text, trace
-        if len(trace) == max_searches:                      # 上限に達したら、それまでの検索結果だけで答えさせる
-            messages.append({"role": "user", "content": "検索の回数の上限に達しました。これまでの検索結果だけを使って答えてください。" + ANSWER_RULE})
-            return generate(messages) + "（上限）", trace
-        ids = search(query)
-        trace.append({"query": query, "ids": ids})
-        messages.append({"role": "assistant", "content": "", "tool_calls": [{"type": "function", "function": {"name": "search_wikipedia", "arguments": {"query": query}}}]})
-        messages.append({"role": "tool", "name": "search_wikipedia", "content": "\n".join(f"[{i}] {chunks[i]}" for i in ids)})
-
-q = questions[0]
-for method in [rag_once, rag_agent]:
-    ans, trace = method(q["question"])
-    print(f"--- {method.__name__}: {ans.replace(chr(10), ' ')[:80]}（正解: {q['answer']}）")
-    for t in trace:
-        print(f"  検索「{t['query']}」→ {[chunks[i][:24] for i in t['ids']]}")
-```
-
-```python
-def evaluate(method):
-    rows = []
-    for q in questions:
-        ans, trace = method(q["question"])
-        got = {i for t in trace for i in t["ids"]} & own[q["qid"]]
-        bridge = q["derivations"][0][2][0]                  # 1 段階目の答え（2 段階目の検索に使うべき名前）
-        rows.append({"質問": q["question"], "正解": q["answer"], "橋渡し": bridge, "回答": ans.replace("\n", " "),
-                     "正答": norm(q["answer"]) in norm(ans), "検索回数": len(trace), "チャンク数": sum(len(t["ids"]) for t in trace), "上限": ans.endswith("（上限）"),
-                     "答えの根拠を検索できた": any(norm(q["answer"]) in norm(chunks[i]) for i in got),
-                     "検索語": [t["query"] for t in trace], "橋渡しで検索": any(norm(bridge) in norm(t["query"]) for t in trace[1:])})
-    return pd.DataFrame(rows)
-
-# 40 問 × 4 通り。検証の GPU で 7 分程度（エージェントが 4 分）
-results = {}
-for label, method in [("検索なし", closed_book), ("1 回検索（3 件）", rag_once), ("1 回検索（9 件）", lambda q: rag_once(q, 9)),
-                      ("エージェント（上限 3 回、1 回 3 件）", rag_agent)]:
-    t0 = time.time(); results[label] = evaluate(method); print(f"{label}: {time.time() - t0:.0f} 秒")
-pd.DataFrame({k: {"正答率": df["正答"].mean(), "答えの根拠を検索できた割合": df["答えの根拠を検索できた"].mean(),
-                  "検索回数（平均）": df["検索回数"].mean(), "読ませたチャンク数（平均）": df["チャンク数"].mean()}
-              for k, df in results.items()}).T.round(3)
-```
-
-```python
-ag, once = results["エージェント（上限 3 回、1 回 3 件）"], results["1 回検索（3 件）"]
-print(f"エージェントだけ正解: {(ag['正答'] & ~once['正答']).sum()} 問 / 1 回検索（3 件）だけ正解: {(~ag['正答'] & once['正答']).sum()} 問")
-print("エージェントの検索回数の分布:", ag["検索回数"].value_counts().sort_index().to_dict())
-multi = ag[ag["検索回数"] >= 2]
-print(f"2 回以上検索した {len(multi)} 問のうち、2 回目以降の検索語に橋渡しの名前が入っていた割合: {multi['橋渡しで検索'].mean():.2f}")
-
-def failure(r):
-    if r["上限"]:
-        return "上限に達した"
-    if r["答えの根拠を検索できた"]:
-        return "根拠を読んだのに誤答"
-    return "途中で答えた（1 回の検索で根拠のないまま）" if r["検索回数"] <= 1 else "検索語が的外れ（根拠に届かず）"
-
-wrong = ag[~ag["正答"]].copy()
-wrong["失敗"] = wrong.apply(failure, axis=1)
-print("\n--- エージェントの誤答の内訳 ---\n" + wrong["失敗"].value_counts().to_string())
-for cat, g in wrong.groupby("失敗"):
-    for _, r in g.head(2).iterrows():
-        print(f"\n[{cat}] {r['質問']}（正解: {r['正解']}、橋渡し: {r['橋渡し']}）\n  検索語: {r['検索語']}\n  回答: {r['回答'][:70]}")
-```
-
-- エージェント型 RAG は、大規模言語モデルの章の「LLM にツール（関数）を渡して呼び出させ、実行結果を戻して答えさせる」と同じループで作る。検索を 1 つのツール (`search_wikipedia`) として渡し、`</tool_call>` で生成を止めて検索結果を `role: "tool"` で返し、LLM がツールを呼ばずに答えたら終わる。上の例では、1 回だけの検索は河北省の記事しか拾えずに 1 段階目の答え（唐山市）を答えてしまったが、エージェントは 1 回目の検索で唐山市を突き止め、2 回目に「河北省 唐山市 市樹」と検索して正しく答えた。ReAct（Yao ら, 2023）や IRCoT（Trivedi ら, 2023）などが、推論と検索を交互に行うこの考え方の代表例。
-- 40 問の正答率は、検索なし 0.075、1 回検索（3 件）0.275、エージェント 0.475 だった。エージェントの検索は平均 1.55 回で、エージェントだけが正解した問題は 12 問、1 回検索（3 件）だけが正解した問題は 4 問。2 回以上検索した 20 問のうち 13 問 (0.65) で、2 回目以降の検索語に 1 段階目の答え（橋渡しの名前）が入っていた。
-- ただし、1 回の検索で 9 件渡すと 0.525 で、エージェント（読んだチャンクは平均 4.65 件）を上回った。検索対象が 3,580 チャンクと小さく、2 つ目の記事も質問文の言葉で上位に入ることが多いからである。エージェントは LLM を何度も呼ぶので時間もかかる（40 問で 211 秒。1 回検索は 55 秒）。まず渡す件数を増やす・リランキングするといった安い手を試し、それで届かない問題（検索対象が大きい、2 つ目の記事の名前が質問文にまったく出てこない）でエージェント型を使う。
-- エージェントの誤答 21 問の内訳は、途中で答えた 12、根拠を読んだのに誤答 6、検索語が的外れ 2、上限に達した 1。最も多いのは、1 回検索しただけで、2 段階目を調べずにもっともらしい値を答えるもの（「カップヌードルを販売している会社の創業年」に、日清食品の創業年ではなくカップヌードルの発売年の 1971 年を答えた）。検索語が的外れな例では、カルロス・ゴーンが 1974 年に卒業した大学（エコール・ポリテクニーク）ではなく出身高校の名前を検索語にしたり、推測した答え（1812）を検索語に入れたりしている。上限に達した例では、iPhone 11 の開発メーカーを Apple ではなく製造の委託先と思い込み、Foxconn と Pegatron を調べて上限の 3 回を使い切った。
-- 対策としては、答える前に「どの検索結果のどこに答えが書いてあるか」を引用させて、この章の「回答に出典を付けさせ、その出典を検証する」の方法で確かめる、引用できなければもう一度検索させる、質問を先に 2 つの小さな質問に分解させる、といった方法がある。モデルを大きくすると、途中で答えてしまうことは減る傾向がある。
-- 「根拠を読んだのに誤答」には判定の問題も混ざる。月光院の夫（徳川家宣）の生まれた「年号」を聞かれて 1662 年（寛文 2 年）と西暦で答えたものは、内容は合っているが文字列の照合では誤答になる。「答えの根拠を検索できた」も、正解の文字列を含むチャンクを拾ったかどうかで判定しているので、「A型」のような短い答えは別の人の記述に当たっても根拠ありと数える。40 問では 1 問で 2.5 ポイント動くので、差は目安として見る。
-- 小さなモデルは指示を守り切れない。Qwen2.5-1.5B-Instruct や Qwen3-1.7B では、検索せずに答えたり、`<tool_call>` のタグを付けずに JSON だけを書いたりして、エージェントは 1 回検索より悪くなった（`parse_call` がタグなしの JSON も受け付けるのはこのため）。日本語の質問に中国語の検索語を作ることもあった。
-- データは、JEMHopQA（Ishii ら, 2024）の訓練データの質問と導出、記事は llm-jp-longbench-JEMHop が各質問に付けた Wikipedia の記事で、どちらも CC BY-SA 4.0。答えが記事に書かれている構成問題から 40 問を選び、その記事をまとめて検索対象にした（JEMHopQA の比較問題は「どちらが早いか」のように 2 つの記事を並べて調べる問題で、ここでは使っていない）。モデルは Qwen3-4B-Instruct-2507 (Apache 2.0) と multilingual-e5-small (MIT)。
-- 時間とメモリ: 40 問 × 4 通りの評価は、検証の GPU で 4 ビットに量子化して 6 分程度（全体で 7 分程度。共有の GPU なので実行ごとに変わる）。GPU メモリの最大使用量は約 4GB で、T4 にも収まる。T4 ではこれより時間がかかる見込み。

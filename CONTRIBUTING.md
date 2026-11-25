@@ -12,10 +12,13 @@ pip install nbformat nbclient ipykernel   # 初回のみ
 # 2. ノートブックと目次を生成する（実行はしない）
 python tools/build.py
 
-# 3. 追加・変更したレシピを実行して、出力をノートブックに埋め込む
+# 3. 書式・相互参照・表記ルールを検査する（警告があれば終了コード 1）
+python tools/build.py --lint
+
+# 4. 追加・変更したレシピを実行して、出力をノートブックに埋め込む
 python tools/build.py --run -k スラッグ名
 
-# 4. recipes/ と notebooks/ と README.md をまとめてコミットする
+# 5. recipes/ と notebooks/ と README.md をまとめてコミットする
 ```
 
 `--run` は、コードが前回の実行時から変わっていないレシピを飛ばします。全部やり直すときは `--force` を付けます。

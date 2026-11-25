@@ -65,10 +65,6 @@ print(clf.predict([tagger.parse(new)]), clf.predict_proba([tagger.parse(new)]).m
 正解率だけでなく、クラスごとの適合率・再現率・F1 と、どのクラスをどのクラスに間違えたかを見たい。
 
 ```python
-!pip install -q matplotlib-fontja
-```
-
-```python
 import io, tarfile, urllib.request
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer

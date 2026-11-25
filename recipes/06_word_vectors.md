@@ -1,6 +1,6 @@
 # 単語ベクトル
 
-単語を数百次元のベクトルで表し、類似度やアナロジーを計算する。2 言語の単語ベクトルを線形写像で重ね合わせて、対訳語を引くレシピもある。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
+単語を数百次元のベクトルで表し、類似度・アナロジーの計算やバイアスの測定、2 言語の単語ベクトルを線形写像で重ね合わせて対訳語を引くレシピに加え、後半では単語ベクトルの平均による文ベクトルや Doc2Vec による文書ベクトルも扱う。文脈によって変わる単語ベクトル (BERT) は「Transformers の基本操作」の章を、共起行列から単語ベクトルを自分で作るレシピ（PPMI と SVD）は付録の「仕組みを理解するための実装」を参照。
 
 ## word2vec を自分のコーパスで学習する {word2vec_train}
 
@@ -274,86 +274,6 @@ for s, w in scores:
 - 値が負なら she 側、正なら he 側に寄っている。コーパス中の使われ方の偏りが、そのままベクトルに現れる。
 - 体系的に測るなら WEAT (Word Embedding Association Test)。バイアス除去 (debiasing) の研究も多いが、完全には除けないことが知られている。
 
-## 単語ベクトルの平均で文ベクトルを作る {avg_word_vectors}
-
-文や文書をベクトルにする最も手軽な方法として、含まれる単語のベクトルを平均したい。
-
-```python
-!pip install -q gensim
-```
-
-```python
-import re
-import gensim.downloader as api
-import numpy as np
-
-wv = api.load("glove-wiki-gigaword-100")
-
-def sent_vec(text):
-    words = [w for w in re.findall(r"[a-z]+", text.lower()) if w in wv]
-    return np.mean([wv[w] for w in words], axis=0) if words else np.zeros(wv.vector_size)
-
-def cos(a, b):
-    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-query = "How do I cook pasta?"
-docs = ["Boil the spaghetti in salted water for ten minutes.", "The stock market fell sharply today.",
-        "A recipe for making noodles at home.", "My cat sleeps all day on the sofa."]
-for d in sorted(docs, key=lambda d: -cos(sent_vec(query), sent_vec(d))):
-    print(f"{cos(sent_vec(query), sent_vec(d)):.3f}  {d}")
-```
-
-```python
-# SIF 風の重み付け: 高頻度語の重みを下げる (順位を頻度の代わりに使った簡易版)
-def weighted_vec(text, a=1e-3):
-    words = [w for w in re.findall(r"[a-z]+", text.lower()) if w in wv]
-    weights = [a / (a + 1 / (wv.key_to_index[w] + 2) / 10) for w in words]  # Zipf 則で順位から頻度を近似
-    return np.average([wv[w] for w in words], axis=0, weights=weights)
-
-for d in sorted(docs, key=lambda d: -cos(weighted_vec(query), weighted_vec(d))):
-    print(f"{cos(weighted_vec(query), weighted_vec(d)):.3f}  {d}")
-```
-
-- 語順は無視されるが、驚くほど強いベースライン。まずこれを試し、足りなければ文埋め込みモデル（文埋め込みとクラスタリングの章）に進む。
-- 単純平均は `the` `of` などの機能語に引っ張られて、どの文も似てしまう。ストップワード除去か頻度による重み付けが効く。
-
-## Doc2Vec で文書ベクトルを学習する {doc2vec}
-
-文書そのものにベクトルを割り当てて、似た文書を探したい（word2vec の文書版）。
-
-```python
-!pip install -q gensim
-```
-
-```python
-import nltk
-nltk.download("reuters", quiet=True)
-from nltk.corpus import reuters
-from gensim.models.doc2vec import Doc2Vec, TaggedDocument
-
-ids = reuters.fileids()[:3000]
-docs = [TaggedDocument([w.lower() for w in reuters.words(i) if w.isalpha()], [n]) for n, i in enumerate(ids)]
-# workers=1 にすると、seed を固定したときに毎回同じ結果になる（スレッドが 2 つ以上だと処理の順番で結果が変わる）
-model = Doc2Vec(docs, vector_size=100, window=5, min_count=3, epochs=20, dm=0, workers=1, seed=0)
-```
-
-```python
-q = 0
-print("クエリ:", reuters.categories(ids[q]), " ".join(docs[q].words[:25]))
-for n, sim in model.dv.most_similar(q, topn=3):
-    print(f"{sim:.2f}", reuters.categories(ids[n]), " ".join(docs[n].words[:25]))
-```
-
-```python
-# 学習に使っていない新しい文書のベクトルを推論する
-vec = model.infer_vector("oil prices rose after opec agreed to cut production".split(), epochs=50)
-for n, sim in model.dv.most_similar([vec], topn=3):
-    print(f"{sim:.2f}", reuters.categories(ids[n]), " ".join(docs[n].words[:15]))
-```
-
-- `dm=1` が PV-DM（文脈語 + 文書ベクトルで予測）、`dm=0` が PV-DBOW（文書ベクトルだけで単語を予測）。ここでは `dm=0` を使った。このデータでは `dm=1` にすると、上の推論の例で石油 (crude) の記事が上位に来なかった。
-- 現在は事前学習済みの文埋め込みモデルのほうが手軽で高精度なことが多い。ドメイン特化の大量文書がある場合の選択肢。
-
 ## 2 言語の単語ベクトルを線形写像で対応させて対訳語を引く {cross_lingual_word_vectors}
 
 日本語と英語で別々に学習した単語ベクトルを、少数の対訳ペアで学習した線形写像で重ね合わせ、辞書にない単語の訳語を引きたい。
@@ -477,3 +397,83 @@ for n in [300, 1000, 3000, len(pairs)]:
 - 英語側は大文字・小文字を区別した語彙なので、`Sunflower` のような大文字の変種が候補の枠を使う。MUSE の辞書は小文字だけ。
 - fastText の Common Crawl ベクトルは CC BY-SA 3.0。MUSE の対訳辞書は CC BY-NC 4.0（非商用に限る）。MUSE の日本語の辞書には、カタカナの人名や自動抽出による誤りが多く含まれる。
 - 対訳ペアなしで写像を学習する方法（敵対的学習、VecMap の自己学習）もある。同じ回転による位置合わせを、時代の違うコーパスどうしに使うのが語の意味と意味の変化の章の「時代別の単語ベクトルを位置合わせして意味が変わった単語を探す」。単語ではなく文を言語をまたいで探すなら、検索の章の「言語をまたいで検索する（クロスリンガル検索）」。
+
+## 単語ベクトルの平均で文ベクトルを作る {avg_word_vectors}
+
+文や文書をベクトルにする最も手軽な方法として、含まれる単語のベクトルを平均したい。
+
+```python
+!pip install -q gensim
+```
+
+```python
+import re
+import gensim.downloader as api
+import numpy as np
+
+wv = api.load("glove-wiki-gigaword-100")
+
+def sent_vec(text):
+    words = [w for w in re.findall(r"[a-z]+", text.lower()) if w in wv]
+    return np.mean([wv[w] for w in words], axis=0) if words else np.zeros(wv.vector_size)
+
+def cos(a, b):
+    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+query = "How do I cook pasta?"
+docs = ["Boil the spaghetti in salted water for ten minutes.", "The stock market fell sharply today.",
+        "A recipe for making noodles at home.", "My cat sleeps all day on the sofa."]
+for d in sorted(docs, key=lambda d: -cos(sent_vec(query), sent_vec(d))):
+    print(f"{cos(sent_vec(query), sent_vec(d)):.3f}  {d}")
+```
+
+```python
+# SIF 風の重み付け: 高頻度語の重みを下げる (順位を頻度の代わりに使った簡易版)
+def weighted_vec(text, a=1e-3):
+    words = [w for w in re.findall(r"[a-z]+", text.lower()) if w in wv]
+    weights = [a / (a + 1 / (wv.key_to_index[w] + 2) / 10) for w in words]  # Zipf 則で順位から頻度を近似
+    return np.average([wv[w] for w in words], axis=0, weights=weights)
+
+for d in sorted(docs, key=lambda d: -cos(weighted_vec(query), weighted_vec(d))):
+    print(f"{cos(weighted_vec(query), weighted_vec(d)):.3f}  {d}")
+```
+
+- 語順は無視されるが、驚くほど強いベースライン。まずこれを試し、足りなければ文埋め込みモデル（文埋め込みとクラスタリングの章）に進む。
+- 単純平均は `the` `of` などの機能語に引っ張られて、どの文も似てしまう。ストップワード除去か頻度による重み付けが効く。
+
+## Doc2Vec で文書ベクトルを学習する {doc2vec}
+
+文書そのものにベクトルを割り当てて、似た文書を探したい（word2vec の文書版）。
+
+```python
+!pip install -q gensim
+```
+
+```python
+import nltk
+nltk.download("reuters", quiet=True)
+from nltk.corpus import reuters
+from gensim.models.doc2vec import Doc2Vec, TaggedDocument
+
+ids = reuters.fileids()[:3000]
+docs = [TaggedDocument([w.lower() for w in reuters.words(i) if w.isalpha()], [n]) for n, i in enumerate(ids)]
+# workers=1 にすると、seed を固定したときに毎回同じ結果になる（スレッドが 2 つ以上だと処理の順番で結果が変わる）
+model = Doc2Vec(docs, vector_size=100, window=5, min_count=3, epochs=20, dm=0, workers=1, seed=0)
+```
+
+```python
+q = 0
+print("クエリ:", reuters.categories(ids[q]), " ".join(docs[q].words[:25]))
+for n, sim in model.dv.most_similar(q, topn=3):
+    print(f"{sim:.2f}", reuters.categories(ids[n]), " ".join(docs[n].words[:25]))
+```
+
+```python
+# 学習に使っていない新しい文書のベクトルを推論する
+vec = model.infer_vector("oil prices rose after opec agreed to cut production".split(), epochs=50)
+for n, sim in model.dv.most_similar([vec], topn=3):
+    print(f"{sim:.2f}", reuters.categories(ids[n]), " ".join(docs[n].words[:15]))
+```
+
+- `dm=1` が PV-DM（文脈語 + 文書ベクトルで予測）、`dm=0` が PV-DBOW（文書ベクトルだけで単語を予測）。ここでは `dm=0` を使った。このデータでは `dm=1` にすると、上の推論の例で石油 (crude) の記事が上位に来なかった。
+- 現在は事前学習済みの文埋め込みモデルのほうが手軽で高精度なことが多い。ドメイン特化の大量文書がある場合の選択肢。
