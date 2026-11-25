@@ -1,6 +1,6 @@
 # 文法誤り訂正と文章校正
 
-学習者の作文を訂正する、擬似誤りデータで訂正モデルを学習する、訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5、参照なし評価）、日本語の文章の校正すべき箇所を指摘する、スペルミスを直す。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
+訂正箇所を取り出して分類・評価する（ERRANT、M2 形式、F0.5）、スペルミスを直す、学習者の作文を訂正する、擬似誤りデータを作って訂正モデルを学習する、参照なし評価や LLM で訂正の質を測る、誤り箇所の検出やフィードバックコメントの生成、日本語の文章の校正すべき箇所の指摘まで。リーダビリティ測定・語彙平易化・問題生成・自動採点は「言語教育・リーダビリティ・自動採点」の章を参照。文法誤り訂正や言語処理の応用については、姉妹編『[自然言語処理の教科書](https://github.com/mamorlis/nlpbook)』の第 3 章も参照。
 
 ## 2 つの文の違いを色付きで表示する {diff_highlight}
 
@@ -213,6 +213,255 @@ for name, hyp in systems.items():
 - 正しい訂正は 1 通りではない。参照が 1 つだけだと、妥当な別解（「very much → a lot」）が誤りとして数えられる。複数参照の場合は、文ごとに最も F 値が高くなる参照を選ぶ。
 - 流暢性まで含めた訂正の評価には GLEU や、参照なしの指標（IMPARA、SOME など）が使われる。
 
+## 英語のスペルミスをライブラリで直す (pyspellchecker) {spellcheck}
+
+タイプミスを含む英文から誤りを見つけ、修正候補を出したい。
+
+```python
+!pip install -q pyspellchecker
+```
+
+```python
+import re
+from spellchecker import SpellChecker
+
+spell = SpellChecker()
+text = "I recieved a wonderfull mesage from my freind yestarday about langauge procesing"
+words = re.findall(r"[a-z']+", text.lower())
+for w in spell.unknown(words):
+    print(w, "→", spell.correction(w), sorted(spell.candidates(w) or [])[:5])
+```
+
+```python
+def correct(text):
+    return re.sub(r"[A-Za-z']+", lambda m: spell.correction(m.group()) or m.group() if m.group().lower() in spell.unknown([m.group()]) else m.group(), text)
+
+print(correct(text))
+spell.word_frequency.load_words(["nlp", "tokenizer"])  # 専門用語を辞書に追加
+print(spell.unknown(["nlp", "tokenizer", "transformr"]))
+```
+
+- 編集距離と単語頻度に基づく Norvig 方式。文脈は見ないので `their/there` のような実在語の誤りは直せない。文脈を見る方法は、この章の「symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す」を参照。
+
+## symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す {spelling_correction}
+
+英文のつづりの誤りを、辞書にない語 (recieved) だけでなく、実在する別の語になってしまった誤り (a peace of cake) も含めて直したい。速い辞書引きで候補を出し、文脈に合う語をマスク言語モデルで選ぶ（1 語ずつ手軽に直すだけなら、この章の「英語のスペルミスをライブラリで直す (pyspellchecker)」）。
+
+```python
+!pip install -q symspellpy==6.10.2 pyspellchecker==0.9.1
+# 評価用: Peter Norvig が Birkbeck spelling error corpus (Roger Mitton) から取り出した (誤り, 正解) の組。ライセンスの記載はない
+!wget -nc -q https://norvig.com/spell-testset1.txt
+```
+
+```python
+import importlib.resources
+from symspellpy import SymSpell, Verbosity
+
+# 同梱の英語の辞書 (約 8 万語と頻度)。SymSpell の README によると、Google Books Ngram (CC BY 3.0) と SCOWL の両方にある語から作られている
+sym = SymSpell(max_dictionary_edit_distance=2)
+res = importlib.resources.files("symspellpy")
+sym.load_dictionary(str(res / "frequency_dictionary_en_82_765.txt"), term_index=0, count_index=1)
+sym.load_bigram_dictionary(str(res / "frequency_bigramdictionary_en_243_342.txt"), term_index=0, count_index=2)
+
+# 1 語ずつ: 編集距離が最も小さい候補を、頻度の高い順に返す
+for w in ["speling", "recieve", "definately", "inconvient", "teh", "peace"]:
+    print(w, "→", [(h.term, h.distance, h.count) for h in sym.lookup(w, Verbosity.CLOSEST, max_edit_distance=2)[:4]])
+
+# 文全体: 語の分割・結合の誤り (whereis, th elove) もまとめて直す
+for s in ["whereis th elove hehad dated forImuch of thepast", "I recieved a wonderfull mesage from my freind"]:
+    print(s, "\n →", sym.lookup_compound(s, max_edit_distance=2)[0].term)
+
+# 空白のない文字列を単語に分ける
+print(sym.word_segmentation("thequickbrownfoxjumpsoverthelazydog").corrected_string)
+```
+
+```python
+# 1 語ずつの訂正の正解率と速さを pyspellchecker と比べる
+import time
+from spellchecker import SpellChecker
+
+tests = [(wrong, right) for line in open("spell-testset1.txt") for right, wrongs in [line.strip().split(":")] for wrong in wrongs.split()]
+spell = SpellChecker()
+
+def by_symspell(w):
+    hits = sym.lookup(w, Verbosity.TOP, max_edit_distance=2)
+    return hits[0].term if hits else w
+
+def by_pyspellchecker(w):
+    return spell.correction(w) or w
+
+print(len(tests), "組 / 正解の語が symspellpy の辞書にない割合:", round(sum(r not in sym.words for _, r in tests) / len(tests), 3))
+for name, f in [("symspellpy", by_symspell), ("pyspellchecker", by_pyspellchecker)]:
+    t = time.perf_counter()
+    out = [f(w) for w, _ in tests]
+    sec = time.perf_counter() - t
+    acc = sum(o == r for o, (_, r) in zip(out, tests)) / len(tests)
+    print(f"{name}: 正解率 {acc:.3f} / {len(tests) / sec:.0f} 語/秒")
+    print("   誤りの例 (入力, 出力, 正解):", [(w, o, r) for o, (w, r) in zip(out, tests) if o != r][:8])
+```
+
+```python
+# 文脈を使う: symspellpy の候補 (元の語も含む) を、マスク言語モデルで文脈に合う順に並べ替える
+import re
+import torch
+from transformers import AutoModelForMaskedLM, AutoTokenizer
+
+torch.manual_seed(0)
+name = "distilbert-base-uncased"     # Apache-2.0。小文字にしてから扱う
+tokenizer = AutoTokenizer.from_pretrained(name)
+mlm = AutoModelForMaskedLM.from_pretrained(name).eval()
+
+def candidates(word, k=15):
+    """編集距離 2 までの辞書の語のうち、頻度の高い k 語 (短い語は距離 1 まで)。辞書にある元の語は必ず残す"""
+    hits = [h for h in sym.lookup(word, Verbosity.ALL, max_edit_distance=2) if h.distance <= 1 or len(word) >= 4]
+    cands = {h.term: h.distance for h in sorted(hits, key=lambda h: -h.count)[:k]}
+    if word in sym.words:
+        cands[word] = 0
+    return cands
+
+@torch.no_grad()
+def context_scores(words, i, cands):
+    """i 番目の語を各候補に置き換えたときの、その語の対数確率 (複数トークンの語は、自分と後ろのトークンを隠して 1 トークンずつ予測して足す)"""
+    left = tokenizer(" ".join(words[:i]), add_special_tokens=False)["input_ids"] if i else []
+    right = tokenizer(" ".join(words[i + 1:]), add_special_tokens=False)["input_ids"]
+    seqs, meta = [], []
+    for c in cands:
+        ids = tokenizer(c, add_special_tokens=False)["input_ids"]
+        for j in range(len(ids)):
+            span = ids[:j] + [tokenizer.mask_token_id] * (len(ids) - j)
+            seqs.append([tokenizer.cls_token_id] + left + span + right + [tokenizer.sep_token_id])
+            meta.append((c, 1 + len(left) + j, ids[j]))
+    batch = tokenizer.pad({"input_ids": seqs}, return_tensors="pt")
+    logp = mlm(**batch).logits.log_softmax(-1)
+    scores = dict.fromkeys(cands, 0.0)
+    for row, (c, pos, tok) in enumerate(meta):
+        scores[c] += float(logp[row, pos, tok])
+    return scores
+
+def correct_sentence(sentence, penalty=2.0, margin=2.0):
+    """左から 1 語ずつ直す。元の語から離れるほど減点し、辞書にある語は差が margin を超えたときだけ書き換える"""
+    words = sentence.lower().split()
+    for i, w in enumerate(words):
+        if not re.fullmatch(r"[a-z]+", w):
+            continue
+        cands = candidates(w)
+        if not cands or list(cands) == [w]:
+            continue
+        ctx = context_scores(words, i, cands)
+        total = {c: ctx[c] - penalty * d for c, d in cands.items()}
+        best = max(total, key=total.get)
+        if best != w and (w not in cands or total[best] > total[w] + margin):
+            words[i] = best
+    return " ".join(words)
+
+for s in ["I want a peace of cake .", "The whether is nice today .", "Their is a cat on the table .", "I like to read books ."]:
+    print(s, "→", correct_sentence(s))
+```
+
+```python
+# 手作りの文で比べる: 実在語の誤り (19 文)、辞書にない語の誤り (4 文)、誤りのない文 (12 文)
+# Colab の CPU で 1〜3 分
+data = """I want a peace of cake . || I want a piece of cake .
+He will except the offer . || He will accept the offer .
+She lives in a quite village . || She lives in a quiet village .
+The whether is nice today . || The weather is nice today .
+Their is a cat on the table . || There is a cat on the table .
+I need to buy some bred . || I need to buy some bread .
+Can you here me now ? || Can you hear me now ?
+I lost my keys and could not find then . || I lost my keys and could not find them .
+She is taller then her brother . || She is taller than her brother .
+We swam in the see . || We swam in the sea .
+Please turn of the light . || Please turn off the light .
+He new the answer . || He knew the answer .
+I have to brake the news to him . || I have to break the news to him .
+It is to cold to swim . || It is too cold to swim .
+I will meat you at the station . || I will meet you at the station .
+She road her bike to school . || She rode her bike to school .
+My farther is a doctor . || My father is a doctor .
+We had a grate time at the party . || We had a great time at the party .
+He has a dog and to cats . || He has a dog and two cats .
+I recieved a wonderfull mesage from my freind . || I received a wonderful message from my friend .
+The goverment anounced a new polcy . || The government announced a new policy .
+She is a very inteligent studnet . || She is a very intelligent student .
+I beleive this is the rigth answer . || I believe this is the right answer .
+I like to read books . || I like to read books .
+The cat sat on the mat . || The cat sat on the mat .
+She bought a new car last week . || She bought a new car last week .
+They went to the park after lunch . || They went to the park after lunch .
+He plays the piano very well . || He plays the piano very well .
+We are going to visit our grandparents . || We are going to visit our grandparents .
+The weather was cold , so we stayed home . || The weather was cold , so we stayed home .
+I think their idea is better than ours . || I think their idea is better than ours .
+Can you hear the birds singing ? || Can you hear the birds singing ?
+Please put the box over there . || Please put the box over there .
+He accepted the job offer . || He accepted the job offer .
+The quiet library is near the station . || The quiet library is near the station ."""
+pairs = [line.split(" || ") for line in data.split("\n")]
+kinds = ["実在語の誤り"] * 19 + ["辞書にない語の誤り"] * 4 + ["誤りなし"] * 12   # data の文の順
+known = set(sym.words)
+
+def words_of(s):
+    """記号を除いた小文字の語の列 (lookup_compound は記号を落とすので、記号を除いて比べる)"""
+    return re.findall(r"[a-z]+", s.lower())
+
+def is_word(w):
+    return re.fullmatch(r"[a-z]+", w) is not None
+
+def word_by_word_symspell(s):
+    """文脈を見ずに、symspellpy の辞書にない語だけを 1 語ずつ直す"""
+    return " ".join(by_symspell(w) if is_word(w) and w not in known else w for w in s.lower().split())
+
+def word_by_word_pyspellchecker(s):
+    """文脈を見ずに、pyspellchecker の辞書にない語だけを 1 語ずつ直す"""
+    return " ".join(by_pyspellchecker(w) if is_word(w) and spell.unknown([w]) else w for w in s.lower().split())
+
+def compound(s):
+    return sym.lookup_compound(" ".join(words_of(s)), max_edit_distance=2)[0].term
+
+systems = {"pyspellchecker (1 語ずつ)": word_by_word_pyspellchecker,
+           "symspellpy (1 語ずつ)": word_by_word_symspell,
+           "symspellpy の lookup_compound": compound,
+           "symspellpy + マスク言語モデル": correct_sentence}
+
+for sys_name, f in systems.items():
+    t = time.perf_counter()
+    n_err = {"実在語の誤り": 0, "辞書にない語の誤り": 0}
+    fixed = {"実在語の誤り": 0, "辞書にない語の誤り": 0}
+    miscorrected = wrong = 0
+    failures = []
+    for (src, ref), kind in zip(pairs, kinds):
+        s, r, out = words_of(src), words_of(ref), words_of(f(src))
+        if len(out) != len(s):
+            # 語の数が変わった (分割・結合した) 文は、誤りを直せず、正しい語を 1 語書き換えたと数える
+            if kind in n_err:
+                n_err[kind] += sum(a != b for a, b in zip(s, r))
+            wrong += 1
+            failures.append(" ".join(out))
+            continue
+        for a, o, b in zip(s, out, r):
+            if a != b:
+                n_err[kind] += 1
+                fixed[kind] += (o == b)
+                miscorrected += (o != b and o != a)
+            elif o != b:
+                wrong += 1                      # 正しい語を書き換えた
+        if out != r:
+            failures.append(" ".join(out))
+    sec = time.perf_counter() - t
+    detail = " / ".join(f"{k} {fixed[k]}/{n_err[k]}" for k in n_err)
+    print(f"{sys_name}: 直せた {sum(fixed.values())}/{sum(n_err.values())} 語 ({detail}) / 別の誤った語にした {miscorrected} / 正しい語を書き換えた {wrong} / {sec:.1f} 秒")
+    print("   直しきれなかった文の例:", failures[:4])
+```
+
+- この章の「英語のスペルミスをライブラリで直す (pyspellchecker)」は、編集距離と頻度で 1 語ずつ直す方法で、文脈を見ない。このレシピは候補を出す部分を symspellpy にし、選ぶ部分にマスク言語モデルを使って、実在する別の語になってしまった誤り（real-word error。peace → piece、whether → weather）も直す。
+- symspellpy は Wolf Garbe の SymSpell (C#) を Python に移したもので、MIT ライセンス。辞書の語から文字を削除した形をあらかじめ索引にしておき、入力からも削除した形を作って引くので、候補を速く引ける。同梱の辞書は SymSpell の README によると Google Books Ngram (CC BY 3.0) と SCOWL から作られている。`lookup_compound` は語の分割・結合の誤り（whereis、th elove）もまとめて直せる。
+- Norvig のテストセット（270 組、1 語ずつ）では、正解率は symspellpy が 0.744、pyspellchecker が 0.763 で、差は 5 語ほどなのでほぼ同じと見てよい。速さは大きく違い、この実行では symspellpy が毎秒約 1.5 万語、pyspellchecker が毎秒 16 語だった（pyspellchecker は編集距離 2 の文字列をすべて作って辞書と照合する）。大量の文書を処理するなら symspellpy がよい。誤りの例を見ると、失敗の傾向も 2 つで似ている。正解より近い語があればそちらを選び（contende → contend、symspellpy の juse → use）、同じ距離なら頻度の高い語を選ぶ（localy → local、symspellpy の proplen → people）。入力が実在語 (contended → contented) だと直せない。
+- 手作りの 35 文では、文脈を見ない 3 つの方法（lookup_compound も含む）はどれも、辞書にない語の誤り 11 語はすべて直せたが、実在語の誤り 19 語は 1 つも直せなかった。マスク言語モデルで選ぶと 30 語中 26 語（実在語の誤り 15/19、辞書にない語の誤り 11/11）を直し、誤りのない 12 文は 1 語も書き換えなかった。ただし文の数が少なく、減点 (`penalty`) としきい値 (`margin`) はこの 35 文を見ながら決めた値なので、自分のデータで確かめてから使う。
+- 直せなかった 4 語（bred → red、here → help、meat → get、road → had）は、どれも文としては自然だが意味の違う語に書き換えている。マスク言語モデルは「その位置に来やすい語」を選ぶので、よく使われる語に引き寄せられる。`margin` を大きくすると書き換えが減り、見逃しが増える。教育の場面では、自動で書き換えずに候補として示すほうが安全である。
+- 文脈を使う訂正は遅い。この実行では 2 コアの CPU で 35 文に 38 秒（1 文 1 秒ほど）かかり、symspellpy だけなら 0.1 秒以下だった。大量に処理するなら GPU を使う、取り違えやすい語の組（their / there、then / than など）だけを調べる、といった工夫がいる。
+- 小文字にしてから扱うので、大文字・小文字の情報は失われる。辞書にない語は、編集距離 2 以内に候補があれば必ずどれかに書き換えるので、固有名詞や専門用語は `sym.create_dictionary_entry("tokenizer", 1000)` のように辞書に足しておく。学習者のつづりの誤りは打ち間違いと傾向が違う（発音に引きずられる、母語の影響を受ける）ので、学習者の作文で確かめる。日本語では、スペル誤りにあたるのは誤変換や脱字である。日本語入力の章と、この章の「マスク言語モデルで誤りのありそうな箇所を見つける（文法誤り検出）」を参照。
+- 仕組みを自分で実装して確かめる版（編集距離 1・2 の候補を作り、頻度で選ぶ Norvig 方式）は、付録「仕組みを理解するための実装」の「編集距離と単語の頻度で英語のスペル誤りを訂正する（Norvig 方式を自分で実装）」にある。
+
 ## 学習済みモデルで英語の文法誤りを訂正する {gec_model_en}
 
 英語の文法誤り訂正を、公開されているファインチューニング済みモデルですぐに試したい。
@@ -296,6 +545,212 @@ for s in clean:
 - 誤りの種類と割合は、実際の学習者コーパスでの分布に合わせるほど効果が高い。ここの規則は最小限の例。
 - 逆翻訳（正しい文 → 誤り文を生成するモデル）や、LLM に誤りを書かせる方法もある。
 - こうして作った擬似データで T5 を学習し、少量の実データで続けて学習する例は、この章の「擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ）」にある。
+
+## 擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ） {gec_synthetic_train gpu}
+
+文法誤り訂正の学習データが少ない。正しい文に規則で誤りを入れた大量の擬似データで小さな系列変換モデル (T5) を学習し、少量の実データで続けて学習すると、どれだけ良くなるかを確かめたい。
+
+```python
+!pip install -q fugashi unidic-lite datasets
+```
+
+```python
+import gzip, random, re, urllib.request
+from datasets import load_dataset
+from fugashi import Tagger
+
+# 正しい文: 田中コーパス (EDRDG 配布版、CC BY)。Tatoeba の日英対訳の日本語側で、教科書の例文のような短い文
+raw = gzip.decompress(urllib.request.urlopen("https://www.edrdg.org/pub/Nihongo/examples.utf.gz").read()).decode("utf-8")
+clean = sorted({m.group(1) for m in re.finditer(r"^A: (.+?)\t", raw, re.M) if 8 <= len(m.group(1)) <= 40})
+random.Random(0).shuffle(clean)
+
+# この章の「規則で誤りを注入して GEC の擬似学習データを作る」と同じ規則（助詞の置換・脱落・余剰、活用語尾の誤り）
+tagger = Tagger()
+PARTICLES = ["が", "を", "に", "で", "は", "と", "へ", "の"]
+
+def corrupt(sentence, rng, p=0.15):
+    out = []
+    for w in tagger(sentence):
+        surface, pos1, pos2 = w.surface, w.feature.pos1, w.feature.pos2
+        if pos1 == "助詞" and pos2 in ("格助詞", "係助詞") and surface in PARTICLES and rng.random() < p:
+            r = rng.random()
+            if r < 0.6:
+                out.append(rng.choice([x for x in PARTICLES if x != surface]))   # 置換
+            elif r < 0.8:
+                pass                                                              # 脱落
+            else:
+                out += [surface, rng.choice(PARTICLES)]                           # 余剰
+        elif pos1 == "動詞" and w.feature.cForm and w.feature.cForm.startswith("連用形") and rng.random() < p:
+            out.append(w.feature.orthBase or surface)                             # 活用させずに辞書形のままにする
+        else:
+            out.append(surface)
+    return "".join(out)
+
+rng = random.Random(0)
+N_SYN = 20000
+synthetic = [(corrupt(s, rng, p=0.2), s) for s in clean[:N_SYN]]   # 誤りが入らなかった文も（同じ文, 同じ文）として残す
+print(len(clean), "文から", N_SYN, "組 / 誤りが入った割合", round(sum(a != b for a, b in synthetic) / N_SYN, 3))
+for noisy, ok in [x for x in synthetic if x[0] != x[1]][:4]:
+    print(f"   {noisy}  →  {ok}")
+
+# 実データ: JFLEG-JA の validation (711 文、訂正は各 4 通り)。先頭 100 文はこの章の「LLM で日本語の文法誤りを訂正して評価する」と同じ評価用、残りを学習に使う
+ds = load_dataset("ronantakizawa/jfleg-japanese", split="validation")
+test = ds.select(range(100))
+real = [(ex["sentence"], c) for ex in ds.select(range(100, len(ds))) for c in ex["corrections"]]
+print("実データ:", len(ds) - 100, "文 →", len(real), "組 / 評価", len(test), "文")
+print("評価の文が擬似データの正しい文にもある数:", len({c for ex in test for c in ex["corrections"]} & set(clean[:N_SYN])))
+```
+
+```python
+import difflib
+
+# この章の「文法誤り訂正を編集単位の F0.5 で評価する」と同じ集計（TP・FP・FN から P・R・F0.5）。
+# 編集は「LLM で日本語の文法誤りを訂正して評価する」と同じく文字単位の差分で作り、4 つの参照のうち F0.5 が最も高いものと比べる
+def edits(source, target):
+    ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
+    return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
+
+def counts(src, hyp, refs, beta=0.5):
+    """1 文の TP・FP・FN"""
+    h = edits(src, hyp)
+    r = max((edits(src, ref) for ref in refs),
+            key=lambda r: ((1 + beta ** 2) * len(h & r) / (len(h) + beta ** 2 * len(r) + 1e-9), -len(r)))
+    return len(h & r), len(h - r), len(r - h)
+
+def gec_score(sources, hypotheses, references, beta=0.5):
+    tp, fp, fn = map(sum, zip(*[counts(s, h, r) for s, h, r in zip(sources, hypotheses, references)]))
+    p = tp / (tp + fp) if tp + fp else 1.0
+    r = tp / (tp + fn) if tp + fn else 1.0
+    f = (1 + beta ** 2) * p * r / (beta ** 2 * p + r) if p + r else 0.0
+    return {"TP": tp, "FP": fp, "FN": fn, "P": round(p, 3), "R": round(r, 3), f"F{beta}": round(f, 3),
+            "変更なし": sum(s == h for s, h in zip(sources, hypotheses))}
+
+sources, references = test["sentence"], test["corrections"]
+results = {"何もしない": gec_score(sources, sources, references)}
+print(results)
+```
+
+```python
+import sentencepiece as spm
+import torch
+from huggingface_hub import hf_hub_download
+from tokenizers import decoders, models
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
+
+name = "sonoisa/t5-base-japanese-v1.1"     # 日本語の T5（約 2.5 億パラメータ）。CC BY-SA 4.0
+# 要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」と同じく、transformers 5 系で落ちる byte_fallback を戻す
+sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
+tokenizer = AutoTokenizer.from_pretrained(name)
+tokenizer.backend_tokenizer.model = models.Unigram(
+    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
+tokenizer.backend_tokenizer.decoder = decoders.Sequence(
+    [decoders.ByteFallback(), decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True)])
+
+MAX_LEN = 64
+def load_model():
+    set_seed(0)
+    return AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda")   # 学習するので float32 のまま
+
+def correct(model, texts, batch_size=50, num_beams=4):
+    model.eval()
+    outputs = []
+    for i in range(0, len(texts), batch_size):
+        x = tokenizer(list(texts[i:i + batch_size]), max_length=MAX_LEN, truncation=True, padding=True, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**x, max_new_tokens=MAX_LEN, num_beams=num_beams)
+        outputs += [s.strip() for s in tokenizer.batch_decode(out, skip_special_tokens=True)]
+    return outputs
+
+print("トークン数（擬似データの正しい文、最大）:", max(len(tokenizer(s)["input_ids"]) for s in clean[:2000]))
+```
+
+```python
+import time
+from datasets import Dataset, disable_progress_bars
+from transformers.utils import logging as hf_logging
+from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
+
+disable_progress_bars(); hf_logging.disable_progress_bar()
+BF16 = torch.cuda.get_device_capability()[0] >= 8      # T5 v1.1 は float16 で値があふれるので、T4 では float32 で学習する
+
+def train(model, pairs, epochs, lr, batch_size=32):
+    def encode(batch):
+        x = tokenizer(batch["src"], max_length=MAX_LEN, truncation=True)
+        x["labels"] = tokenizer(text_target=batch["tgt"], max_length=MAX_LEN, truncation=True)["input_ids"]
+        return x
+    data = Dataset.from_dict({"src": [a for a, _ in pairs], "tgt": [b for _, b in pairs]}).map(encode, batched=True, remove_columns=["src", "tgt"])
+    args = Seq2SeqTrainingArguments(
+        output_dir="t5-gec", num_train_epochs=epochs, per_device_train_batch_size=batch_size, learning_rate=lr,
+        warmup_steps=30, lr_scheduler_type="linear", weight_decay=0.01, logging_steps=100,
+        save_strategy="no", report_to="none", bf16=BF16, seed=0, disable_tqdm=True)
+    trainer = Seq2SeqTrainer(model=model, args=args, train_dataset=data,
+                             data_collator=DataCollatorForSeq2Seq(tokenizer, model=model), processing_class=tokenizer)
+    t0 = time.time()
+    trainer.train()
+    losses = [round(h["loss"], 3) for h in trainer.state.log_history if "loss" in h]
+    print(f"  {len(pairs)} 組 × {epochs} エポック: {time.time() - t0:.0f} 秒、損失 {losses[0]} → {losses[-1]}")
+
+outputs = {}
+
+# (1) 擬似データだけで学習する（2 万組 × 1 エポック）
+model = load_model()
+train(model, synthetic, epochs=1, lr=3e-4)
+outputs["擬似データだけ"] = correct(model, sources)
+
+# (2) (1) に続けて、実データ (約 2,400 組) で学習する
+train(model, real, epochs=3, lr=3e-4)
+outputs["擬似データ → 実データ"] = correct(model, sources)
+
+# (3) 比較: 擬似データを使わず、実データだけで学習する
+del model; torch.cuda.empty_cache()
+model = load_model()
+train(model, real, epochs=3, lr=3e-4)
+outputs["実データだけ"] = correct(model, sources)
+```
+
+```python
+import numpy as np
+import pandas as pd
+
+for label, hyps in outputs.items():
+    results[label] = gec_score(sources, hyps, references)
+print(pd.DataFrame(results).T.to_string())
+
+# 擬似データの誤りに近い文（2 字以内の置き換え・脱落・挿入だけで、いずれかの参照に直せる文。助詞や活用語尾の誤りが多い）と、それ以外に分けて見る
+def small_edits_only(ex):
+    return any(all(i2 - i1 <= 2 and len(t) <= 2 for i1, i2, t in edits(ex["sentence"], ref)) for ref in ex["corrections"])
+groups = [small_edits_only(ex) for ex in test]
+print("\n擬似データに近い誤りの文:", sum(groups), "/ それ以外:", len(groups) - sum(groups))
+for label, hyps in outputs.items():
+    f = [gec_score([s for s, g in zip(sources, groups) if g == want], [h for h, g in zip(hyps, groups) if g == want],
+                   [r for r, g in zip(references, groups) if g == want])["F0.5"] for want in (True, False)]
+    print(f"   {label:12}  近い {f[0]:.3f}  それ以外 {f[1]:.3f}")
+
+# 100 文なので差はぶれる。文を再標本化して F0.5 の差の 95% 信頼区間を見る（対応のあるブートストラップ）
+def f05(c):
+    tp, fp, fn = c.sum(0)
+    p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
+    return 1.25 * p * r / (0.25 * p + r) if p + r else 0.0
+c = {label: np.array([counts(s, h, r) for s, h, r in zip(sources, hyps, references)]) for label, hyps in outputs.items()}
+idx = np.random.default_rng(0).integers(0, len(sources), (1000, len(sources)))
+for a, b in [("擬似データ → 実データ", "実データだけ"), ("擬似データ → 実データ", "擬似データだけ")]:
+    d = [f05(c[a][k]) - f05(c[b][k]) for k in idx]
+    print(f"F0.5 の差（{a} − {b}）: {f05(c[a]) - f05(c[b]):+.3f}（95%CI {np.percentile(d, 2.5):+.3f}〜{np.percentile(d, 97.5):+.3f}）")
+
+for i in range(6):
+    print(f"\n{sources[i]}  （参照: {references[i][0]}）")
+    for label, hyps in outputs.items():
+        print(f"   {label:12} {hyps[i]}")
+```
+
+- 擬似データだけで学習したモデルは慎重で、100 文中 74 文を変えずに残した。適合率は 0.821 と高いが再現率は 0.176 で、F0.5 は 0.473。続けて実データ（JFLEG-JA の残り 611 文 × 4 通りの訂正）で学習すると F0.5 は 0.667 に上がった（差 +0.193、95% 信頼区間 +0.057〜+0.348）。擬似データを使わず実データだけで学習すると 0.600 で、擬似データで先に学習したほうが 0.067 高かった。ただし 95% 信頼区間は −0.001〜+0.142 で、100 文の評価では差があるとはっきりは言えない。
+- 誤りの種類で分けると、2 字以内の置き換え・挿入・脱落で直せる文（助詞や活用語尾の誤りが多い。78 文）では、擬似データだけで F0.5 0.525、それ以外の文（語の選び方や言い回しの誤り。22 文）では 0.323 だった。擬似データの規則にない種類の誤りは、実データで学習しないと直らない。擬似データの効果は、実データで学習したあとも、規則の誤りに近い文（0.760 対 0.665）のほうで大きかった。
+- 規則にある助詞の誤りでも、直らないものがある（「電車を乗りました」）。規則は助詞をでたらめに置き換えるので、動詞と助詞の結びつき（「に乗る」）を学ぶ手がかりにならない。この章の「規則で誤りを注入して GEC の擬似学習データを作る」の注のとおり、誤りの種類と割合を実際の学習者の誤りに近づけるほど効果が上がる。
+- 実データの参照には流暢な書き直しも含まれるので、それで学習すると言い換えも覚える（「駅の近く」→「駅のすぐそば」）。実データだけで学習したモデルは、主語まで変えて意味の違う文を作った（「私の家を駅の近くあります。」→「彼は駅の近くに住んでいます。」）。最小限の訂正が欲しいなら、参照のうち編集の少ないものだけで学習する。
+- 同じ 100 文を、同じ編集の取り出し方と参照の選び方で評価しているので、この章の「LLM で日本語の文法誤りを訂正して評価する」の数値と比べられる。そのレシピの LLM (3B) は、最小限の訂正の指示で F0.5 0.441 だった。約 2.5 億パラメータの T5 でも、同じ分布のデータで学習すれば上回る。ただし学習に使った 611 文と評価の 100 文は JFLEG-JA の同じ分割から取ったもので、作り方も誤りの傾向も同じなので、T5 に有利な条件である。
+- 時間の目安: 学習は 3 回合わせて、検証の GPU で約 2 分（ほかの処理と共有したときは約 4 分）だった。T4 では 10 分前後の見込み。T5 v1.1 の構造は float16 で値があふれるので、T4 では float32 で学習する（要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」を参照）。擬似データを増やす、エポックを増やす、といった調整の余地は大きい。実際の研究では数百万〜数千万文の擬似データを使う。
+- 評価用の 100 文の参照訂正のうち 1 文が、擬似データの正しい文（田中コーパス）にもあった。短く平易な文はコーパスをまたいで重なりやすいので、学習データと評価データの重なりは確かめておく。
+- データとモデルの出典とライセンス: 田中コーパス（EDRDG 配布版）は CC BY。JFLEG-JA (ronantakizawa/jfleg-japanese) は、データセットのページのメタデータでは MIT だが、本文には CC BY-NC-SA 4.0 とあるので、非営利で使うものとして扱う。誤り文の多くは GPT-4 で作られたもので、実際の学習者の文ではない。sonoisa/t5-base-japanese-v1.1 は CC BY-SA 4.0。
 
 ## LLM で日本語の文法誤りを訂正して評価する {gec_ja_llm gpu}
 
@@ -952,458 +1407,3 @@ for sys_name, preds in [("規則", rule_pred), ("textlint", tl_pred), ("LLM", ll
 - LLM の指摘は、種類が合っていても中身が誤っていることがある。表記ゆれとして「「結果」と「分かる」」を挙げたり、「受け付けません」をら抜きとして「受け付けられません」に直したり、敬語を落とす案（「お読みになられた」→「読んだ」）を出したりした。評価は文書単位の「その種類を指摘したか」で箇所までは照合していないので、これらも正しい指摘に数えている。種類ごとの正解は 3〜8 文書しかなく、1〜2 件の差は誤差の範囲。
 - 実務では、規則（textlint や自作の規則）で機械的に検出できるものを先に潰し、LLM には意味の重複や言い換えの提案のような規則で書きにくい部分を任せる、という分担が現実的。LLM の指摘はそのまま採用せず、書き手が判断する候補として出す。
 - ツールとモデルのライセンス: textlint と使った規則 (MIT)、Sudachi 同義語辞書（sudachi-synonyms-dictionary、Apache-2.0）、sbintuitions/sarashina2.2-3b-instruct-v0.1（SB Intuitions、MIT）。sarashina のトークナイザーを直すコードについては、大規模言語モデルの章の「オープンな LLM とチャットする（チャットテンプレート）」の注意書きを参照。
-
-## 英語のスペルミスをライブラリで直す (pyspellchecker) {spellcheck}
-
-タイプミスを含む英文から誤りを見つけ、修正候補を出したい。
-
-```python
-!pip install -q pyspellchecker
-```
-
-```python
-import re
-from spellchecker import SpellChecker
-
-spell = SpellChecker()
-text = "I recieved a wonderfull mesage from my freind yestarday about langauge procesing"
-words = re.findall(r"[a-z']+", text.lower())
-for w in spell.unknown(words):
-    print(w, "→", spell.correction(w), sorted(spell.candidates(w) or [])[:5])
-```
-
-```python
-def correct(text):
-    return re.sub(r"[A-Za-z']+", lambda m: spell.correction(m.group()) or m.group() if m.group().lower() in spell.unknown([m.group()]) else m.group(), text)
-
-print(correct(text))
-spell.word_frequency.load_words(["nlp", "tokenizer"])  # 専門用語を辞書に追加
-print(spell.unknown(["nlp", "tokenizer", "transformr"]))
-```
-
-- 編集距離と単語頻度に基づく Norvig 方式。文脈は見ないので `their/there` のような実在語の誤りは直せない。文脈を見る方法は、この章の「symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す」を参照。
-
-## symspellpy とマスク言語モデルで英語のスペル誤りを文脈に合わせて直す {spelling_correction}
-
-英文のつづりの誤りを、辞書にない語 (recieved) だけでなく、実在する別の語になってしまった誤り (a peace of cake) も含めて直したい。速い辞書引きで候補を出し、文脈に合う語をマスク言語モデルで選ぶ（1 語ずつ手軽に直すだけなら、この章の「英語のスペルミスをライブラリで直す (pyspellchecker)」）。
-
-```python
-!pip install -q symspellpy==6.10.2 pyspellchecker==0.9.1
-# 評価用: Peter Norvig が Birkbeck spelling error corpus (Roger Mitton) から取り出した (誤り, 正解) の組。ライセンスの記載はない
-!wget -nc -q https://norvig.com/spell-testset1.txt
-```
-
-```python
-import importlib.resources
-from symspellpy import SymSpell, Verbosity
-
-# 同梱の英語の辞書 (約 8 万語と頻度)。SymSpell の README によると、Google Books Ngram (CC BY 3.0) と SCOWL の両方にある語から作られている
-sym = SymSpell(max_dictionary_edit_distance=2)
-res = importlib.resources.files("symspellpy")
-sym.load_dictionary(str(res / "frequency_dictionary_en_82_765.txt"), term_index=0, count_index=1)
-sym.load_bigram_dictionary(str(res / "frequency_bigramdictionary_en_243_342.txt"), term_index=0, count_index=2)
-
-# 1 語ずつ: 編集距離が最も小さい候補を、頻度の高い順に返す
-for w in ["speling", "recieve", "definately", "inconvient", "teh", "peace"]:
-    print(w, "→", [(h.term, h.distance, h.count) for h in sym.lookup(w, Verbosity.CLOSEST, max_edit_distance=2)[:4]])
-
-# 文全体: 語の分割・結合の誤り (whereis, th elove) もまとめて直す
-for s in ["whereis th elove hehad dated forImuch of thepast", "I recieved a wonderfull mesage from my freind"]:
-    print(s, "\n →", sym.lookup_compound(s, max_edit_distance=2)[0].term)
-
-# 空白のない文字列を単語に分ける
-print(sym.word_segmentation("thequickbrownfoxjumpsoverthelazydog").corrected_string)
-```
-
-```python
-# 1 語ずつの訂正の正解率と速さを pyspellchecker と比べる
-import time
-from spellchecker import SpellChecker
-
-tests = [(wrong, right) for line in open("spell-testset1.txt") for right, wrongs in [line.strip().split(":")] for wrong in wrongs.split()]
-spell = SpellChecker()
-
-def by_symspell(w):
-    hits = sym.lookup(w, Verbosity.TOP, max_edit_distance=2)
-    return hits[0].term if hits else w
-
-def by_pyspellchecker(w):
-    return spell.correction(w) or w
-
-print(len(tests), "組 / 正解の語が symspellpy の辞書にない割合:", round(sum(r not in sym.words for _, r in tests) / len(tests), 3))
-for name, f in [("symspellpy", by_symspell), ("pyspellchecker", by_pyspellchecker)]:
-    t = time.perf_counter()
-    out = [f(w) for w, _ in tests]
-    sec = time.perf_counter() - t
-    acc = sum(o == r for o, (_, r) in zip(out, tests)) / len(tests)
-    print(f"{name}: 正解率 {acc:.3f} / {len(tests) / sec:.0f} 語/秒")
-    print("   誤りの例 (入力, 出力, 正解):", [(w, o, r) for o, (w, r) in zip(out, tests) if o != r][:8])
-```
-
-```python
-# 文脈を使う: symspellpy の候補 (元の語も含む) を、マスク言語モデルで文脈に合う順に並べ替える
-import re
-import torch
-from transformers import AutoModelForMaskedLM, AutoTokenizer
-
-torch.manual_seed(0)
-name = "distilbert-base-uncased"     # Apache-2.0。小文字にしてから扱う
-tokenizer = AutoTokenizer.from_pretrained(name)
-mlm = AutoModelForMaskedLM.from_pretrained(name).eval()
-
-def candidates(word, k=15):
-    """編集距離 2 までの辞書の語のうち、頻度の高い k 語 (短い語は距離 1 まで)。辞書にある元の語は必ず残す"""
-    hits = [h for h in sym.lookup(word, Verbosity.ALL, max_edit_distance=2) if h.distance <= 1 or len(word) >= 4]
-    cands = {h.term: h.distance for h in sorted(hits, key=lambda h: -h.count)[:k]}
-    if word in sym.words:
-        cands[word] = 0
-    return cands
-
-@torch.no_grad()
-def context_scores(words, i, cands):
-    """i 番目の語を各候補に置き換えたときの、その語の対数確率 (複数トークンの語は、自分と後ろのトークンを隠して 1 トークンずつ予測して足す)"""
-    left = tokenizer(" ".join(words[:i]), add_special_tokens=False)["input_ids"] if i else []
-    right = tokenizer(" ".join(words[i + 1:]), add_special_tokens=False)["input_ids"]
-    seqs, meta = [], []
-    for c in cands:
-        ids = tokenizer(c, add_special_tokens=False)["input_ids"]
-        for j in range(len(ids)):
-            span = ids[:j] + [tokenizer.mask_token_id] * (len(ids) - j)
-            seqs.append([tokenizer.cls_token_id] + left + span + right + [tokenizer.sep_token_id])
-            meta.append((c, 1 + len(left) + j, ids[j]))
-    batch = tokenizer.pad({"input_ids": seqs}, return_tensors="pt")
-    logp = mlm(**batch).logits.log_softmax(-1)
-    scores = dict.fromkeys(cands, 0.0)
-    for row, (c, pos, tok) in enumerate(meta):
-        scores[c] += float(logp[row, pos, tok])
-    return scores
-
-def correct_sentence(sentence, penalty=2.0, margin=2.0):
-    """左から 1 語ずつ直す。元の語から離れるほど減点し、辞書にある語は差が margin を超えたときだけ書き換える"""
-    words = sentence.lower().split()
-    for i, w in enumerate(words):
-        if not re.fullmatch(r"[a-z]+", w):
-            continue
-        cands = candidates(w)
-        if not cands or list(cands) == [w]:
-            continue
-        ctx = context_scores(words, i, cands)
-        total = {c: ctx[c] - penalty * d for c, d in cands.items()}
-        best = max(total, key=total.get)
-        if best != w and (w not in cands or total[best] > total[w] + margin):
-            words[i] = best
-    return " ".join(words)
-
-for s in ["I want a peace of cake .", "The whether is nice today .", "Their is a cat on the table .", "I like to read books ."]:
-    print(s, "→", correct_sentence(s))
-```
-
-```python
-# 手作りの文で比べる: 実在語の誤り (19 文)、辞書にない語の誤り (4 文)、誤りのない文 (12 文)
-# Colab の CPU で 1〜3 分
-data = """I want a peace of cake . || I want a piece of cake .
-He will except the offer . || He will accept the offer .
-She lives in a quite village . || She lives in a quiet village .
-The whether is nice today . || The weather is nice today .
-Their is a cat on the table . || There is a cat on the table .
-I need to buy some bred . || I need to buy some bread .
-Can you here me now ? || Can you hear me now ?
-I lost my keys and could not find then . || I lost my keys and could not find them .
-She is taller then her brother . || She is taller than her brother .
-We swam in the see . || We swam in the sea .
-Please turn of the light . || Please turn off the light .
-He new the answer . || He knew the answer .
-I have to brake the news to him . || I have to break the news to him .
-It is to cold to swim . || It is too cold to swim .
-I will meat you at the station . || I will meet you at the station .
-She road her bike to school . || She rode her bike to school .
-My farther is a doctor . || My father is a doctor .
-We had a grate time at the party . || We had a great time at the party .
-He has a dog and to cats . || He has a dog and two cats .
-I recieved a wonderfull mesage from my freind . || I received a wonderful message from my friend .
-The goverment anounced a new polcy . || The government announced a new policy .
-She is a very inteligent studnet . || She is a very intelligent student .
-I beleive this is the rigth answer . || I believe this is the right answer .
-I like to read books . || I like to read books .
-The cat sat on the mat . || The cat sat on the mat .
-She bought a new car last week . || She bought a new car last week .
-They went to the park after lunch . || They went to the park after lunch .
-He plays the piano very well . || He plays the piano very well .
-We are going to visit our grandparents . || We are going to visit our grandparents .
-The weather was cold , so we stayed home . || The weather was cold , so we stayed home .
-I think their idea is better than ours . || I think their idea is better than ours .
-Can you hear the birds singing ? || Can you hear the birds singing ?
-Please put the box over there . || Please put the box over there .
-He accepted the job offer . || He accepted the job offer .
-The quiet library is near the station . || The quiet library is near the station ."""
-pairs = [line.split(" || ") for line in data.split("\n")]
-kinds = ["実在語の誤り"] * 19 + ["辞書にない語の誤り"] * 4 + ["誤りなし"] * 12   # data の文の順
-known = set(sym.words)
-
-def words_of(s):
-    """記号を除いた小文字の語の列 (lookup_compound は記号を落とすので、記号を除いて比べる)"""
-    return re.findall(r"[a-z]+", s.lower())
-
-def is_word(w):
-    return re.fullmatch(r"[a-z]+", w) is not None
-
-def word_by_word_symspell(s):
-    """文脈を見ずに、symspellpy の辞書にない語だけを 1 語ずつ直す"""
-    return " ".join(by_symspell(w) if is_word(w) and w not in known else w for w in s.lower().split())
-
-def word_by_word_pyspellchecker(s):
-    """文脈を見ずに、pyspellchecker の辞書にない語だけを 1 語ずつ直す"""
-    return " ".join(by_pyspellchecker(w) if is_word(w) and spell.unknown([w]) else w for w in s.lower().split())
-
-def compound(s):
-    return sym.lookup_compound(" ".join(words_of(s)), max_edit_distance=2)[0].term
-
-systems = {"pyspellchecker (1 語ずつ)": word_by_word_pyspellchecker,
-           "symspellpy (1 語ずつ)": word_by_word_symspell,
-           "symspellpy の lookup_compound": compound,
-           "symspellpy + マスク言語モデル": correct_sentence}
-
-for sys_name, f in systems.items():
-    t = time.perf_counter()
-    n_err = {"実在語の誤り": 0, "辞書にない語の誤り": 0}
-    fixed = {"実在語の誤り": 0, "辞書にない語の誤り": 0}
-    miscorrected = wrong = 0
-    failures = []
-    for (src, ref), kind in zip(pairs, kinds):
-        s, r, out = words_of(src), words_of(ref), words_of(f(src))
-        if len(out) != len(s):
-            # 語の数が変わった (分割・結合した) 文は、誤りを直せず、正しい語を 1 語書き換えたと数える
-            if kind in n_err:
-                n_err[kind] += sum(a != b for a, b in zip(s, r))
-            wrong += 1
-            failures.append(" ".join(out))
-            continue
-        for a, o, b in zip(s, out, r):
-            if a != b:
-                n_err[kind] += 1
-                fixed[kind] += (o == b)
-                miscorrected += (o != b and o != a)
-            elif o != b:
-                wrong += 1                      # 正しい語を書き換えた
-        if out != r:
-            failures.append(" ".join(out))
-    sec = time.perf_counter() - t
-    detail = " / ".join(f"{k} {fixed[k]}/{n_err[k]}" for k in n_err)
-    print(f"{sys_name}: 直せた {sum(fixed.values())}/{sum(n_err.values())} 語 ({detail}) / 別の誤った語にした {miscorrected} / 正しい語を書き換えた {wrong} / {sec:.1f} 秒")
-    print("   直しきれなかった文の例:", failures[:4])
-```
-
-- この章の「英語のスペルミスをライブラリで直す (pyspellchecker)」は、編集距離と頻度で 1 語ずつ直す方法で、文脈を見ない。このレシピは候補を出す部分を symspellpy にし、選ぶ部分にマスク言語モデルを使って、実在する別の語になってしまった誤り（real-word error。peace → piece、whether → weather）も直す。
-- symspellpy は Wolf Garbe の SymSpell (C#) を Python に移したもので、MIT ライセンス。辞書の語から文字を削除した形をあらかじめ索引にしておき、入力からも削除した形を作って引くので、候補を速く引ける。同梱の辞書は SymSpell の README によると Google Books Ngram (CC BY 3.0) と SCOWL から作られている。`lookup_compound` は語の分割・結合の誤り（whereis、th elove）もまとめて直せる。
-- Norvig のテストセット（270 組、1 語ずつ）では、正解率は symspellpy が 0.744、pyspellchecker が 0.763 で、差は 5 語ほどなのでほぼ同じと見てよい。速さは大きく違い、この実行では symspellpy が毎秒約 1.5 万語、pyspellchecker が毎秒 16 語だった（pyspellchecker は編集距離 2 の文字列をすべて作って辞書と照合する）。大量の文書を処理するなら symspellpy がよい。誤りの例を見ると、失敗の傾向も 2 つで似ている。正解より近い語があればそちらを選び（contende → contend、symspellpy の juse → use）、同じ距離なら頻度の高い語を選ぶ（localy → local、symspellpy の proplen → people）。入力が実在語 (contended → contented) だと直せない。
-- 手作りの 35 文では、文脈を見ない 3 つの方法（lookup_compound も含む）はどれも、辞書にない語の誤り 11 語はすべて直せたが、実在語の誤り 19 語は 1 つも直せなかった。マスク言語モデルで選ぶと 30 語中 26 語（実在語の誤り 15/19、辞書にない語の誤り 11/11）を直し、誤りのない 12 文は 1 語も書き換えなかった。ただし文の数が少なく、減点 (`penalty`) としきい値 (`margin`) はこの 35 文を見ながら決めた値なので、自分のデータで確かめてから使う。
-- 直せなかった 4 語（bred → red、here → help、meat → get、road → had）は、どれも文としては自然だが意味の違う語に書き換えている。マスク言語モデルは「その位置に来やすい語」を選ぶので、よく使われる語に引き寄せられる。`margin` を大きくすると書き換えが減り、見逃しが増える。教育の場面では、自動で書き換えずに候補として示すほうが安全である。
-- 文脈を使う訂正は遅い。この実行では 2 コアの CPU で 35 文に 38 秒（1 文 1 秒ほど）かかり、symspellpy だけなら 0.1 秒以下だった。大量に処理するなら GPU を使う、取り違えやすい語の組（their / there、then / than など）だけを調べる、といった工夫がいる。
-- 小文字にしてから扱うので、大文字・小文字の情報は失われる。辞書にない語は、編集距離 2 以内に候補があれば必ずどれかに書き換えるので、固有名詞や専門用語は `sym.create_dictionary_entry("tokenizer", 1000)` のように辞書に足しておく。学習者のつづりの誤りは打ち間違いと傾向が違う（発音に引きずられる、母語の影響を受ける）ので、学習者の作文で確かめる。日本語では、スペル誤りにあたるのは誤変換や脱字である。日本語入力の章と、この章の「マスク言語モデルで誤りのありそうな箇所を見つける（文法誤り検出）」を参照。
-- 仕組みを自分で実装して確かめる版（編集距離 1・2 の候補を作り、頻度で選ぶ Norvig 方式）は、付録「仕組みを理解するための実装」の「編集距離と単語の頻度で英語のスペル誤りを訂正する（Norvig 方式を自分で実装）」にある。
-
-## 擬似誤りデータで日本語の文法誤り訂正モデルを学習する（擬似データと少量の実データ） {gec_synthetic_train gpu}
-
-文法誤り訂正の学習データが少ない。正しい文に規則で誤りを入れた大量の擬似データで小さな系列変換モデル (T5) を学習し、少量の実データで続けて学習すると、どれだけ良くなるかを確かめたい。
-
-```python
-!pip install -q fugashi unidic-lite datasets
-```
-
-```python
-import gzip, random, re, urllib.request
-from datasets import load_dataset
-from fugashi import Tagger
-
-# 正しい文: 田中コーパス (EDRDG 配布版、CC BY)。Tatoeba の日英対訳の日本語側で、教科書の例文のような短い文
-raw = gzip.decompress(urllib.request.urlopen("https://www.edrdg.org/pub/Nihongo/examples.utf.gz").read()).decode("utf-8")
-clean = sorted({m.group(1) for m in re.finditer(r"^A: (.+?)\t", raw, re.M) if 8 <= len(m.group(1)) <= 40})
-random.Random(0).shuffle(clean)
-
-# この章の「規則で誤りを注入して GEC の擬似学習データを作る」と同じ規則（助詞の置換・脱落・余剰、活用語尾の誤り）
-tagger = Tagger()
-PARTICLES = ["が", "を", "に", "で", "は", "と", "へ", "の"]
-
-def corrupt(sentence, rng, p=0.15):
-    out = []
-    for w in tagger(sentence):
-        surface, pos1, pos2 = w.surface, w.feature.pos1, w.feature.pos2
-        if pos1 == "助詞" and pos2 in ("格助詞", "係助詞") and surface in PARTICLES and rng.random() < p:
-            r = rng.random()
-            if r < 0.6:
-                out.append(rng.choice([x for x in PARTICLES if x != surface]))   # 置換
-            elif r < 0.8:
-                pass                                                              # 脱落
-            else:
-                out += [surface, rng.choice(PARTICLES)]                           # 余剰
-        elif pos1 == "動詞" and w.feature.cForm and w.feature.cForm.startswith("連用形") and rng.random() < p:
-            out.append(w.feature.orthBase or surface)                             # 活用させずに辞書形のままにする
-        else:
-            out.append(surface)
-    return "".join(out)
-
-rng = random.Random(0)
-N_SYN = 20000
-synthetic = [(corrupt(s, rng, p=0.2), s) for s in clean[:N_SYN]]   # 誤りが入らなかった文も（同じ文, 同じ文）として残す
-print(len(clean), "文から", N_SYN, "組 / 誤りが入った割合", round(sum(a != b for a, b in synthetic) / N_SYN, 3))
-for noisy, ok in [x for x in synthetic if x[0] != x[1]][:4]:
-    print(f"   {noisy}  →  {ok}")
-
-# 実データ: JFLEG-JA の validation (711 文、訂正は各 4 通り)。先頭 100 文はこの章の「LLM で日本語の文法誤りを訂正して評価する」と同じ評価用、残りを学習に使う
-ds = load_dataset("ronantakizawa/jfleg-japanese", split="validation")
-test = ds.select(range(100))
-real = [(ex["sentence"], c) for ex in ds.select(range(100, len(ds))) for c in ex["corrections"]]
-print("実データ:", len(ds) - 100, "文 →", len(real), "組 / 評価", len(test), "文")
-print("評価の文が擬似データの正しい文にもある数:", len({c for ex in test for c in ex["corrections"]} & set(clean[:N_SYN])))
-```
-
-```python
-import difflib
-
-# この章の「文法誤り訂正を編集単位の F0.5 で評価する」と同じ集計（TP・FP・FN から P・R・F0.5）。
-# 編集は「LLM で日本語の文法誤りを訂正して評価する」と同じく文字単位の差分で作り、4 つの参照のうち F0.5 が最も高いものと比べる
-def edits(source, target):
-    ops = difflib.SequenceMatcher(None, source, target, autojunk=False).get_opcodes()
-    return {(i1, i2, target[j1:j2]) for op, i1, i2, j1, j2 in ops if op != "equal"}
-
-def counts(src, hyp, refs, beta=0.5):
-    """1 文の TP・FP・FN"""
-    h = edits(src, hyp)
-    r = max((edits(src, ref) for ref in refs),
-            key=lambda r: ((1 + beta ** 2) * len(h & r) / (len(h) + beta ** 2 * len(r) + 1e-9), -len(r)))
-    return len(h & r), len(h - r), len(r - h)
-
-def gec_score(sources, hypotheses, references, beta=0.5):
-    tp, fp, fn = map(sum, zip(*[counts(s, h, r) for s, h, r in zip(sources, hypotheses, references)]))
-    p = tp / (tp + fp) if tp + fp else 1.0
-    r = tp / (tp + fn) if tp + fn else 1.0
-    f = (1 + beta ** 2) * p * r / (beta ** 2 * p + r) if p + r else 0.0
-    return {"TP": tp, "FP": fp, "FN": fn, "P": round(p, 3), "R": round(r, 3), f"F{beta}": round(f, 3),
-            "変更なし": sum(s == h for s, h in zip(sources, hypotheses))}
-
-sources, references = test["sentence"], test["corrections"]
-results = {"何もしない": gec_score(sources, sources, references)}
-print(results)
-```
-
-```python
-import sentencepiece as spm
-import torch
-from huggingface_hub import hf_hub_download
-from tokenizers import decoders, models
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
-
-name = "sonoisa/t5-base-japanese-v1.1"     # 日本語の T5（約 2.5 億パラメータ）。CC BY-SA 4.0
-# 要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」と同じく、transformers 5 系で落ちる byte_fallback を戻す
-sp = spm.SentencePieceProcessor(model_file=hf_hub_download(name, "spiece.model"))
-tokenizer = AutoTokenizer.from_pretrained(name)
-tokenizer.backend_tokenizer.model = models.Unigram(
-    [(sp.id_to_piece(i), sp.get_score(i)) for i in range(sp.get_piece_size())], unk_id=sp.unk_id(), byte_fallback=True)
-tokenizer.backend_tokenizer.decoder = decoders.Sequence(
-    [decoders.ByteFallback(), decoders.Metaspace(replacement="▁", prepend_scheme="always", split=True)])
-
-MAX_LEN = 64
-def load_model():
-    set_seed(0)
-    return AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda")   # 学習するので float32 のまま
-
-def correct(model, texts, batch_size=50, num_beams=4):
-    model.eval()
-    outputs = []
-    for i in range(0, len(texts), batch_size):
-        x = tokenizer(list(texts[i:i + batch_size]), max_length=MAX_LEN, truncation=True, padding=True, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            out = model.generate(**x, max_new_tokens=MAX_LEN, num_beams=num_beams)
-        outputs += [s.strip() for s in tokenizer.batch_decode(out, skip_special_tokens=True)]
-    return outputs
-
-print("トークン数（擬似データの正しい文、最大）:", max(len(tokenizer(s)["input_ids"]) for s in clean[:2000]))
-```
-
-```python
-import time
-from datasets import Dataset, disable_progress_bars
-from transformers.utils import logging as hf_logging
-from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
-
-disable_progress_bars(); hf_logging.disable_progress_bar()
-BF16 = torch.cuda.get_device_capability()[0] >= 8      # T5 v1.1 は float16 で値があふれるので、T4 では float32 で学習する
-
-def train(model, pairs, epochs, lr, batch_size=32):
-    def encode(batch):
-        x = tokenizer(batch["src"], max_length=MAX_LEN, truncation=True)
-        x["labels"] = tokenizer(text_target=batch["tgt"], max_length=MAX_LEN, truncation=True)["input_ids"]
-        return x
-    data = Dataset.from_dict({"src": [a for a, _ in pairs], "tgt": [b for _, b in pairs]}).map(encode, batched=True, remove_columns=["src", "tgt"])
-    args = Seq2SeqTrainingArguments(
-        output_dir="t5-gec", num_train_epochs=epochs, per_device_train_batch_size=batch_size, learning_rate=lr,
-        warmup_steps=30, lr_scheduler_type="linear", weight_decay=0.01, logging_steps=100,
-        save_strategy="no", report_to="none", bf16=BF16, seed=0, disable_tqdm=True)
-    trainer = Seq2SeqTrainer(model=model, args=args, train_dataset=data,
-                             data_collator=DataCollatorForSeq2Seq(tokenizer, model=model), processing_class=tokenizer)
-    t0 = time.time()
-    trainer.train()
-    losses = [round(h["loss"], 3) for h in trainer.state.log_history if "loss" in h]
-    print(f"  {len(pairs)} 組 × {epochs} エポック: {time.time() - t0:.0f} 秒、損失 {losses[0]} → {losses[-1]}")
-
-outputs = {}
-
-# (1) 擬似データだけで学習する（2 万組 × 1 エポック）
-model = load_model()
-train(model, synthetic, epochs=1, lr=3e-4)
-outputs["擬似データだけ"] = correct(model, sources)
-
-# (2) (1) に続けて、実データ (約 2,400 組) で学習する
-train(model, real, epochs=3, lr=3e-4)
-outputs["擬似データ → 実データ"] = correct(model, sources)
-
-# (3) 比較: 擬似データを使わず、実データだけで学習する
-del model; torch.cuda.empty_cache()
-model = load_model()
-train(model, real, epochs=3, lr=3e-4)
-outputs["実データだけ"] = correct(model, sources)
-```
-
-```python
-import numpy as np
-import pandas as pd
-
-for label, hyps in outputs.items():
-    results[label] = gec_score(sources, hyps, references)
-print(pd.DataFrame(results).T.to_string())
-
-# 擬似データの誤りに近い文（2 字以内の置き換え・脱落・挿入だけで、いずれかの参照に直せる文。助詞や活用語尾の誤りが多い）と、それ以外に分けて見る
-def small_edits_only(ex):
-    return any(all(i2 - i1 <= 2 and len(t) <= 2 for i1, i2, t in edits(ex["sentence"], ref)) for ref in ex["corrections"])
-groups = [small_edits_only(ex) for ex in test]
-print("\n擬似データに近い誤りの文:", sum(groups), "/ それ以外:", len(groups) - sum(groups))
-for label, hyps in outputs.items():
-    f = [gec_score([s for s, g in zip(sources, groups) if g == want], [h for h, g in zip(hyps, groups) if g == want],
-                   [r for r, g in zip(references, groups) if g == want])["F0.5"] for want in (True, False)]
-    print(f"   {label:12}  近い {f[0]:.3f}  それ以外 {f[1]:.3f}")
-
-# 100 文なので差はぶれる。文を再標本化して F0.5 の差の 95% 信頼区間を見る（対応のあるブートストラップ）
-def f05(c):
-    tp, fp, fn = c.sum(0)
-    p, r = tp / max(tp + fp, 1), tp / max(tp + fn, 1)
-    return 1.25 * p * r / (0.25 * p + r) if p + r else 0.0
-c = {label: np.array([counts(s, h, r) for s, h, r in zip(sources, hyps, references)]) for label, hyps in outputs.items()}
-idx = np.random.default_rng(0).integers(0, len(sources), (1000, len(sources)))
-for a, b in [("擬似データ → 実データ", "実データだけ"), ("擬似データ → 実データ", "擬似データだけ")]:
-    d = [f05(c[a][k]) - f05(c[b][k]) for k in idx]
-    print(f"F0.5 の差（{a} − {b}）: {f05(c[a]) - f05(c[b]):+.3f}（95%CI {np.percentile(d, 2.5):+.3f}〜{np.percentile(d, 97.5):+.3f}）")
-
-for i in range(6):
-    print(f"\n{sources[i]}  （参照: {references[i][0]}）")
-    for label, hyps in outputs.items():
-        print(f"   {label:12} {hyps[i]}")
-```
-
-- 擬似データだけで学習したモデルは慎重で、100 文中 74 文を変えずに残した。適合率は 0.821 と高いが再現率は 0.176 で、F0.5 は 0.473。続けて実データ（JFLEG-JA の残り 611 文 × 4 通りの訂正）で学習すると F0.5 は 0.667 に上がった（差 +0.193、95% 信頼区間 +0.057〜+0.348）。擬似データを使わず実データだけで学習すると 0.600 で、擬似データで先に学習したほうが 0.067 高かった。ただし 95% 信頼区間は −0.001〜+0.142 で、100 文の評価では差があるとはっきりは言えない。
-- 誤りの種類で分けると、2 字以内の置き換え・挿入・脱落で直せる文（助詞や活用語尾の誤りが多い。78 文）では、擬似データだけで F0.5 0.525、それ以外の文（語の選び方や言い回しの誤り。22 文）では 0.323 だった。擬似データの規則にない種類の誤りは、実データで学習しないと直らない。擬似データの効果は、実データで学習したあとも、規則の誤りに近い文（0.760 対 0.665）のほうで大きかった。
-- 規則にある助詞の誤りでも、直らないものがある（「電車を乗りました」）。規則は助詞をでたらめに置き換えるので、動詞と助詞の結びつき（「に乗る」）を学ぶ手がかりにならない。この章の「規則で誤りを注入して GEC の擬似学習データを作る」の注のとおり、誤りの種類と割合を実際の学習者の誤りに近づけるほど効果が上がる。
-- 実データの参照には流暢な書き直しも含まれるので、それで学習すると言い換えも覚える（「駅の近く」→「駅のすぐそば」）。実データだけで学習したモデルは、主語まで変えて意味の違う文を作った（「私の家を駅の近くあります。」→「彼は駅の近くに住んでいます。」）。最小限の訂正が欲しいなら、参照のうち編集の少ないものだけで学習する。
-- 同じ 100 文を、同じ編集の取り出し方と参照の選び方で評価しているので、この章の「LLM で日本語の文法誤りを訂正して評価する」の数値と比べられる。そのレシピの LLM (3B) は、最小限の訂正の指示で F0.5 0.441 だった。約 2.5 億パラメータの T5 でも、同じ分布のデータで学習すれば上回る。ただし学習に使った 611 文と評価の 100 文は JFLEG-JA の同じ分割から取ったもので、作り方も誤りの傾向も同じなので、T5 に有利な条件である。
-- 時間の目安: 学習は 3 回合わせて、検証の GPU で約 2 分（ほかの処理と共有したときは約 4 分）だった。T4 では 10 分前後の見込み。T5 v1.1 の構造は float16 で値があふれるので、T4 では float32 で学習する（要約の章の「日本語の T5 をファインチューニングして見出しを生成する (Seq2SeqTrainer)」を参照）。擬似データを増やす、エポックを増やす、といった調整の余地は大きい。実際の研究では数百万〜数千万文の擬似データを使う。
-- 評価用の 100 文の参照訂正のうち 1 文が、擬似データの正しい文（田中コーパス）にもあった。短く平易な文はコーパスをまたいで重なりやすいので、学習データと評価データの重なりは確かめておく。
-- データとモデルの出典とライセンス: 田中コーパス（EDRDG 配布版）は CC BY。JFLEG-JA (ronantakizawa/jfleg-japanese) は、データセットのページのメタデータでは MIT だが、本文には CC BY-NC-SA 4.0 とあるので、非営利で使うものとして扱う。誤り文の多くは GPT-4 で作られたもので、実際の学習者の文ではない。sonoisa/t5-base-japanese-v1.1 は CC BY-SA 4.0。

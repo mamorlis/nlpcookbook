@@ -511,6 +511,259 @@ sim.iloc[[0, 1, 4, 5, 8, 9], [0, 1, 4, 5, 8, 9]]
 - 話題がはっきり違う語義は分かれやすい。「高い」（値段・背・声）のように同じ構文で使われる語義は、ベクトルが近くなって分かれにくい。
 - 時期の違うコーパスで同じ語のベクトルの分布を比べると、意味変化の検出（「やばい」の意味の広がりなど）に応用できる。
 
+## 慣用句・機能表現を見つけて字義どおりの用法と区別する {idiom_detection gpu}
+
+「足を洗う」が「悪い仕事をやめる」（慣用）なのか「足を水で洗う」（字義）なのかを、文脈から判定したい。形態素解析の原形の並びで候補を見つける段階と、文脈から慣用か字義かを決める段階に分ける。
+
+```python
+!pip install -q fugashi unidic-lite
+```
+
+```python
+!git clone -q --depth 1 https://github.com/nlp-waseda/OpenMWE
+```
+
+```python
+from fugashi import Tagger
+
+tagger = Tagger()
+
+# 複単語表現の辞書: 原形 (または表層) の並び。助詞は「は」「も」に変わることがあるので候補を並べる
+PATTERNS = {
+    "足を洗う": ([{"足"}, {"を", "は", "も"}, {"洗う"}], 2),     # 2 = 要素の間に挟まってよい語の数
+    "骨が折れる": ([{"骨"}, {"が", "は", "も"}, {"折れる"}], 2),
+    "顔を出す": ([{"顔"}, {"を", "は", "も"}, {"出す"}], 2),
+    "手を焼く": ([{"手"}, {"を", "は", "も"}, {"焼く"}], 2),
+    "腹が立つ": ([{"腹"}, {"が", "は", "も"}, {"立つ"}], 1),
+    "について": ([{"に"}, {"つく", "付く"}, {"て"}], 0),          # 機能表現は語を挟まない
+    "に対して": ([{"に"}, {"対する"}, {"て"}], 0),
+    "にもかかわらず": ([{"に"}, {"も"}, {"関わる", "拘る"}, {"ず"}], 0),
+}
+
+def find_mwes(sentence):
+    """文中の候補を (表現, 開始文字位置, 終了文字位置) のリストで返す"""
+    words, pos = [], 0
+    for w in tagger(sentence):
+        start = sentence.index(w.surface, pos); pos = start + len(w.surface)
+        words.append((w.surface, w.feature.lemma, start, pos))
+    hits = []
+    for name, (pattern, gap) in PATTERNS.items():
+        for i, w in enumerate(words):
+            if not ({w[0], w[1]} & pattern[0]):
+                continue
+            j, ok = i, True
+            for p in pattern[1:]:                           # 次の要素を gap 語以内で探す
+                nxt = next((k for k in range(j + 1, min(j + 2 + gap, len(words))) if {words[k][0], words[k][1]} & p), None)
+                if nxt is None:
+                    ok = False; break
+                j = nxt
+            if ok:
+                hits.append((name, words[i][2], words[j][3]))
+    return hits
+
+for s in ["彼は三年前に裏の仕事から足を洗った。", "砂浜を歩いたあと、水道で足をきれいに洗った。", "彼の態度には本当に腹が立つ。",
+          "雨にもかかわらず大勢が集まった。", "質問に対して丁寧に答えた。", "泥が靴について取れない。",
+          "足が痛くて、手を洗った。", "骨は折れていなかった。"]:
+    print(s, "→", [(n, s[a:b]) for n, a, b in find_mwes(s)])
+```
+
+```python
+# 手作りのデータ: 表現ごとに、少数の例 (慣用 4 + 字義 4) と、評価用 (慣用 4 + 字義 4)。ラベル 1 = 慣用・機能表現、0 = 字義どおり
+DATA = {
+    "足を洗う": {
+        "few": [(1, "彼は二十歳で暴走族から足を洗った。"), (1, "ギャンブルからはもう足を洗ったつもりだ。"), (1, "裏の商売から足を洗って、田舎で農業を始めた。"), (1, "詐欺グループから足を洗うのは簡単ではない。"),
+                (0, "泥だらけになったので、玄関の前で足を洗った。"), (0, "海から上がって、シャワーで足を洗う。"), (0, "寝る前に石けんで足を洗う習慣がある。"), (0, "子どもの足を洗ってからタオルで拭いた。")],
+        "test": [(1, "組を抜けて足を洗ってから、もう十年になる。"), (1, "夜の仕事から足を洗いたいと相談された。"), (1, "盗みから足を洗った男が、更生施設で働いている。"), (1, "彼女は芸能界から足を洗って会社員になった。"),
+                 (0, "畑仕事のあとは、井戸の水で足を洗う。"), (0, "温泉の入口に足を洗う場所がある。"), (0, "砂浜を歩いたあと、水道で足をきれいに洗った。"), (0, "介護の仕事では、お年寄りの足を洗うこともある。")]},
+    "骨が折れる": {
+        "few": [(1, "大量の書類を整理するのは骨が折れる。"), (1, "子ども三人の世話はなかなか骨が折れる。"), (1, "頑固な父を説得するのに骨が折れた。"), (1, "古い資料を探すのは骨が折れる作業だ。"),
+                (0, "階段から落ちて、腕の骨が折れた。"), (0, "スキーで転んで足の骨が折れた。"), (0, "骨が折れていないか、医者に診てもらった。"), (0, "年を取ると、少し転んだだけで骨が折れることがある。")],
+        "test": [(1, "英語の論文を一人で翻訳するのは骨が折れた。"), (1, "この山道を自転車で登るのは骨が折れる。"), (1, "新しい制度に慣れるまでが骨が折れる。"), (1, "全員の予定を合わせるのは本当に骨が折れる。"),
+                 (0, "交通事故で首の骨が折れる重傷を負った。"), (0, "転倒した選手は、手首の骨が折れていた。"), (0, "傘の骨が折れて使えなくなった。"), (0, "犬が骨をかじっていたら、骨が折れて二つになった。")]},
+    "顔を出す": {
+        "few": [(1, "久しぶりに同窓会に顔を出した。"), (1, "忙しくても、週に一度は実家に顔を出すようにしている。"), (1, "打ち上げに少しだけ顔を出してから帰った。"), (1, "社長が珍しく現場に顔を出した。"),
+                (0, "窓から顔を出して外の様子をうかがった。"), (0, "亀が甲羅から顔を出した。"), (0, "布団から顔を出すと、部屋は寒かった。"), (0, "カーテンの隙間から子どもが顔を出した。")],
+        "test": [(1, "時間があれば、明日の勉強会にも顔を出してください。"), (1, "彼は最近、サークルに全く顔を出さない。"), (1, "取引先の新年会に顔を出す予定だ。"), (1, "退院した祖父が久しぶりに町内会に顔を出した。"),
+                 (0, "車の窓から顔を出すのは危ない。"), (0, "モグラが土の中から顔を出した。"), (0, "ドアの陰から猫が顔を出した。"), (0, "水面から顔を出して大きく息を吸った。")]},
+    "手を焼く": {
+        "few": [(1, "息子のいたずらに手を焼いている。"), (1, "新しいシステムの不具合に手を焼いた。"), (1, "頑固な客の対応に手を焼く。"), (1, "雑草の多さには毎年手を焼く。"),
+                (0, "熱いフライパンに触って手を焼いてしまった。"), (0, "たき火で手を焼かないように気をつけて。"), (0, "アイロンで手を焼いて、水ぶくれができた。"), (0, "花火の火で手を焼いた。")],
+        "test": [(1, "反抗期の娘に手を焼いている。"), (1, "野良猫のいたずらに近所中が手を焼いている。"), (1, "このチームは相手の守備に手を焼いた。"), (1, "方言が強くて、聞き取りに手を焼いた。"),
+                 (0, "オーブンの天板で手を焼いて、病院に行った。"), (0, "炭火で手を焼かないよう、長いトングを使う。"), (0, "やけどの手当てをしたが、手を焼いた跡が残った。"), (0, "鍋の取っ手が熱くて、うっかり手を焼いた。")]},
+    "について": {
+        "few": [(1, "環境問題について議論した。"), (1, "この点について質問があります。"), (1, "将来について考える時間がほしい。"), (1, "事故の原因について調べている。"),
+                (0, "ガイドの後について歩いた。"), (0, "泥が靴について取れない。"), (0, "米粒が頬について、みんなに笑われた。"), (0, "名前を呼ばれるまで席について待った。")],
+        "test": [(1, "新製品の価格について発表があった。"), (1, "日本の歴史について本を書いた。"), (1, "彼の発言について、どう思いますか。"), (1, "安全対策について説明を受けた。"),
+                 (0, "列の最後について順番を待った。"), (0, "猫の毛が服について困る。"), (0, "有名な先生について、三年間ピアノを習った。"), (0, "全員が席について、会議が始まった。")]},
+}
+
+# 第 1 段階: 原形の並びで候補を見つける。対象の表現が見つかった位置を、次の段階で使う
+examples = []                                               # (表現, 分割, ラベル, 文, 開始, 終了)
+for name, d in DATA.items():
+    for split in ["few", "test"]:
+        for label, s in d[split]:
+            span = [(a, b) for n, a, b in find_mwes(s) if n == name]
+            assert span, f"見つからない: {s}"
+            examples.append((name, split, label, s, *span[0]))
+print(len(examples), "文で候補を検出できた")
+```
+
+```python
+import numpy as np
+import torch
+from transformers import AutoModel, AutoTokenizer
+
+name = "tohoku-nlp/bert-base-japanese-v3"
+tokenizer = AutoTokenizer.from_pretrained(name)
+bert = AutoModel.from_pretrained(name).eval().to("cuda")
+
+@torch.no_grad()
+def span_vectors(items, batch_size=64):
+    """(文, 開始, 終了) のリストから、表現の部分のトークンの文脈化ベクトル (最後の 4 層の平均) を返す"""
+    out = []
+    for i in range(0, len(items), batch_size):
+        ids, spans = [], []
+        for s, a, b in items[i:i + batch_size]:
+            left, mid, right = (tokenizer.encode(x, add_special_tokens=False) for x in (s[max(0, a - 60):a], s[a:b], s[b:b + 60]))
+            ids.append([tokenizer.cls_token_id] + left + mid + right + [tokenizer.sep_token_id])
+            spans.append((1 + len(left), 1 + len(left) + len(mid)))
+        n = max(map(len, ids))
+        input_ids = torch.tensor([x + [tokenizer.pad_token_id] * (n - len(x)) for x in ids], device="cuda")
+        mask = (input_ids != tokenizer.pad_token_id).long()
+        hidden = torch.stack(bert(input_ids=input_ids, attention_mask=mask, output_hidden_states=True).hidden_states[-4:]).mean(0)
+        out += [hidden[k, a:b].mean(0).cpu().numpy() for k, (a, b) in enumerate(spans)]
+    X = np.stack(out)
+    return X / np.linalg.norm(X, axis=1, keepdims=True)
+
+X = span_vectors([(s, a, b) for _, _, _, s, a, b in examples])
+print(X.shape)
+```
+
+```python
+from sklearn.linear_model import LogisticRegression
+
+names = list(DATA)
+def evaluate(predict):
+    """評価用の 40 文で、表現ごとと全体の正解率を出す"""
+    acc = {}
+    for n in names:
+        idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "test"]
+        acc[n] = np.mean([predict(i) == examples[i][2] for i in idx])
+    acc["全体"] = np.mean(list(acc.values()))
+    return acc
+
+# 第 2 段階 (1): 表現ごとに、少数の例 (慣用 4 + 字義 4) でロジスティック回帰を学習する
+few_shot = {}
+for n in names:
+    idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "few"]
+    few_shot[n] = LogisticRegression(C=10, max_iter=1000).fit(X[idx], [examples[i][2] for i in idx])
+results = {"常に慣用 (ベースライン)": evaluate(lambda i: 1),
+           "BERT + 少数の例 (表現ごと)": evaluate(lambda i: few_shot[examples[i][0]].predict(X[i:i + 1])[0])}
+for k, v in results.items():
+    print(f"{k:24}", " ".join(f"{n} {a:.0%}" for n, a in v.items()))
+```
+
+```python
+# 公開の慣用句コーパス OpenMWE: 慣用句 146 個の用例に、慣用 (I) か字義 (L) かのラベルが付いている
+import glob, random, re
+
+def load_openmwe(path, n_per_label=None, seed=0):
+    rows = {"I": [], "L": []}
+    for line in open(path, encoding="euc-jp", errors="replace"):
+        label, _, lemma, text = line.rstrip("\n").split(" ", 3)
+        if "<" not in text or ">" not in text:
+            continue
+        a, b = text.index("<"), text.rindex(">")
+        clean = text[:a] + re.sub("[<>]", "", text[a:b + 1]) + text[b + 1:].replace("<", "").replace(">", "")
+        rows[label].append((lemma, int(label == "I"), clean, a, a + len(re.sub("[<>]", "", text[a:b + 1]))))
+    random.Random(seed).shuffle(rows["I"]); random.Random(seed).shuffle(rows["L"])
+    return rows["I"][:n_per_label] + rows["L"][:n_per_label]
+
+corpus = {}
+for path in sorted(glob.glob("OpenMWE/D/*")):
+    rows = load_openmwe(path)
+    if sum(r[1] for r in rows) >= 100 and sum(1 - r[1] for r in rows) >= 100:   # 慣用・字義とも 100 例以上ある慣用句
+        corpus[rows[0][0]] = rows
+print(len(corpus), "個の慣用句。例:", list(corpus)[:8])
+print([n for n in names if n in corpus], "は OpenMWE にもある")
+```
+
+```python
+# 第 2 段階 (2): OpenMWE の多数の例で学習する
+# (a) 同じ慣用句の例を増やすと、どこまで上がるか (OpenMWE から取り分けた 200 例と、手作りの評価用で測る)
+for n in [n for n in names if n in corpus]:
+    rows = corpus[n]
+    I, L = [r for r in rows if r[1] == 1], [r for r in rows if r[1] == 0]
+    held = I[:100] + L[:100]
+    Xh = span_vectors([r[2:] for r in held]); yh = [r[1] for r in held]
+    line = [f"手作りの 8 例: OpenMWE {few_shot[n].score(Xh, yh):.0%}"]
+    for k in [4, 16, 64]:
+        train = I[100:100 + k] + L[100:100 + k]
+        clf = LogisticRegression(C=10, max_iter=1000).fit(span_vectors([r[2:] for r in train]), [r[1] for r in train])
+        idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "test"]
+        line.append(f"k={k:2}: OpenMWE {clf.score(Xh, yh):.0%} 手作り {clf.score(X[idx], [examples[i][2] for i in idx]):.0%}")
+    print(f"{n}:", " / ".join(line))
+```
+
+```python
+# (b) 評価する 5 表現以外の慣用句だけで、表現によらない「慣用か字義か」の分類器を作る
+train = [r for n, rows in corpus.items() if n not in names for r in (
+    [x for x in rows if x[1] == 1][:60] + [x for x in rows if x[1] == 0][:60])]
+clf_all = LogisticRegression(C=1, max_iter=2000).fit(span_vectors([r[2:] for r in train]), [r[1] for r in train])
+print(len(train), "例 (", len(corpus) - sum(n in corpus for n in names), "個の慣用句) で学習")
+for n in [n for n in names if n in corpus]:
+    held = [r for r in corpus[n] if r[1] == 1][:100] + [r for r in corpus[n] if r[1] == 0][:100]
+    print(f"{n}: OpenMWE の 200 例で {clf_all.score(span_vectors([r[2:] for r in held]), [r[1] for r in held]):.0%}")
+results["BERT + 他の慣用句で学習"] = evaluate(lambda i: clf_all.predict(X[i:i + 1])[0])
+print("手作りの評価用:", " ".join(f"{n} {a:.0%}" for n, a in results["BERT + 他の慣用句で学習"].items()))
+print("誤り:", [(examples[i][3], examples[i][2]) for i in range(len(examples))
+             if examples[i][1] == "test" and clf_all.predict(X[i:i + 1])[0] != examples[i][2]])
+```
+
+```python
+# 第 2 段階 (3): 小さな LLM に、2 つの意味のどちらかを選ばせる (A と B のトークンの確率を比べる)
+from transformers import AutoModelForCausalLM
+
+del bert; torch.cuda.empty_cache()
+llm_name = "Qwen/Qwen3-4B-Instruct-2507"     # Alibaba の Qwen チーム、Apache 2.0
+llm_tok = AutoTokenizer.from_pretrained(llm_name)
+llm = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.float16, device_map="cuda").eval()
+
+MEANING = {"足を洗う": ("悪い仕事や生活をやめる", "足を水などで洗う"), "骨が折れる": ("苦労する、手間がかかる", "体などの骨が折れる"),
+           "顔を出す": ("集まりや場所を訪れる、参加する", "物の陰や中から顔をのぞかせる"), "手を焼く": ("扱いに困る", "手をやけどする"),
+           "について": ("「〜に関して」という意味の機能表現", "「付く」の本来の意味 (くっつく、従う、席に着くなど)")}
+A, B = (llm_tok.encode(x, add_special_tokens=False)[0] for x in ("A", "B"))
+
+@torch.no_grad()
+def llm_predict(i, shots=()):
+    n, _, _, s, _, _ = examples[i]
+    idiom, literal = MEANING[n]
+    ask = lambda s: f"次の文の「{n}」はどちらの意味ですか。A か B の 1 文字で答えてください。\n文: {s}\nA: {idiom}\nB: {literal}"
+    msgs = []
+    for label, t in shots:
+        msgs += [{"role": "user", "content": ask(t)}, {"role": "assistant", "content": "A" if label else "B"}]
+    msgs.append({"role": "user", "content": ask(s)})
+    enc = llm_tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True).to("cuda")
+    logits = llm(**enc).logits[0, -1]
+    return int(logits[A] > logits[B])
+
+results["LLM (例なし)"] = evaluate(lambda i: llm_predict(i))
+results["LLM (少数の例 8 個)"] = evaluate(lambda i: llm_predict(i, DATA[examples[i][0]]["few"]))
+print("例なしの LLM の誤り:", [(examples[i][3], examples[i][2]) for i in range(len(examples))
+                           if examples[i][1] == "test" and llm_predict(i) != examples[i][2]])
+import pandas as pd
+(pd.DataFrame(results).T * 100).round().astype(int)        # 手作りの評価用 40 文の正解率 (%)
+```
+
+- 第 1 段階は辞書と照合するだけなので、字義どおりの用法も候補になる（「骨は折れていなかった」も「骨が折れる」として見つかる）。助詞の入れ替わり（は・も）と、間に挟まる語（「足をきれいに洗う」）を許すかどうかで、見落としと拾いすぎの釣り合いが変わる。機能表現は語を挟まないので間を空けない。ここで作った 80 文は、すべて候補として見つかった。
+- 第 2 段階は、語義曖昧性解消と同じ考え方で、表現の部分の文脈化ベクトルを分類する。手作りの評価用 40 文（表現ごとに慣用 4・字義 4）では、表現ごとに 8 例で学習しただけで全問正解した。ただし手作りの文は典型的すぎて易しい。同じ 8 例で学習した分類器を OpenMWE の Web の用例 200 例で測ると、「足を洗う」96%、「骨が折れる」95%、「顔を出す」82% に下がる。評価は実際の文章に近いデータでも行う。
+- 「顔を出す」は、OpenMWE の例を 1 クラス 64 例に増やしても 83% にとどまった。OpenMWE では「集まりに顔を出す」（訪れる）だけでなく「悪癖が顔を出す」「土から顔を出す（作物）」のような比喩も慣用とされ、一方で「キノコが顔を出していた」は字義とされている。慣用と字義の境界がはっきりしない表現ほど難しい。
+- 評価する表現を含まない 63 個の慣用句（7,560 例）で学習した「慣用か字義か」の分類器も、手作りの評価用で 95%、学習していない慣用句の OpenMWE の用例で 82〜96% だった。慣用的な用法に共通する文脈の特徴があるので、例のない表現にもある程度使える。誤った 2 文は「介護の仕事では、お年寄りの足を洗う」（文中の「仕事」に引かれたらしい）と「日本の歴史について」で、機能表現は学習データに入っていないことも効いている。
+- 小さな LLM (Qwen3-4B-Instruct-2507) に 2 つの意味から選ばせると、例なしで 92%、8 例を見せて 95% だった。例なしでは「夜の仕事から足を洗いたい」を字義と、「有名な先生について習った」（付き従う）を機能表現と、「手を焼いた跡」を慣用と誤った。学習データを用意しなくてよい代わりに、表現ごとに 2 つの意味の説明を書く必要がある。
+- 検証の環境では、モデルを読み込み済みの状態で全体が約 1 分。Colab では BERT（約 0.4GB）と LLM（約 8GB） のダウンロードに数分かかる。LLM の比較のセルだけ GPU を多く使う（float16 で T4 に収まる）。
+- 語の意味を文脈から決める点で、前の「多義語の語義を文脈から判定する（語義曖昧性解消）」「文脈化ベクトルをクラスタリングして語義を自動で分ける（語義推定）」と同じ問題である。慣用句の辞書そのものを作るには、コーパス統計の章の「よく使われる言い回し（コロケーション）を抽出する」のように、よく一緒に現れる語の組を集めて候補にする方法がある（ただしコロケーションには「雨が降る」のように字義どおりのものも多い）。
+- 日本語の慣用句コーパス OpenMWE（Hashimoto and Kawahara, 2008）は、慣用句 146 個の約 10 万例に慣用・字義のラベルを付けたもの。文字コードは EUC-JP。利用条件は BSD 3 条項に似た再配布可のライセンスで、Web の文を集めたものなので削除の依頼があれば利用者にも削除を求めるとされている。tohoku-nlp/bert-base-japanese-v3 と Qwen3-4B-Instruct-2507 は Apache 2.0、fugashi は MIT、unidic-lite はパッケージが MIT で、同梱の UniDic は GPL、LGPL、BSD から選べる。
+
 ## 時代別のコーパスを作って頻度が変わった単語を調べる {diachronic_corpus}
 
 書かれた時代の違うテキストを集めて、時代によって使われる頻度が大きく変わった単語を調べたい。
@@ -1109,256 +1362,3 @@ for w in ["plane_nn", "tip_vb", "chairman_nn"]:
 - 「頻度が変わった語は意味も変わった」という単純なベースラインと必ず比べる。これを大きく超えられない手法は、意味ではなく頻度を見ているだけかもしれない。
 - このタスクでは、単語ベクトルを位置合わせする古典的な方法が、文脈化ベクトルを使う方法と同等以上の成績を出したことが知られている。新しい手法が常に良いとは限らない。
 - 日本語には、日本語歴史コーパスなどを使った評価データ (JaSemChange) がある。コーパスの利用申請が必要。
-
-## 慣用句・機能表現を見つけて字義どおりの用法と区別する {idiom_detection gpu}
-
-「足を洗う」が「悪い仕事をやめる」（慣用）なのか「足を水で洗う」（字義）なのかを、文脈から判定したい。形態素解析の原形の並びで候補を見つける段階と、文脈から慣用か字義かを決める段階に分ける。
-
-```python
-!pip install -q fugashi unidic-lite
-```
-
-```python
-!git clone -q --depth 1 https://github.com/nlp-waseda/OpenMWE
-```
-
-```python
-from fugashi import Tagger
-
-tagger = Tagger()
-
-# 複単語表現の辞書: 原形 (または表層) の並び。助詞は「は」「も」に変わることがあるので候補を並べる
-PATTERNS = {
-    "足を洗う": ([{"足"}, {"を", "は", "も"}, {"洗う"}], 2),     # 2 = 要素の間に挟まってよい語の数
-    "骨が折れる": ([{"骨"}, {"が", "は", "も"}, {"折れる"}], 2),
-    "顔を出す": ([{"顔"}, {"を", "は", "も"}, {"出す"}], 2),
-    "手を焼く": ([{"手"}, {"を", "は", "も"}, {"焼く"}], 2),
-    "腹が立つ": ([{"腹"}, {"が", "は", "も"}, {"立つ"}], 1),
-    "について": ([{"に"}, {"つく", "付く"}, {"て"}], 0),          # 機能表現は語を挟まない
-    "に対して": ([{"に"}, {"対する"}, {"て"}], 0),
-    "にもかかわらず": ([{"に"}, {"も"}, {"関わる", "拘る"}, {"ず"}], 0),
-}
-
-def find_mwes(sentence):
-    """文中の候補を (表現, 開始文字位置, 終了文字位置) のリストで返す"""
-    words, pos = [], 0
-    for w in tagger(sentence):
-        start = sentence.index(w.surface, pos); pos = start + len(w.surface)
-        words.append((w.surface, w.feature.lemma, start, pos))
-    hits = []
-    for name, (pattern, gap) in PATTERNS.items():
-        for i, w in enumerate(words):
-            if not ({w[0], w[1]} & pattern[0]):
-                continue
-            j, ok = i, True
-            for p in pattern[1:]:                           # 次の要素を gap 語以内で探す
-                nxt = next((k for k in range(j + 1, min(j + 2 + gap, len(words))) if {words[k][0], words[k][1]} & p), None)
-                if nxt is None:
-                    ok = False; break
-                j = nxt
-            if ok:
-                hits.append((name, words[i][2], words[j][3]))
-    return hits
-
-for s in ["彼は三年前に裏の仕事から足を洗った。", "砂浜を歩いたあと、水道で足をきれいに洗った。", "彼の態度には本当に腹が立つ。",
-          "雨にもかかわらず大勢が集まった。", "質問に対して丁寧に答えた。", "泥が靴について取れない。",
-          "足が痛くて、手を洗った。", "骨は折れていなかった。"]:
-    print(s, "→", [(n, s[a:b]) for n, a, b in find_mwes(s)])
-```
-
-```python
-# 手作りのデータ: 表現ごとに、少数の例 (慣用 4 + 字義 4) と、評価用 (慣用 4 + 字義 4)。ラベル 1 = 慣用・機能表現、0 = 字義どおり
-DATA = {
-    "足を洗う": {
-        "few": [(1, "彼は二十歳で暴走族から足を洗った。"), (1, "ギャンブルからはもう足を洗ったつもりだ。"), (1, "裏の商売から足を洗って、田舎で農業を始めた。"), (1, "詐欺グループから足を洗うのは簡単ではない。"),
-                (0, "泥だらけになったので、玄関の前で足を洗った。"), (0, "海から上がって、シャワーで足を洗う。"), (0, "寝る前に石けんで足を洗う習慣がある。"), (0, "子どもの足を洗ってからタオルで拭いた。")],
-        "test": [(1, "組を抜けて足を洗ってから、もう十年になる。"), (1, "夜の仕事から足を洗いたいと相談された。"), (1, "盗みから足を洗った男が、更生施設で働いている。"), (1, "彼女は芸能界から足を洗って会社員になった。"),
-                 (0, "畑仕事のあとは、井戸の水で足を洗う。"), (0, "温泉の入口に足を洗う場所がある。"), (0, "砂浜を歩いたあと、水道で足をきれいに洗った。"), (0, "介護の仕事では、お年寄りの足を洗うこともある。")]},
-    "骨が折れる": {
-        "few": [(1, "大量の書類を整理するのは骨が折れる。"), (1, "子ども三人の世話はなかなか骨が折れる。"), (1, "頑固な父を説得するのに骨が折れた。"), (1, "古い資料を探すのは骨が折れる作業だ。"),
-                (0, "階段から落ちて、腕の骨が折れた。"), (0, "スキーで転んで足の骨が折れた。"), (0, "骨が折れていないか、医者に診てもらった。"), (0, "年を取ると、少し転んだだけで骨が折れることがある。")],
-        "test": [(1, "英語の論文を一人で翻訳するのは骨が折れた。"), (1, "この山道を自転車で登るのは骨が折れる。"), (1, "新しい制度に慣れるまでが骨が折れる。"), (1, "全員の予定を合わせるのは本当に骨が折れる。"),
-                 (0, "交通事故で首の骨が折れる重傷を負った。"), (0, "転倒した選手は、手首の骨が折れていた。"), (0, "傘の骨が折れて使えなくなった。"), (0, "犬が骨をかじっていたら、骨が折れて二つになった。")]},
-    "顔を出す": {
-        "few": [(1, "久しぶりに同窓会に顔を出した。"), (1, "忙しくても、週に一度は実家に顔を出すようにしている。"), (1, "打ち上げに少しだけ顔を出してから帰った。"), (1, "社長が珍しく現場に顔を出した。"),
-                (0, "窓から顔を出して外の様子をうかがった。"), (0, "亀が甲羅から顔を出した。"), (0, "布団から顔を出すと、部屋は寒かった。"), (0, "カーテンの隙間から子どもが顔を出した。")],
-        "test": [(1, "時間があれば、明日の勉強会にも顔を出してください。"), (1, "彼は最近、サークルに全く顔を出さない。"), (1, "取引先の新年会に顔を出す予定だ。"), (1, "退院した祖父が久しぶりに町内会に顔を出した。"),
-                 (0, "車の窓から顔を出すのは危ない。"), (0, "モグラが土の中から顔を出した。"), (0, "ドアの陰から猫が顔を出した。"), (0, "水面から顔を出して大きく息を吸った。")]},
-    "手を焼く": {
-        "few": [(1, "息子のいたずらに手を焼いている。"), (1, "新しいシステムの不具合に手を焼いた。"), (1, "頑固な客の対応に手を焼く。"), (1, "雑草の多さには毎年手を焼く。"),
-                (0, "熱いフライパンに触って手を焼いてしまった。"), (0, "たき火で手を焼かないように気をつけて。"), (0, "アイロンで手を焼いて、水ぶくれができた。"), (0, "花火の火で手を焼いた。")],
-        "test": [(1, "反抗期の娘に手を焼いている。"), (1, "野良猫のいたずらに近所中が手を焼いている。"), (1, "このチームは相手の守備に手を焼いた。"), (1, "方言が強くて、聞き取りに手を焼いた。"),
-                 (0, "オーブンの天板で手を焼いて、病院に行った。"), (0, "炭火で手を焼かないよう、長いトングを使う。"), (0, "やけどの手当てをしたが、手を焼いた跡が残った。"), (0, "鍋の取っ手が熱くて、うっかり手を焼いた。")]},
-    "について": {
-        "few": [(1, "環境問題について議論した。"), (1, "この点について質問があります。"), (1, "将来について考える時間がほしい。"), (1, "事故の原因について調べている。"),
-                (0, "ガイドの後について歩いた。"), (0, "泥が靴について取れない。"), (0, "米粒が頬について、みんなに笑われた。"), (0, "名前を呼ばれるまで席について待った。")],
-        "test": [(1, "新製品の価格について発表があった。"), (1, "日本の歴史について本を書いた。"), (1, "彼の発言について、どう思いますか。"), (1, "安全対策について説明を受けた。"),
-                 (0, "列の最後について順番を待った。"), (0, "猫の毛が服について困る。"), (0, "有名な先生について、三年間ピアノを習った。"), (0, "全員が席について、会議が始まった。")]},
-}
-
-# 第 1 段階: 原形の並びで候補を見つける。対象の表現が見つかった位置を、次の段階で使う
-examples = []                                               # (表現, 分割, ラベル, 文, 開始, 終了)
-for name, d in DATA.items():
-    for split in ["few", "test"]:
-        for label, s in d[split]:
-            span = [(a, b) for n, a, b in find_mwes(s) if n == name]
-            assert span, f"見つからない: {s}"
-            examples.append((name, split, label, s, *span[0]))
-print(len(examples), "文で候補を検出できた")
-```
-
-```python
-import numpy as np
-import torch
-from transformers import AutoModel, AutoTokenizer
-
-name = "tohoku-nlp/bert-base-japanese-v3"
-tokenizer = AutoTokenizer.from_pretrained(name)
-bert = AutoModel.from_pretrained(name).eval().to("cuda")
-
-@torch.no_grad()
-def span_vectors(items, batch_size=64):
-    """(文, 開始, 終了) のリストから、表現の部分のトークンの文脈化ベクトル (最後の 4 層の平均) を返す"""
-    out = []
-    for i in range(0, len(items), batch_size):
-        ids, spans = [], []
-        for s, a, b in items[i:i + batch_size]:
-            left, mid, right = (tokenizer.encode(x, add_special_tokens=False) for x in (s[max(0, a - 60):a], s[a:b], s[b:b + 60]))
-            ids.append([tokenizer.cls_token_id] + left + mid + right + [tokenizer.sep_token_id])
-            spans.append((1 + len(left), 1 + len(left) + len(mid)))
-        n = max(map(len, ids))
-        input_ids = torch.tensor([x + [tokenizer.pad_token_id] * (n - len(x)) for x in ids], device="cuda")
-        mask = (input_ids != tokenizer.pad_token_id).long()
-        hidden = torch.stack(bert(input_ids=input_ids, attention_mask=mask, output_hidden_states=True).hidden_states[-4:]).mean(0)
-        out += [hidden[k, a:b].mean(0).cpu().numpy() for k, (a, b) in enumerate(spans)]
-    X = np.stack(out)
-    return X / np.linalg.norm(X, axis=1, keepdims=True)
-
-X = span_vectors([(s, a, b) for _, _, _, s, a, b in examples])
-print(X.shape)
-```
-
-```python
-from sklearn.linear_model import LogisticRegression
-
-names = list(DATA)
-def evaluate(predict):
-    """評価用の 40 文で、表現ごとと全体の正解率を出す"""
-    acc = {}
-    for n in names:
-        idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "test"]
-        acc[n] = np.mean([predict(i) == examples[i][2] for i in idx])
-    acc["全体"] = np.mean(list(acc.values()))
-    return acc
-
-# 第 2 段階 (1): 表現ごとに、少数の例 (慣用 4 + 字義 4) でロジスティック回帰を学習する
-few_shot = {}
-for n in names:
-    idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "few"]
-    few_shot[n] = LogisticRegression(C=10, max_iter=1000).fit(X[idx], [examples[i][2] for i in idx])
-results = {"常に慣用 (ベースライン)": evaluate(lambda i: 1),
-           "BERT + 少数の例 (表現ごと)": evaluate(lambda i: few_shot[examples[i][0]].predict(X[i:i + 1])[0])}
-for k, v in results.items():
-    print(f"{k:24}", " ".join(f"{n} {a:.0%}" for n, a in v.items()))
-```
-
-```python
-# 公開の慣用句コーパス OpenMWE: 慣用句 146 個の用例に、慣用 (I) か字義 (L) かのラベルが付いている
-import glob, random, re
-
-def load_openmwe(path, n_per_label=None, seed=0):
-    rows = {"I": [], "L": []}
-    for line in open(path, encoding="euc-jp", errors="replace"):
-        label, _, lemma, text = line.rstrip("\n").split(" ", 3)
-        if "<" not in text or ">" not in text:
-            continue
-        a, b = text.index("<"), text.rindex(">")
-        clean = text[:a] + re.sub("[<>]", "", text[a:b + 1]) + text[b + 1:].replace("<", "").replace(">", "")
-        rows[label].append((lemma, int(label == "I"), clean, a, a + len(re.sub("[<>]", "", text[a:b + 1]))))
-    random.Random(seed).shuffle(rows["I"]); random.Random(seed).shuffle(rows["L"])
-    return rows["I"][:n_per_label] + rows["L"][:n_per_label]
-
-corpus = {}
-for path in sorted(glob.glob("OpenMWE/D/*")):
-    rows = load_openmwe(path)
-    if sum(r[1] for r in rows) >= 100 and sum(1 - r[1] for r in rows) >= 100:   # 慣用・字義とも 100 例以上ある慣用句
-        corpus[rows[0][0]] = rows
-print(len(corpus), "個の慣用句。例:", list(corpus)[:8])
-print([n for n in names if n in corpus], "は OpenMWE にもある")
-```
-
-```python
-# 第 2 段階 (2): OpenMWE の多数の例で学習する
-# (a) 同じ慣用句の例を増やすと、どこまで上がるか (OpenMWE から取り分けた 200 例と、手作りの評価用で測る)
-for n in [n for n in names if n in corpus]:
-    rows = corpus[n]
-    I, L = [r for r in rows if r[1] == 1], [r for r in rows if r[1] == 0]
-    held = I[:100] + L[:100]
-    Xh = span_vectors([r[2:] for r in held]); yh = [r[1] for r in held]
-    line = [f"手作りの 8 例: OpenMWE {few_shot[n].score(Xh, yh):.0%}"]
-    for k in [4, 16, 64]:
-        train = I[100:100 + k] + L[100:100 + k]
-        clf = LogisticRegression(C=10, max_iter=1000).fit(span_vectors([r[2:] for r in train]), [r[1] for r in train])
-        idx = [i for i, e in enumerate(examples) if e[0] == n and e[1] == "test"]
-        line.append(f"k={k:2}: OpenMWE {clf.score(Xh, yh):.0%} 手作り {clf.score(X[idx], [examples[i][2] for i in idx]):.0%}")
-    print(f"{n}:", " / ".join(line))
-```
-
-```python
-# (b) 評価する 5 表現以外の慣用句だけで、表現によらない「慣用か字義か」の分類器を作る
-train = [r for n, rows in corpus.items() if n not in names for r in (
-    [x for x in rows if x[1] == 1][:60] + [x for x in rows if x[1] == 0][:60])]
-clf_all = LogisticRegression(C=1, max_iter=2000).fit(span_vectors([r[2:] for r in train]), [r[1] for r in train])
-print(len(train), "例 (", len(corpus) - sum(n in corpus for n in names), "個の慣用句) で学習")
-for n in [n for n in names if n in corpus]:
-    held = [r for r in corpus[n] if r[1] == 1][:100] + [r for r in corpus[n] if r[1] == 0][:100]
-    print(f"{n}: OpenMWE の 200 例で {clf_all.score(span_vectors([r[2:] for r in held]), [r[1] for r in held]):.0%}")
-results["BERT + 他の慣用句で学習"] = evaluate(lambda i: clf_all.predict(X[i:i + 1])[0])
-print("手作りの評価用:", " ".join(f"{n} {a:.0%}" for n, a in results["BERT + 他の慣用句で学習"].items()))
-print("誤り:", [(examples[i][3], examples[i][2]) for i in range(len(examples))
-             if examples[i][1] == "test" and clf_all.predict(X[i:i + 1])[0] != examples[i][2]])
-```
-
-```python
-# 第 2 段階 (3): 小さな LLM に、2 つの意味のどちらかを選ばせる (A と B のトークンの確率を比べる)
-from transformers import AutoModelForCausalLM
-
-del bert; torch.cuda.empty_cache()
-llm_name = "Qwen/Qwen3-4B-Instruct-2507"     # Alibaba の Qwen チーム、Apache 2.0
-llm_tok = AutoTokenizer.from_pretrained(llm_name)
-llm = AutoModelForCausalLM.from_pretrained(llm_name, torch_dtype=torch.float16, device_map="cuda").eval()
-
-MEANING = {"足を洗う": ("悪い仕事や生活をやめる", "足を水などで洗う"), "骨が折れる": ("苦労する、手間がかかる", "体などの骨が折れる"),
-           "顔を出す": ("集まりや場所を訪れる、参加する", "物の陰や中から顔をのぞかせる"), "手を焼く": ("扱いに困る", "手をやけどする"),
-           "について": ("「〜に関して」という意味の機能表現", "「付く」の本来の意味 (くっつく、従う、席に着くなど)")}
-A, B = (llm_tok.encode(x, add_special_tokens=False)[0] for x in ("A", "B"))
-
-@torch.no_grad()
-def llm_predict(i, shots=()):
-    n, _, _, s, _, _ = examples[i]
-    idiom, literal = MEANING[n]
-    ask = lambda s: f"次の文の「{n}」はどちらの意味ですか。A か B の 1 文字で答えてください。\n文: {s}\nA: {idiom}\nB: {literal}"
-    msgs = []
-    for label, t in shots:
-        msgs += [{"role": "user", "content": ask(t)}, {"role": "assistant", "content": "A" if label else "B"}]
-    msgs.append({"role": "user", "content": ask(s)})
-    enc = llm_tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True).to("cuda")
-    logits = llm(**enc).logits[0, -1]
-    return int(logits[A] > logits[B])
-
-results["LLM (例なし)"] = evaluate(lambda i: llm_predict(i))
-results["LLM (少数の例 8 個)"] = evaluate(lambda i: llm_predict(i, DATA[examples[i][0]]["few"]))
-print("例なしの LLM の誤り:", [(examples[i][3], examples[i][2]) for i in range(len(examples))
-                           if examples[i][1] == "test" and llm_predict(i) != examples[i][2]])
-import pandas as pd
-(pd.DataFrame(results).T * 100).round().astype(int)        # 手作りの評価用 40 文の正解率 (%)
-```
-
-- 第 1 段階は辞書と照合するだけなので、字義どおりの用法も候補になる（「骨は折れていなかった」も「骨が折れる」として見つかる）。助詞の入れ替わり（は・も）と、間に挟まる語（「足をきれいに洗う」）を許すかどうかで、見落としと拾いすぎの釣り合いが変わる。機能表現は語を挟まないので間を空けない。ここで作った 80 文は、すべて候補として見つかった。
-- 第 2 段階は、語義曖昧性解消と同じ考え方で、表現の部分の文脈化ベクトルを分類する。手作りの評価用 40 文（表現ごとに慣用 4・字義 4）では、表現ごとに 8 例で学習しただけで全問正解した。ただし手作りの文は典型的すぎて易しい。同じ 8 例で学習した分類器を OpenMWE の Web の用例 200 例で測ると、「足を洗う」96%、「骨が折れる」95%、「顔を出す」82% に下がる。評価は実際の文章に近いデータでも行う。
-- 「顔を出す」は、OpenMWE の例を 1 クラス 64 例に増やしても 83% にとどまった。OpenMWE では「集まりに顔を出す」（訪れる）だけでなく「悪癖が顔を出す」「土から顔を出す（作物）」のような比喩も慣用とされ、一方で「キノコが顔を出していた」は字義とされている。慣用と字義の境界がはっきりしない表現ほど難しい。
-- 評価する表現を含まない 63 個の慣用句（7,560 例）で学習した「慣用か字義か」の分類器も、手作りの評価用で 95%、学習していない慣用句の OpenMWE の用例で 82〜96% だった。慣用的な用法に共通する文脈の特徴があるので、例のない表現にもある程度使える。誤った 2 文は「介護の仕事では、お年寄りの足を洗う」（文中の「仕事」に引かれたらしい）と「日本の歴史について」で、機能表現は学習データに入っていないことも効いている。
-- 小さな LLM (Qwen3-4B-Instruct-2507) に 2 つの意味から選ばせると、例なしで 92%、8 例を見せて 95% だった。例なしでは「夜の仕事から足を洗いたい」を字義と、「有名な先生について習った」（付き従う）を機能表現と、「手を焼いた跡」を慣用と誤った。学習データを用意しなくてよい代わりに、表現ごとに 2 つの意味の説明を書く必要がある。
-- 検証の環境では、モデルを読み込み済みの状態で全体が約 1 分。Colab では BERT（約 0.4GB）と LLM（約 8GB） のダウンロードに数分かかる。LLM の比較のセルだけ GPU を多く使う（float16 で T4 に収まる）。
-- 語の意味を文脈から決める点で、前の「多義語の語義を文脈から判定する（語義曖昧性解消）」「文脈化ベクトルをクラスタリングして語義を自動で分ける（語義推定）」と同じ問題である。慣用句の辞書そのものを作るには、コーパス統計の章の「よく使われる言い回し（コロケーション）を抽出する」のように、よく一緒に現れる語の組を集めて候補にする方法がある（ただしコロケーションには「雨が降る」のように字義どおりのものも多い）。
-- 日本語の慣用句コーパス OpenMWE（Hashimoto and Kawahara, 2008）は、慣用句 146 個の約 10 万例に慣用・字義のラベルを付けたもの。文字コードは EUC-JP。利用条件は BSD 3 条項に似た再配布可のライセンスで、Web の文を集めたものなので削除の依頼があれば利用者にも削除を求めるとされている。tohoku-nlp/bert-base-japanese-v3 と Qwen3-4B-Instruct-2507 は Apache 2.0、fugashi は MIT、unidic-lite はパッケージが MIT で、同梱の UniDic は GPL、LGPL、BSD から選べる。
