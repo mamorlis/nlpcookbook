@@ -12,10 +12,12 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures as cf
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -419,8 +421,176 @@ def _scan_quoted(text: str, start: int) -> tuple[str | None, int]:
     return None, len(text)
 
 
+NON_COLAB_MODULES = {
+    "fugashi", "unidic", "unidic_lite", "ipadic", "mecab", "MeCab",
+    "sudachipy", "sudachidict_core", "janome", "pyknp", "kytea", "Mykytea",
+    "pyopenjtalk", "neologdn", "jaconv", "mojimoji", "zenhan", "ftfy",
+    "trafilatura", "fitz", "docx", "datasketch", "evaluate",
+    "sacrebleu", "rouge_score", "bert_score", "comet", "sklearn_crfsuite",
+    "seqeval", "rank_bm25", "faiss", "qdrant_client", "chromadb", "bm25s",
+    "umap", "hdbscan", "bertopic", "optuna", "cleanlab", "krippendorff",
+    "matplotlib_fontja", "errant", "spacy_udpipe", "stanza", "ginza", "kwja",
+    "ja_timex", "symspellpy", "spellchecker", "Levenshtein", "rapidfuzz",
+    "vllm", "bitsandbytes", "outlines", "trl", "gradio", "whisper",
+    "faster_whisper", "gtts", "edge_tts", "anthropic", "genai", "tiktoken",
+    "llama_cpp", "tuned_lens", "nnsight", "pycocoevalcap", "open_clip",
+    "datatrove", "kenlm", "CaboCha", "loguru", "rhoknp", "pendulum",
+    "marisa_trie",
+}
+
+PIP_PROVIDERS: dict[str, set[str]] = {
+    "fitz": {"pymupdf"},
+    "docx": {"python-docx"},
+    "MeCab": {"mecab-python3", "fugashi"},
+    "mecab": {"mecab-python3", "fugashi"},
+    "unidic_lite": {"unidic-lite", "transformers"},
+    "comet": {"unbabel-comet"},
+    "spellchecker": {"pyspellchecker"},
+    "Mykytea": {"kytea", "mykytea"},
+    "Levenshtein": {"python-levenshtein", "levenshtein"},
+    "genai": {"google-genai"},
+    "whisper": {"openai-whisper"},
+    "open_clip": {"open-clip-torch"},
+    "faiss": {"faiss-cpu", "faiss-gpu"},
+    "umap": {"umap-learn"},
+    "llama_cpp": {"llama-cpp-python"},
+    # 推移的依存
+    "rhoknp": {"kwja"},
+    "pendulum": {"ja-timex"},
+    "loguru": {"datatrove"},
+    "sacrebleu": {"unbabel-comet"},
+}
+
+
+def _join_continuations(lines: list[str]) -> list[str]:
+    """バックスラッシュで続く複数行を 1 行につなぐ。"""
+    joined: list[str] = []
+    buf = ""
+    for line in lines:
+        if buf:
+            buf += " " + line.lstrip()
+        else:
+            buf = line
+        if buf.endswith("\\"):
+            buf = buf[:-1]
+        else:
+            joined.append(buf)
+            buf = ""
+    if buf:
+        joined.append(buf)
+    return joined
+
+
+def _strip_magic_lines(src: str) -> str:
+    """! / % で始まるシェル・マジック行（複数行継続を含む）を除いた Python コードを返す。"""
+    lines = src.splitlines()
+    if lines and lines[0].lstrip().startswith("%%"):
+        return ""
+    kept: list[str] = []
+    in_magic_cont = False
+    for line in lines:
+        stripped = line.lstrip()
+        if in_magic_cont:
+            in_magic_cont = line.rstrip().endswith("\\")
+            continue
+        if stripped.startswith(("!", "%")):
+            in_magic_cont = line.rstrip().endswith("\\")
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _extract_imports(src: str) -> tuple[set[str], set[str]]:
+    """コードセルからトップレベル import 名と sys.path に追加されたローカルモジュール候補を返す。"""
+    clean = _strip_magic_lines(src)
+    mods: set[str] = set()
+    local_dirs: set[str] = set()
+    if not clean.strip():
+        return mods, local_dirs
+    try:
+        tree = ast.parse(clean)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mods.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                mods.add(node.module.split(".")[0])
+    except SyntaxError:
+        for line in clean.splitlines():
+            m = re.match(r"^\s*import\s+(.+)", line)
+            if m:
+                for part in m.group(1).split(","):
+                    name = part.strip().split()[0].split(".")[0]
+                    if name:
+                        mods.add(name)
+            m = re.match(r"^\s*from\s+([A-Za-z0-9_]+)\s+import\b", line)
+            if m:
+                mods.add(m.group(1))
+    for m in re.finditer(r"""sys\.path\.(?:insert|append)\([^)]*?["']([^"']+)["']""", clean):
+        tail = Path(m.group(1)).name
+        if tail:
+            local_dirs.add(tail.removesuffix("-py"))
+    return mods, local_dirs
+
+
+def _extract_installed_packages(code_cells: list[str]) -> tuple[set[str], set[str]]:
+    """コードセル内の pip install と %%writefile から、インストール済みパッケージ名とローカル .py 名を集める。"""
+    installed: set[str] = set()
+    local_mods: set[str] = set()
+    skip_next_flags = {"-i", "--index-url", "--extra-index-url", "-f", "--find-links", "-r", "--requirement",
+                       "-c", "--constraint", "-e", "--editable", "-t", "--target", "--prefix", "--root"}
+    for src in code_cells:
+        lines = src.splitlines()
+        if lines and lines[0].lstrip().startswith("%%writefile"):
+            parts = lines[0].split()
+            if len(parts) >= 2 and parts[1].endswith(".py"):
+                local_mods.add(Path(parts[1]).stem)
+        for line in _join_continuations(lines):
+            s = line.strip()
+            if not s.startswith(("!", "%")):
+                continue
+            cmd = s.lstrip("!%").strip()
+            # 複合コマンドを && / ; / || で分け、直前の cd <dir> も覚えておく
+            cur_dir = ""
+            for seg in re.split(r"\s*(?:&&|\|\||;)\s*", cmd):
+                seg = seg.strip()
+                if seg.startswith("cd "):
+                    cur_dir = Path(seg[3:].strip().split()[0]).name
+                m = re.search(r"\b(?:pip3?|python3?\s+-m\s+pip)\s+install\b(.*)", seg)
+                if not m:
+                    continue
+                try:
+                    tokens = shlex.split(m.group(1), comments=True)
+                except ValueError:
+                    tokens = m.group(1).split()
+                skip = False
+                for tok in tokens:
+                    if skip:
+                        skip = False
+                        continue
+                    if tok in skip_next_flags:
+                        skip = True
+                        continue
+                    if tok.startswith("-") or tok in {">", ">>", "2>&1", "|"} or tok.startswith((">", "<")):
+                        continue
+                    if tok in {".", "./"} and cur_dir:
+                        installed.add(cur_dir.lower())
+                    elif "/" in tok or tok.endswith(".whl"):
+                        stem = Path(tok.rstrip("/")).name
+                        if stem in {"python", "python3"}:
+                            stem = Path(tok.rstrip("/")).parent.name
+                        if stem:
+                            installed.add(stem.lower())
+                    else:
+                        pkg = re.split(r"[=<>!~\[;]", tok)[0].strip().lower()
+                        if pkg:
+                            installed.add(pkg)
+                            installed.add(pkg.replace("_", "-"))
+    return installed, local_mods
+
+
 def lint_chapters(chapters: list[tuple[str, str, list[Recipe]]]) -> list[str]:
-    """章タイトル・レシピタイトルの相互参照、全角括弧、非推奨パッケージを検査する。"""
+    """章タイトル・レシピタイトルの相互参照、全角括弧、非推奨パッケージ、pip install 漏れを検査する。"""
     warnings: list[str] = []
     chap_titles = {ct for ct, _, _ in chapters}
     recipe_titles = {r.title for _, _, rs in chapters for r in rs}
@@ -434,12 +604,26 @@ def lint_chapters(chapters: list[tuple[str, str, list[Recipe]]]) -> list[str]:
         prose_targets: list[tuple[str, str]] = [(f"{chap_dir} (intro)", intro)] if intro else []
         for r in rs:
             prose_targets.append((f"{r.ident} {r.slug} (title)", r.title))
+            code_cells: list[str] = []
             for kind, src in r.cells:
                 if kind == "markdown":
                     prose_targets.append((f"{r.ident} {r.slug}", src))
                 elif kind == "code":
+                    code_cells.append(src)
                     if "japanize-matplotlib" in src or "japanize_matplotlib" in src:
                         warnings.append(f"{r.ident} {r.slug}: 非推奨の japanize-matplotlib が使われています")
+            imported: set[str] = set()
+            local_mods: set[str] = set()
+            for src in code_cells:
+                mods, dirs = _extract_imports(src)
+                imported |= mods
+                local_mods |= dirs
+            installed, write_mods = _extract_installed_packages(code_cells)
+            local_mods |= write_mods
+            for mod in sorted((imported - local_mods) & NON_COLAB_MODULES):
+                accepted = {mod.lower(), mod.lower().replace("_", "-")} | PIP_PROVIDERS.get(mod, set())
+                if not (accepted & installed):
+                    warnings.append(f"{r.ident} {r.slug}: {mod} に対応する !pip install が見つかりません")
 
         for loc, raw in prose_targets:
             prose = _sanitize_prose(raw)
