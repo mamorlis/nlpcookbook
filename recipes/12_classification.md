@@ -203,9 +203,11 @@ for word, weight in exp.as_list():
 ```
 
 ```python
-from IPython.display import HTML
+import matplotlib.pyplot as plt
 
-HTML(exp.as_html(text=False))   # 棒グラフで表示 (text=True にすると原文の色付き表示も付く)
+fig = exp.as_pyplot_figure()   # 棒グラフで表示（Colab 上で原文の色付き表示も見たいときは HTML(exp.as_html())）
+fig.tight_layout()
+plt.show()
 ```
 
 - LIME は、単語をランダムに消した文を多数作って予測の変化を調べ、局所的な線形モデルで近似する。分類器が何であっても（BERT でも）使える。

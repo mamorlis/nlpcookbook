@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,6 +409,55 @@ def _sanitize_prose(text: str) -> str:
     return re.sub(r"\]\([^)]+\)", "]", text)
 
 
+def _is_md_punct(ch: str) -> bool:
+    return unicodedata.category(ch)[0] in ("P", "S")
+
+
+def _find_broken_bold(text: str) -> list[str]:
+    """CommonMark の隣接規則により太字にならない **...** を検出する。"""
+    kept: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            kept.append(line)
+    clean = "\n".join(kept)
+    # インラインコード・数式・リンク URL の中身だけを同じ文字数で伏せ、前後の記号境界はそのまま保つ
+    masked = re.sub(r"(`+)(.+?)\1", lambda m: m.group(1) + re.sub(r"[^\n]", "a", m.group(2)) + m.group(1), clean, flags=re.DOTALL)
+    masked = re.sub(r"\$\$(.+?)\$\$", lambda m: "$$" + re.sub(r"[^\n]", "a", m.group(1)) + "$$", masked, flags=re.DOTALL)
+    masked = re.sub(r"(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)", lambda m: "$" + "a" * len(m.group(1)) + "$", masked)
+    masked = re.sub(r"\]\(([^)\n]+)\)", lambda m: "](" + "a" * len(m.group(1)) + ")", masked)
+
+    broken: list[str] = []
+    for raw_line, line in zip(clean.splitlines(), masked.splitlines()):
+        spans = list(re.finditer(r"(?<!\*)\*\*(?!\*)", line))
+        for i in range(0, len(spans) - 1, 2):
+            om, cm = spans[i], spans[i + 1]
+            o_before = line[om.start() - 1] if om.start() > 0 else ""
+            o_after = line[om.end()] if om.end() < len(line) else ""
+            c_before = line[cm.start() - 1] if cm.start() > 0 else ""
+            c_after = line[cm.end()] if cm.end() < len(line) else ""
+            open_bad = (
+                not o_after
+                or o_after.isspace()
+                or (_is_md_punct(o_after) and bool(o_before) and not o_before.isspace() and o_before != "*" and not _is_md_punct(o_before))
+            )
+            close_bad = (
+                not c_before
+                or c_before.isspace()
+                or (_is_md_punct(c_before) and bool(c_after) and not c_after.isspace() and not _is_md_punct(c_after))
+            )
+            if open_bad or close_bad:
+                ctx = raw_line[max(0, om.start() - 4) : min(len(raw_line), cm.end() + 4)]
+                broken.append(ctx)
+        if len(spans) % 2 == 1:
+            um = spans[-1]
+            broken.append(raw_line[max(0, um.start() - 4) : min(len(raw_line), um.end() + 4)])
+    return broken
+
+
 def _scan_quoted(text: str, start: int) -> tuple[str | None, int]:
     """start 位置の '「' に対応する '」' までをネストを数えて取り出す。"""
     depth = 0
@@ -590,7 +640,7 @@ def _extract_installed_packages(code_cells: list[str]) -> tuple[set[str], set[st
 
 
 def lint_chapters(chapters: list[tuple[str, str, list[Recipe]]]) -> list[str]:
-    """章タイトル・レシピタイトルの相互参照、全角括弧、非推奨パッケージ、pip install 漏れを検査する。"""
+    """章タイトル・レシピタイトルの相互参照、全角括弧、CommonMark 強調、非推奨パッケージ、pip install 漏れを検査する。"""
     warnings: list[str] = []
     chap_titles = {ct for ct, _, _ in chapters}
     recipe_titles = {r.title for _, _, rs in chapters for r in rs}
@@ -648,6 +698,8 @@ def lint_chapters(chapters: list[tuple[str, str, list[Recipe]]]) -> list[str]:
             for m in fw_space_re.finditer(prose):
                 ctx = prose[max(0, m.start() - 10) : min(len(prose), m.end() + 10)].replace("\n", " ")
                 warnings.append(f"{loc}: 全角括弧の内側に空白があります: ...{ctx}...")
+            for ctx in _find_broken_bold(raw):
+                warnings.append(f"{loc}: CommonMark で太字にならない ** があります: {ctx}")
 
     return warnings
 

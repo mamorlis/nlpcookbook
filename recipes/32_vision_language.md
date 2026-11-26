@@ -69,7 +69,7 @@ for it in items:
 import matplotlib.pyplot as plt
 import matplotlib_fontja
 
-fig, axes = plt.subplots(4, 8, figsize=(16, 8))
+fig, axes = plt.subplots(4, 8, figsize=(9, 4.5), dpi=64)
 for ax, it in zip(axes.flat, data):
     ax.imshow(it["image"]); ax.set_title(it["label"], fontsize=10); ax.axis("off")
 plt.tight_layout(); plt.show()
@@ -152,12 +152,12 @@ for d, row in zip(dogs, (sims / temperature).softmax(1)):
 queries = ["雪の積もった山で犬が立っている", "眠っている動物", "赤いスポーツカー", "地下鉄の駅のホーム", "黄色い花", "ゆで卵がのった麺料理"]
 q_emb = embed_texts(queries)
 sims = q_emb @ img_emb.T
-fig, axes = plt.subplots(len(queries), 4, figsize=(12, 2.6 * len(queries)))
+fig, axes = plt.subplots(len(queries), 4, figsize=(8.5, 1.35 * len(queries)), dpi=64)
 for row, q, s in zip(axes, queries, sims):
     top = s.topk(3)
-    row[0].text(0, 0.5, q, fontsize=12, va="center"); row[0].axis("off")
+    row[0].text(0, 0.5, q, fontsize=10, va="center"); row[0].axis("off")
     for ax, v, i in zip(row[1:], top.values.tolist(), top.indices.tolist()):
-        ax.imshow(data[i]["image"]); ax.set_title(f"{v:.3f} ({data[i]['label']})", fontsize=10); ax.axis("off")
+        ax.imshow(data[i]["image"]); ax.set_title(f"{v:.3f} ({data[i]['label']})", fontsize=9); ax.axis("off")
 plt.tight_layout(); plt.show()
 ```
 
@@ -167,7 +167,7 @@ idx = [labels.index(y) * 4 for y in labels]          # 各クラスの 1 枚目
 captions = ["雪山に立つ犬", "赤い敷物の上で寝ている猫", "枝にとまった青い鳥", "郊外の道路を走る銀色の車",
             "駅に停まっている列車", "赤い花と緑の葉", "チャーシューとメンマがのったラーメン", "カニカマのにぎり寿司"]
 S = img_emb[idx] @ embed_texts(captions).T          # 行: 画像、列: 文
-fig, axes = plt.subplots(1, 9, figsize=(16, 2.2))
+fig, axes = plt.subplots(1, 9, figsize=(9, 1.3), dpi=64)
 for ax, i in zip(axes, idx):
     ax.imshow(data[i]["image"]); ax.axis("off")
 axes[-1].axis("off")
